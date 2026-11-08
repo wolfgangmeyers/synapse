@@ -11,9 +11,9 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = resolve(ROOT, "pi-extensions/mecha-messaging/node_modules/.bin/tsx");
-const BASELINE_COMMIT = "3c9bfb53a3112d0fd4a7a42ba835dc484021de91";
-const BASELINE_INDEX_SHA256 = "b370e684928001625bcaf641f4fab2bb050defb3886835ccf1249f43a874dc00";
-const BASELINE_INDEX_BYTES = 92_707;
+const BASELINE_COMMIT = "94c99f05e957698860c59704e3acabb9647e08a5";
+const BASELINE_INDEX_SHA256 = "202d3ab4d13bfc7642748e8ae606db9e9668bc891caac602e4277b7fc669372f";
+const BASELINE_INDEX_BYTES = 74_034;
 
 // The fixture fixes all model, session, data, router, clock, and response values, so no
 // generated value is allowlisted. Goal producer epochs no longer exist in the Messaging package.
@@ -189,7 +189,7 @@ function compareExact(left: unknown, right: unknown, path = ""): void {
 
 async function archiveBaseline(destination: string): Promise<void> {
   await new Promise<void>((resolveArchive, reject) => {
-    const child = spawn("git", ["archive", "--format=tar", BASELINE_COMMIT, "pi-extensions/mecha-messaging", "pi-extensions/mecha-goal"], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("git", ["archive", "--format=tar", BASELINE_COMMIT, "pi-extensions/mecha-messaging"], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     const errors: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
