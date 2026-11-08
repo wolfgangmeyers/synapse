@@ -175,6 +175,7 @@ These work the same as for embedded workers.
 - No Claude-initiated between-turn executions are admitted.
 - **Who evaluates.** A router-side pi-go model, not the Claude worker: only the usable configured Pi router default (positive context window and authenticated constructible stream). No fallback search, new setting or Antigravity. Evaluation therefore uses no Claude usage and finishes within the existing time limit.
 - **No evaluator available.** If no evaluator model is usable, the router records a visible "goal evaluation unavailable" entry and schedules no continuation. It does not loop on NOT_DONE.
+- **Off or completed goals.** A message sent after a goal is DONE or turned off gets a normal answer that persists in the conversation. No evaluation runs for that turn. A failed turn is reported as a failure and is never evaluated, whether the goal is active or off.
 - **Mid-turn changes.** A goal changed during a turn applies at the next reliably observed response boundary after its checked result, otherwise at the next submitted input. No unsupported CLI request gate or goal-set-time receipt is implied.
 
 ### 3.11 Usage limits and failures
@@ -438,6 +439,12 @@ Fresh Claude sessions seed even when checked history is empty. A fresh session c
 - **When**: Tool/UI changes, NOT_DONE, DONE, snooze, empty turns, aborted/error/unprompted turns and cap cases run.
 - **Then**: Only applied checked eligible foreground turns evaluate. NOT_DONE continues after delay/snooze up to cap 20, DONE turns off, empty-turn breaker holds. An idle sweep racing a newly reserved verdict must not bypass its normal continuation delay; repeated sweeps must not postpone it indefinitely. A recovered reservation remains eligible through the existing restart path, and snoozed deadlines remain authoritative. Mid-turn tool changes apply only at next reliable response boundary or submitted input. No goal-set-time receipt. Aborted/error/unprompted turns do not evaluate.
 
+### Scenario: [CC-012A] Persist normal answers after a goal is off or completed
+- **User Goal**: Get a normal answer to a message sent after an applied goal is turned off or completed.
+- **Given**: A Claude worker whose applied goal is turned off or has reached DONE, so the goal is disabled.
+- **When**: The user sends a message and the turn ends normally with a final answer.
+- **Then**: The final answer persists in the conversation and survives reload. No new goal evaluation record or evaluator request is created, and no protocol violation is recorded.
+
 ### Scenario: [CC-013] Avoid looping without an evaluator
 - **User Goal**: Avoid looping without an evaluator.
 - **Given**: Default is missing, Claude, unauthenticated, zero-window or lacks a usable stream.
@@ -498,6 +505,7 @@ The full scenario rows below remain required acceptance targets, not passing cla
 | CC-010 | AC8 | `tests/e2e/claude-code-workers.spec.ts` | `partitions models and resumes with selected model` |
 | CC-011 | AC9 | `tests/e2e/claude-code-workers.spec.ts` | `preserves bounded reset context without reset loops` |
 | CC-012 | AC10 | `tests/e2e/claude-code-workers.spec.ts` | `evaluates only checked applied goals and honors loop limits` |
+| CC-012A | AC10 | `tests/e2e/claude-goal-state-user-send.spec.ts` | `applied goal turned off: next user send persists Claude response across reload`; `completed goal: next user send persists Claude response across reload` |
 | CC-013 | AC10 | `tests/e2e/claude-code-workers.spec.ts` | `reports unavailable Pi default evaluator without continuation` |
 | CC-014 | AC11 | `tests/e2e/claude-code-workers.spec.ts` | `holds limited work and resumes before queue dispatch` |
 | CC-015 | AC12 | `tests/e2e/claude-code-workers.spec.ts` | `inherits CLI config and cleans private process artifacts` |
