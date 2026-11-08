@@ -53,7 +53,7 @@ The router retains lane admission, fences, ACKs, history/publication, goals/rece
 ### Acceptable UX differences
 
 - Same sidebar, launch/conversation controls and timeline vocabulary; no requirement for identical internal event streams or pixel-identical timing.
-- Mid-turn mail remains in the durable router queue rather than joining the active execution. A direct HTTP prompt waits for the lane and is not durably accepted before reservation; cancellation or restart can drop the unaccepted request. No new queue is implied. ACK still requires the exact checked echo, not merely acceptance or a write.
+- Mid-turn mail and direct prompts that arrive during a running turn are reserved and steered into the same process's stdin (CC-019). Input not yet written stays durably queued for a later execution. A direct HTTP prompt that waits for the lane is not durably accepted before reservation; cancellation or restart can drop the unaccepted request. No new queue is implied. ACK still requires the exact checked echo, not merely acceptance or a write.
 - Claude reports usage; Pi estimates projected context. Context bars should reflect the appropriate measurement.
 - Reset may give Claude a bounded text seed rather than structured Pi messages. Scratchpad and recent history remain available.
 - Timeline updates per completed step, not per token.

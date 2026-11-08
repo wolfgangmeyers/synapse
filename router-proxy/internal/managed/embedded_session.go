@@ -487,6 +487,29 @@ func (p *embeddedPersistence) AppendCheckedMessage(ctx context.Context, message 
 	return nil
 }
 
+// appendClaudeSteerMail commits a mail input steered into a running Claude turn.
+// The attempt is bound explicitly, so equal-text messages never swap identities
+// the way byte matching in the Pi steer queue could.
+func (p *embeddedPersistence) appendClaudeSteerMail(ctx context.Context, attempt *store.EmbeddedMailAttempt, message ai.UserMessage) error {
+	body, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	entry, historyEntry, err := p.db.AppendEmbeddedSteerMailAndACK(ctx, p.binding, attempt.AttemptID, body)
+	if err != nil {
+		return err
+	}
+	p.seq, p.digest = entry.Sequence, entry.Digest
+	p.turnSeq, p.turnDigest = entry.Sequence, entry.Digest
+	p.mailAttempt = attempt.AttemptID
+	p.traceChecked(message)
+	if p.publishComplete != nil && historyEntry.ID != "" {
+		p.publishComplete(historyEntry)
+	}
+	p.projectMessage(ctx, message)
+	return p.bindExecutionUser(ctx)
+}
+
 func (p *embeddedPersistence) appendMessage(ctx context.Context, message agent.AgentMessage, checkedFirst bool) (retErr error) {
 	// Every user writer (ordinary, mail, steer and recovery notice) converges
 	// here. Bind only after checked persistence, before SDK provider/tool entry.

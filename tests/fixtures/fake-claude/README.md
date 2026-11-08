@@ -24,6 +24,7 @@ signed-in auth and a text answer per input. Root fields:
 - `refuse_model`: return correlated error for `set_model`.
 - `capabilities`: override init capabilities (default `interrupt_receipt_v1`).
 - `interrupt_output`: exactly two bounded strings emitted as distinct assistant events before an active turn acknowledges interrupt. Records their emission for deterministic termination testing.
+- `steer_mid_turn` (boolean, default off): a user line written while a turn is active is echoed immediately (with `--replay-user-messages`, unless `replay_control` is `skip`) and recorded as `{kind:"steer_echo",input_id}`, then held for the active turn. The active turn consumes held input at its next `steer` step (same process, same turn, no new `start`), recording `{kind:"steer_absorbed",turn_input_id,input_id}`. Held input not absorbed before the turn ends or is interrupted becomes ordinary pending input for a later execution. Default off keeps the queued behavior (echo only after the current `result`). This models the steering requirement; it is not evidence of real Claude CLI behavior, which spec §6 still lists as to-verify.
 
 Steps have exactly one of these keys:
 
@@ -40,6 +41,7 @@ Steps have exactly one of these keys:
 | `hang` | `true`: stall until process killed; stdin controls still read |
 | `crash` | Integer exit code (1–255), immediate exit |
 | `rate_limit` | `{resetsAt,rateLimitType?}`: rejected event, API-error assistant, error result |
+| `steer` | String: consumes all inputs steered into the active turn so far (`steer_mid_turn`), emitting one assistant text per input. No-op when none are held |
 
 Example:
 
