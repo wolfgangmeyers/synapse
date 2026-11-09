@@ -327,6 +327,7 @@ func main() {
 		log.Fatal(startupResult(stageStoreManifest, err))
 	}
 	defer logWriter.Close()
+	managed.ConfigureClaudeProtocolDiagnostics(claudeDiagnosticSink(claudeDiagnosticLogPath(options.logPath)))
 	logger := eventLogger(logWriter, os.Stderr)
 	managedLogger := managedEventLogger(logWriter, os.Stderr)
 	var managedManager *managed.Manager
