@@ -236,11 +236,11 @@ func (b *claudeCodeBoundedCapture) Write(v []byte) (int, error) {
 	return n, nil
 }
 
-// claudeCodeProcessArgs keeps root tool isolation distinct from worker defaults.
+// claudeCodeProcessArgs disables built-in tools while preserving role-specific MCP configuration.
 func claudeCodeProcessArgs(cfg ClaudeCodeProcessConfig) []string {
-	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions"}
+	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions", "--tools", ""}
 	if cfg.RootAuthority || cfg.ChildAuthority {
-		args = append(args, "--tools", "", "--strict-mcp-config")
+		args = append(args, "--strict-mcp-config")
 	}
 	if cfg.MCPConfigFile != "" {
 		args = append(args, "--mcp-config", cfg.MCPConfigFile)
