@@ -542,6 +542,8 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     // workflowHarness strips these variables: fixture isolation evidence,
     // not transport-level environment scrubbing coverage.
     expect(env).not.toHaveProperty("TMUX"); expect(env).not.toHaveProperty("TMUX_PANE"); expect(env).not.toHaveProperty("CLAUDECODE");
+    expect(start.argv).toContain("--tools");
+    expect(start.argv[start.argv.indexOf("--tools") + 1]).toBe("");
     expect(start.argv).not.toContain("--strict-mcp-config");
     expect(start.argv).not.toContain("--setting-sources");
     const grant = await f.grant(); const token = grant.headers.Authorization.replace(/^Bearer /, "");

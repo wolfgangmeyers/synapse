@@ -88,8 +88,9 @@ Follow [runtime-engine-boundary.spec.md](runtime-engine-boundary.spec.md), slice
 ## 4. Phase 2: Claude process and stream translation
 
 **`managed/claude_process.go`**
-- **Command line:** `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model <alias> --permission-mode bypassPermissions --mcp-config <file> --append-system-prompt-file <file> (--session-id <uuid> | --resume <uuid>)`.
+- **Command line:** `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model <alias> --permission-mode bypassPermissions --tools '' --mcp-config <file> --append-system-prompt-file <file> (--session-id <uuid> | --resume <uuid>)`.
   - S2 confirmed `--permission-mode bypassPermissions` on its own. Do not pass `--permission-prompt-tool`: without one, any refusal comes back as an error tool result instead of a `control_request` the engine would have to answer.
+  - Pass `--tools` with a separate empty-string argument for every managed Claude worker process, including resumed sessions and children. It suppresses built-ins, not MCP tools. Preserve existing worker user/project MCP inheritance and leave root/child strict MCP configuration unchanged.
   - `cwd` is the agent's working directory.
 - **Binary:** `MECHA_CLAUDE_BIN`, else `PATH`, else `~/.local/bin/claude`. The router is often started from a shell whose `PATH` lacks `~/.local/bin`.
 - **Environment:** `os.Environ()` minus `TMUX`, `TMUX_PANE`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` (AC12).
@@ -206,7 +207,7 @@ For Claude goal evaluation use only the currently configured router default if i
 
 ### Narrow shared MCP execution path
 
-Retain SDK-shaped checked persistence internally. Extract the existing `BeforeToolExecute` admission closure and its per-turn witness/result maps just far enough to call from Pi and Claude; do not add an effect framework or new ledger. For Claude router tools translate `mcp__mecha__<name>` to the canonical shared name in **both** persisted assistant calls and results. Keep raw identity only in transient protocol/display metadata. Built-in tools have display mapping but cannot acquire router-effect authority.
+Retain SDK-shaped checked persistence internally. Extract the existing `BeforeToolExecute` admission closure and its per-turn witness/result maps just far enough to call from Pi and Claude; do not add an effect framework or new ledger. For Claude router tools translate `mcp__mecha__<name>` to the canonical shared name in **both** persisted assistant calls and results. Keep raw identity only in transient protocol/display metadata. Historical or unexpected built-in tool events retain display mapping but cannot acquire router-effect authority; managed workers do not offer built-ins.
 
 For each call: authenticate current process/binding, serialize with its admitted turn, renew owner, bind execution user, validate original schema/arguments and workflow policy. Require `_meta["claudecode/toolUseId"]` (no JSON-RPC-ID fallback for effects); scope the ID to binding and process incarnation, use the same canonical ID in assistant producer, effect and result. Persist the actual assistant tool-call producer before admission; if HTTP beats stdout, wait for that producer with a 5 s deadline, never synthesize it. Use the current `RecordEmbeddedToolInvocation` / `StartEmbeddedToolInvocation` / domain admission / completion witness path for addressed effects. Reuse actual tool `Execute` closures and their checked result callbacks, not copied store calls. After domain completion, append the exact result via checked persistence before returning MCP success or publishing successful completion. The current Pi `AppendMessage` writes some presentation history before its checked append; leave that behavior in phase 1, but make the Claude helper return the checked result first and only then project/publish success. Reuse the store validators, not that early presentation ordering. stdout repeats of an MCP result must match the stored canonical payload and must not append/publish it twice. Failed appends cancel further work; domain-committed but unchecked results remain uncertain for replay.
 
@@ -350,7 +351,7 @@ Also test: the warning reminder fires once per epoch; the loop guard; a per-mode
 
 **Fake `claude`, `internal/testfixture/fakeclaude`**
 - It is built once per test binary in `TestMain` and selected through `MECHA_CLAUDE_BIN`.
-- It speaks stream-json from a JSON script named by `FAKE_CLAUDE_SCRIPT`. Each input's steps can be: thinking, text, `tool_use` (built-in, answered with a canned result), `mcp_call`, `interrupt-wait`, `rate_limit`, `crash`, `hang`, `compact_boundary`, `slow_start`.
+- It speaks stream-json from a JSON script named by `FAKE_CLAUDE_SCRIPT`. Each input's steps can be: thinking, text, `tool_use` (unexpected built-in event for defensive translation coverage), `mcp_call`, `interrupt-wait`, `rate_limit`, `crash`, `hang`, `compact_boundary`, `slow_start`.
 - `mcp_call` makes a **real HTTP MCP call** to the router, using `--mcp-config`. It emits `tool_use` before the call and `tool_result` after, so the endpoint, grants and tools are exercised end to end.
 - It honours `control_request` interrupt, `--replay-user-messages` echoes for submitted inputs, `--session-id` and `--resume` (a missing session fails as in S4), and `system/init` with capabilities.
 - It records PID, argv, environment and stdin: all Run/Continue calls within one foreground scope share its PID, and each subsequent execution starts a new process with a new PID. It can spawn a child and exercise successful cleanup and unconfirmed-cleanup fencing; steered inputs (CC-019) are written to the active process; other queued messages wait for the next execution.
@@ -362,7 +363,7 @@ Also test: the warning reminder fires once per epoch; the loop guard; a per-mode
 | local preflight, launch/refusal, unchanged settings/no polling, implicit default never Claude | AC1, AC2 |
 | composer message with image → Claude stdin has text and image; timeline rows, answer row, activity, context usage; no mail sent | AC3 |
 | mid-turn mail and prompts steered into the running process and ACKed at exact echo; unwritten input stays durable; direct HTTP prompt waits unaccepted before reservation and may be lost on cancellation/restart; own answer; redelivery only when definitely unsubmitted; uncertain writes held; no steer during start-up or recovery; reservation released across a reset | AC4 |
-| every router tool through MCP, de-duplication with a new timestamp, stale binding | AC5 |
+| every managed worker process receives `--tools ''`; built-ins absent, user/project MCP inheritance retained, root/child strict MCP configuration unchanged; every router tool through MCP, de-duplication with a new timestamp, stale binding | AC5 |
 | interrupt partial | AC6 |
 | restart, terminate mid-turn, router restart mid-turn, orphan sweep | AC7 |
 | model change within engine, cross-engine rejection | AC8 |

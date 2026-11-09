@@ -137,7 +137,7 @@ try:
     mcp_control = run('user-mcp-control', '', strict=False)
     started, methods = markers()
     print('MCP control tools:', sorted(mcp_control), 'started:', started, 'methods:', methods, flush=True)
-    if 'mcp__isolationcanary__canary' not in mcp_control or not started or 'tools/list' not in methods:
+    if mcp_control != {'DeferredToolPlaceholder', 'mcp__isolationcanary__canary'} or not started or 'tools/list' not in methods:
         raise RuntimeError('MCP positive control failed')
     for path in ['/tmp/mcp-started', '/tmp/mcp-methods']: os.unlink(path)
     mcp_strict = run('user-mcp-strict', '')

@@ -68,6 +68,9 @@ func TestClaudeCodeProcessSharedFixtureRoundTrip(t *testing.T) {
 	cfg := claudeTestConfig(t, `{"turns":[[{"text":"hello"},{"tool":{"id":"call-1","name":"Read","input":{"file_path":"x"},"result":"contents"}}],[{"text":"second"}]]}`)
 	cfg.MCPConfigFile = "test-mcp.json"
 	cfg.SystemPromptFile = "test-prompt.txt"
+	if err := os.WriteFile(filepath.Join(cfg.Cwd, cfg.SystemPromptFile), []byte("test prompt"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	p := claudeStart(t, cfg)
 	content := `[{"type":"text","text":"same text"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"eA=="}}]`
 	for i := 0; i < 2; i++ {
@@ -122,7 +125,7 @@ func TestClaudeCodeProcessSharedFixtureRoundTrip(t *testing.T) {
 				}
 			}
 			if len(r.Argv) > 3 {
-				want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", "sonnet", "--permission-mode", "bypassPermissions", "--mcp-config", "test-mcp.json", "--append-system-prompt-file", "test-prompt.txt", "--session-id", cfg.SessionID}
+				want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", "sonnet", "--permission-mode", "bypassPermissions", "--tools", "", "--mcp-config", "test-mcp.json", "--append-system-prompt-file", "test-prompt.txt", "--session-id", cfg.SessionID}
 				a, _ := json.Marshal(r.Argv)
 				b, _ := json.Marshal(want)
 				if string(a) != string(b) {
