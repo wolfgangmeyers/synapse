@@ -240,9 +240,9 @@ func (b *claudeCodeBoundedCapture) Write(v []byte) (int, error) {
 	return n, nil
 }
 
-// claudeCodeProcessArgs disables built-in tools while preserving role-specific MCP configuration.
+// claudeCodeProcessArgs limits built-in tools while preserving role-specific MCP configuration.
 func claudeCodeProcessArgs(cfg ClaudeCodeProcessConfig) []string {
-	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions", "--tools", ""}
+	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,Edit,Glob,Grep,ToolSearch"}
 	if cfg.RootAuthority || cfg.ChildAuthority {
 		args = append(args, "--strict-mcp-config")
 	}

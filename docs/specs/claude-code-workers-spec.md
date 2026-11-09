@@ -73,7 +73,7 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 
   It updates per completed step, not per token, which is the same as for embedded workers.
 - **Tool names** appear in the router's vocabulary:
-  - legacy Claude built-in names, if present in historical or unexpected output, map to lowercase display names only; built-ins are not offered to managed workers;
+  - Claude built-in names map to lowercase display names only and do not gain router authority;
   - router tools appear without any prefix.
 - **Answers and outgoing messages.** The turn's final answer appears in the conversation as the worker's answer. Nothing is sent to anyone automatically. A worker messages another agent only by calling `mecha_mailbox_send`. Both rules match embedded workers since commit `0fc20bb`.
 - **Activity indicator.** It shows active during a turn and idle otherwise.
@@ -86,7 +86,7 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 - A message is ACKed only after its exact correlated echo is durably checked. Definitely unsubmitted messages remain eligible after interrupt or reset. If a write started but consumption cannot be checked, hold that input unacknowledged from automatic redelivery, including across restart/reset, until existing expiry; never guess that it was unconsumed.
 
 ### 3.5 Tools
-- **Claude Code's own tools.** All managed Claude workers launch with `--tools ''`, suppressing the CLI's built-in tool set. This applies to every foreground process, including resumed sessions and children; it does not suppress MCP tools.
+- **Claude Code's own tools.** All managed Claude roles, including roots, ordinary workers and subagents, enable exactly `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `ToolSearch` as built-ins via `--tools` using these exact CLI names. This applies to every foreground process, including resumed sessions. Native tools run under the process OS authority with `--permission-mode bypassPermissions`, not router tool policy. The separate noninteractive internal evaluator remains tool-free; this foreground-worker tool list does not apply to it. Existing role-specific MCP restrictions remain unchanged; built-in calls do not acquire router tool authority.
 - **Router tools.** Offered through the router MCP endpoint, with the same arguments and results they have for embedded workers:
   - `mecha_mailbox_send`, `mecha_send_image`
   - `scratchpad`, `mecha_progress`, `mecha_reminder`
@@ -330,7 +330,7 @@ Still to verify:
 - **AC2. Launch.** Launching with a Claude Code model, with and without a worktree, starts a worker whose first turn is the initial instruction. The worker appears in the sidebar like an embedded worker.
 - **AC3. Conversation.** A composer message with an image produces a turn in which Claude receives both text and image. Its thinking, tool cards (running then finished) and final answer appear in the timeline. The activity indicator and context bar update. Nothing is mailed automatically.
 - **AC4. Mid-turn messages.** Mail and direct HTTP prompts that arrive during a foreground execution are steered into the active process after durable reservation, with no second process. Each is ACKed only on its own exact checked echo. Input that cannot be steered stays durably eligible for a later execution. Definitely unsubmitted inputs remain eligible; a write-started input without checked echo is held, including across reset/restart, not automatically replayed.
-- **AC5. Router tools.** Every managed Claude worker process uses `--tools ''` to suppress built-ins while retaining existing user/project MCP inheritance and unchanged root/child strict MCP configuration. Each v1 router tool works from a Claude Code worker with embedded-equivalent effects. A repeated call with the same tool-use ID has no second effect. A call bound to an old session is rejected.
+- **AC5. Router tools.** All managed Claude roles, including roots, workers and subagents, enable exactly `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `ToolSearch` as built-ins, including on resume; worker MCP inheritance and root/child strict MCP configuration remain unchanged. Each v1 router tool works from a Claude Code worker with embedded-equivalent effects. A repeated call with the same tool-use ID has no second effect. A call bound to an old session is rejected.
 - **AC6. Interrupt.** Interrupt ends a running turn within 5 s, keeps the partial output, and leaves the worker idle with its conversation.
 - **AC7. Restart, terminate, router restart.** Restart continues the conversation. Terminate stops a running turn and the worker's Claude process within 5 s. After a router restart mid-turn, successful recovery produces the interrupted-turn notice and permits continuation without repeating tool effects. Recovery immediately rechecks and kills identity-verified live orphan groups, confirms absence within a bounded time, and permits Claude admission. Mismatched or uncertain groups remain untouched and retained; the known affected worker is fenced while unrelated workers continue; unattributable or shared startup failures retain the global fence. Unresolved identities or bookkeeping failures remain blocked and truthfully reported; some may require operator intervention.
 - **AC8. Model change.** A Claude Code worker can switch between Claude Code models and keeps its conversation. Cross-engine switches are rejected by both the UI and the router.
@@ -381,8 +381,15 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the ne
 - **User Goal**: Converse with images and tools.
 - **Given**: An idle Claude worker and fake CLI capturing stdin.
 - **When**: Text/image mail from browser and agent/reminder sources runs through thinking, tool and final steps, including inherited MCP and router tools.
-- **Then**: Text/images arrive in order; checked consumption alone ACKs; timeline shows per-step thinking/tool outcomes/answer, activity and reported context. Nothing is automatically mailed. Every managed worker process receives `--tools ''`; built-ins are absent, inherited user/project MCP and router tools remain available, and root/child strict MCP configuration is unchanged. Unexpected raw built-in names do not gain router authority.
-- **Evidence boundary**: The current CC-003 E2E scripts an unexpected raw `Read` event and a router `scratchpad` call; it checks display translation without router authority for `Read`, not inherited MCP availability. Inherited user/project MCP availability with built-ins suppressed requires separate manual real-CLI contract evidence; the scripted `Read` is not evidence that a built-in is offered or that an inherited MCP tool was called.
+- **Then**: Text/images arrive in order; checked consumption alone ACKs; timeline shows per-step thinking/tool outcomes/answer, activity and reported context. Nothing is automatically mailed. Each managed Claude role receives the exact built-in list `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `ToolSearch`, including on resume; other built-ins are not enabled by that list. Worker MCP inheritance and root/child strict MCP configuration remain unchanged. Unexpected raw built-in names do not gain router authority.
+- **Evidence boundary**: The current CC-003 E2E scripts an unexpected raw `Read` event and a router `scratchpad` call; it checks display translation without router authority for `Read`, not inherited MCP availability. The scripted `Read` is not evidence that a built-in is offered or executed, or that an inherited MCP tool was called. The requested CLI names were confirmed against Claude 2.1.316; end-to-end verification of this revised contract remains pending.
+
+### Scenario: [CC-003A] Built-ins across Claude roles
+- **User Goal**: Let managed Claude roots, workers and subagents use the requested built-in tools.
+- **Given**: A managed Claude root, an ordinary worker and a managed Claude subagent.
+- **When**: Each starts a foreground process, and starts another after resuming its conversation.
+- **Then**: Each process enables exactly `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `ToolSearch` via `--tools`. Worker user/project MCP inheritance and root/subagent strict MCP restrictions remain unchanged. Built-ins do not gain router tool authority.
+- **Verification**: `tests/e2e/claude-default-child.spec.ts` (`delegates a policy-scoped Claude-default child and retrieves its persisted result`) captures child process arguments; `tests/e2e/claude-code-workers.spec.ts` (`CC-015 inherits normal configuration and cleans private process artifacts` and `CC-010 partitions models, accepts Claude default and rejects cross-engine mutation`) capture worker arguments on fresh and resumed processes. Root and child resume coverage remains pending; fake CLI argument capture does not prove real CLI enforcement.
 
 ### Scenario: [CC-004] Receive queued input without false receipt
 - **User Goal**: Receive queued input without false receipt.
@@ -513,6 +520,7 @@ The full scenario rows below remain required acceptance targets, not passing cla
 | CC-001 | AC1–AC2 | `tests/e2e/claude-code-workers.spec.ts` | `launches local Claude without provider settings` |
 | CC-002 | AC1 | `tests/e2e/claude-code-workers.spec.ts` | `rejects unavailable local CLI on demand` |
 | CC-003 | AC3 | `tests/e2e/claude-code-workers.spec.ts` | `renders images tool steps and final without automatic mail` |
+| CC-003A | AC5 | `tests/e2e/claude-default-child.spec.ts`; `tests/e2e/claude-code-workers.spec.ts` | Partial: `delegates a policy-scoped Claude-default child and retrieves its persisted result`; `CC-015 inherits normal configuration and cleans private process artifacts`; `CC-010 partitions models, accepts Claude default and rejects cross-engine mutation`. Root and child resume pending. |
 | CC-004 | AC4 | `tests/e2e/claude-code-workers.spec.ts` | `ACKs exact echoes and preserves unconsumed inputs` |
 | CC-005 | AC4, AC13 | `tests/e2e/claude-code-workers.spec.ts` | `releases only unconsumed reset reservations and fences late echoes` |
 | CC-006 | AC5 | `tests/e2e/claude-code-workers.spec.ts` | `executes router tools through checked witnesses` |

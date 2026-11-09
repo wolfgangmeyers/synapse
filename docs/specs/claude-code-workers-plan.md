@@ -88,9 +88,9 @@ Follow [runtime-engine-boundary.spec.md](runtime-engine-boundary.spec.md), slice
 ## 4. Phase 2: Claude process and stream translation
 
 **`managed/claude_process.go`**
-- **Command line:** `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model <alias> --permission-mode bypassPermissions --tools '' --mcp-config <file> --append-system-prompt-file <file> (--session-id <uuid> | --resume <uuid>)`.
+- **Command line:** `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model <alias> --permission-mode bypassPermissions --tools Bash,Read,Write,Edit,Glob,Grep,ToolSearch --mcp-config <file> --append-system-prompt-file <file> (--session-id <uuid> | --resume <uuid>)`.
   - S2 confirmed `--permission-mode bypassPermissions` on its own. Do not pass `--permission-prompt-tool`: without one, any refusal comes back as an error tool result instead of a `control_request` the engine would have to answer.
-  - Pass `--tools` with a separate empty-string argument for every managed Claude worker process, including resumed sessions and children. It suppresses built-ins, not MCP tools. Preserve existing worker user/project MCP inheritance and leave root/child strict MCP configuration unchanged.
+  - Pass `--tools` with the exact separate argument `Bash,Read,Write,Edit,Glob,Grep,ToolSearch` for every managed Claude foreground worker process, including roots, resumed sessions and children. These native tools run under the process OS authority with `bypassPermissions`; router tool policy does not gate them. The separate noninteractive internal evaluator remains tool-free. Preserve existing worker user/project MCP inheritance and leave root/child strict MCP configuration unchanged.
   - `cwd` is the agent's working directory.
 - **Binary:** `MECHA_CLAUDE_BIN`, else `PATH`, else `~/.local/bin/claude`. The router is often started from a shell whose `PATH` lacks `~/.local/bin`.
 - **Environment:** `os.Environ()` minus `TMUX`, `TMUX_PANE`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` (AC12).
@@ -363,7 +363,7 @@ Also test: the warning reminder fires once per epoch; the loop guard; a per-mode
 | local preflight, launch/refusal, unchanged settings/no polling, implicit default never Claude | AC1, AC2 |
 | composer message with image → Claude stdin has text and image; timeline rows, answer row, activity, context usage; no mail sent | AC3 |
 | mid-turn mail and prompts steered into the running process and ACKed at exact echo; unwritten input stays durable; direct HTTP prompt waits unaccepted before reservation and may be lost on cancellation/restart; own answer; redelivery only when definitely unsubmitted; uncertain writes held; no steer during start-up or recovery; reservation released across a reset | AC4 |
-| every managed worker process receives `--tools ''`; built-ins absent, user/project MCP inheritance retained, root/child strict MCP configuration unchanged; every router tool through MCP, de-duplication with a new timestamp, stale binding | AC5 |
+| every managed foreground worker process receives `--tools Bash,Read,Write,Edit,Glob,Grep,ToolSearch`; the separate noninteractive internal evaluator remains tool-free, user/project MCP inheritance retained, root/child strict MCP configuration unchanged; every router tool through MCP, de-duplication with a new timestamp, stale binding | AC5 |
 | interrupt partial | AC6 |
 | restart, terminate mid-turn, router restart mid-turn, orphan sweep | AC7 |
 | model change within engine, cross-engine rejection | AC8 |
