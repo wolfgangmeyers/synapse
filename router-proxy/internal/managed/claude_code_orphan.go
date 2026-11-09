@@ -312,12 +312,16 @@ func claudeCodeOrphanSync(dir string) error {
 
 // Recovery errors can contain private paths, filenames, or malformed record
 // contents. Expose only a bounded OS error category, never the raw error.
+type claudeSafeRecoveryError struct{ message string }
+
+func (e *claudeSafeRecoveryError) Error() string { return e.message }
+
 func safeClaudeRecoveryError(err error) error {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return fmt.Errorf("Claude orphan recovery failed (operating system error: %s)", errno.Error())
+		return &claudeSafeRecoveryError{message: fmt.Sprintf("Claude orphan recovery failed (operating system error: %s)", errno.Error())}
 	}
-	return errors.New("Claude orphan recovery failed (unsafe or unavailable recovery records)")
+	return &claudeSafeRecoveryError{message: "Claude orphan recovery failed (unsafe or unavailable recovery records)"}
 }
 
 // RecoverClaudeCodeOrphans must be called once during router startup, before
@@ -342,9 +346,9 @@ func (p *ClaudeCodeProcess) forgetClaudeOrphanConfirmed() {
 	}
 	p.orphanCleanupOnce.Do(func() {
 		if err := removeClaudeCodeOrphan(p.orphanPath, p.orphanIdentity); err != nil {
-			p.orphanCleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, err)
+			p.orphanCleanupErr = err
 			if p.onUnconfirmedStop != nil {
-				p.onUnconfirmedStop()
+				p.onUnconfirmedStop(err)
 			}
 		}
 	})
@@ -397,8 +401,8 @@ func confirmClaudeCodeGroupAbsent(ctx context.Context, probe func() ProcessProbe
 	}
 }
 
-func (cfg ClaudeCodeProcessConfig) blockUnconfirmedClaudeStop() {
+func (cfg ClaudeCodeProcessConfig) blockUnconfirmedClaudeStop(err error) {
 	if cfg.OnUnconfirmedStop != nil {
-		cfg.OnUnconfirmedStop()
+		cfg.OnUnconfirmedStop(err)
 	}
 }

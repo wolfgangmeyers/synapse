@@ -358,8 +358,8 @@ func TestClaudeCodeOrphanUnconfirmedBlocksPoolWithUnwritableRoot(t *testing.T) {
 	require.NoError(t, os.WriteFile(root, []byte("unwritable child path"), 0600))
 	pool := &claudeCodeProcessPool{}
 	cfg := ClaudeCodeProcessConfig{OrphanRoot: root}
-	cfg.OnUnconfirmedStop = func() { pool.mu.Lock(); pool.closed = true; pool.mu.Unlock() }
-	cfg.blockUnconfirmedClaudeStop()
+	cfg.OnUnconfirmedStop = func(error) { pool.mu.Lock(); pool.closed = true; pool.mu.Unlock() }
+	cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
 	_, err := pool.acquire(context.Background(), store.EmbeddedBinding{}, cfg, nil)
 	require.ErrorContains(t, err, "pool closed")
 }
@@ -370,8 +370,8 @@ func TestClaudeCodeOrphanRecoveryHasNoPermanentPoison(t *testing.T) {
 	path, err := persistClaudeCodeOrphan(root, cmd.Process.Pid, "unconfirmed-old-router")
 	require.NoError(t, err)
 	pool := &claudeCodeProcessPool{}
-	cfg := ClaudeCodeProcessConfig{OrphanRoot: root, OnUnconfirmedStop: func() { pool.mu.Lock(); pool.closed = true; pool.mu.Unlock() }}
-	cfg.blockUnconfirmedClaudeStop()
+	cfg := ClaudeCodeProcessConfig{OrphanRoot: root, OnUnconfirmedStop: func(error) { pool.mu.Lock(); pool.closed = true; pool.mu.Unlock() }}
+	cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
 	require.True(t, pool.closed)
 	require.NoError(t, reapClaudeCodeOrphans(context.Background(), root))
 	require.NoFileExists(t, path)

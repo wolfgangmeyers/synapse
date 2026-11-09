@@ -127,3 +127,26 @@ func TestClaudeLaunchPreflightAndModelSelection(t *testing.T) {
 	require.Equal(t, "claude-code", final.SelectedModel.Provider)
 	require.Equal(t, "haiku", final.SelectedModel.ID)
 }
+
+func TestClaudeLaunchReportsProcessFenceAndCLIUnavailable(t *testing.T) {
+	ctx := context.Background()
+	db, b, _ := completionFixture(t)
+	saved, err := db.ManagedAgent(ctx, b.AgentID)
+	require.NoError(t, err)
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	t.Setenv("MECHA_CLAUDE_BIN", "/no/such/claude")
+	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest, Config: Config{SessionRoot: t.TempDir(), AllowedWorkingDirectoryRoots: []string{saved.Cwd}}, CatalogSource: StoreCatalogSource{Store: db}})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+	request := LaunchRequest{Name: "fence-test", Cwd: saved.Cwd, Runtime: "embedded", Model: &Model{Provider: "claude-code", ID: "sonnet"}}
+	_, err = m.Launch(ctx, request)
+	var unavailable *ClaudeUnavailableError
+	require.ErrorAs(t, err, &unavailable)
+	m.claudeCodeProcesses.fence()
+	_, err = m.Launch(ctx, request)
+	var fenced *ClaudeAdmissionFencedError
+	require.ErrorAs(t, err, &fenced)
+	require.ErrorIs(t, err, errClaudeCodeGroupUnconfirmed)
+	require.NotContains(t, err.Error(), "sign in")
+}

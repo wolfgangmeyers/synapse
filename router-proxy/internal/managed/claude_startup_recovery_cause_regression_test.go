@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +27,12 @@ func TestClaudeStartupRecoveryReportsSafeFilesystemCause(t *testing.T) {
 	var events []Event
 	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest, Config: Config{SessionRoot: secret, AllowedWorkingDirectoryRoots: []string{root}}, EventSink: func(e Event) { events = append(events, e) }})
 	require.NoError(t, err)
+	_, err = m.Launch(ctx, LaunchRequest{Name: "fenced", Cwd: root, Runtime: "embedded", Model: &Model{Provider: "claude-code", ID: "sonnet"}})
+	var fenced *ClaudeAdmissionFencedError
+	require.ErrorAs(t, err, &fenced)
+	require.NotContains(t, err.Error(), "sign in")
+	require.Contains(t, err.Error(), "not a directory")
+	require.NotContains(t, err.Error(), "sensitive-token-file")
 	_, err = m.claudeCodeProcesses.admitExternal()
 	require.Error(t, err)
 	require.NotEmpty(t, events)
@@ -48,4 +55,35 @@ func TestSafeClaudeRecoveryErrorDoesNotLeakUntrustedDetails(t *testing.T) {
 		require.NotContains(t, safe, "secret")
 	}
 	require.Contains(t, safeClaudeRecoveryError(fmt.Errorf("private: %w", syscall.EACCES)).Error(), "permission denied")
+}
+
+func TestClaudeStartupOwnerlessOrphanGloballyFences(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cmd := orphanDummy(t)
+	path, err := persistClaudeCodeOrphan(root, cmd.Process.Pid, "fixture")
+	require.NoError(t, err)
+	record, err := readClaudeCodeOrphan(path)
+	require.NoError(t, err)
+	record.Identity.StartMarker = "mismatched-marker"
+	contents, err := json.Marshal(record)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, contents, 0600))
+	db, err := store.Open(ctx, filepath.Join(root, "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}}})
+	require.NoError(t, err)
+	for _, id := range []string{"a", "b"} {
+		_, err := m.claudeCodeProcesses.admitWorker(id)
+		var fenced *ClaudeAdmissionFencedError
+		require.ErrorAs(t, err, &fenced)
+		require.Contains(t, err.Error(), "unsafe or unavailable recovery records")
+		require.NotContains(t, err.Error(), filepath.Base(path))
+	}
+	_, err = os.Stat(path)
+	require.NoError(t, err)
+	require.Error(t, m.Close(ctx))
 }

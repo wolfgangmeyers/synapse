@@ -65,7 +65,7 @@ func TestClaudeOrphanReplacementFencesAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	var pool claudeCodeProcessPool
-	p := &ClaudeCodeProcess{orphanPath: path, orphanIdentity: id, onUnconfirmedStop: pool.fence}
+	p := &ClaudeCodeProcess{orphanPath: path, orphanIdentity: id, onUnconfirmedStop: pool.fenceStartup}
 	p.forgetClaudeOrphanConfirmed()
 	if _, err := pool.admitExternal(); err == nil {
 		t.Fatal("stale orphan did not fence")

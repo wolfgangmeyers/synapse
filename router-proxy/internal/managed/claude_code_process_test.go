@@ -543,7 +543,7 @@ func TestClaudeBeforeReleaseUnconfirmedCleanupFencesAdmission(t *testing.T) {
 	admission := errors.New("admission failed")
 	fenced := false
 	cfg.BeforeRelease = func() error { return admission }
-	cfg.OnUnconfirmedStop = func() { fenced = true }
+	cfg.OnUnconfirmedStop = func(error) { fenced = true }
 	calls := 0
 	cfg.waitForCleanup = func(cmd *exec.Cmd, id ProcessIdentity, confirmed func()) error {
 		calls++

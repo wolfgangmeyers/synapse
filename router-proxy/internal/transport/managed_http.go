@@ -1006,6 +1006,10 @@ func managedRestartError(err error) error {
 	if errors.As(err, &engine) {
 		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
 	}
+	var fenced *managed.ClaudeAdmissionFencedError
+	if errors.As(err, &fenced) {
+		return &managedHTTPError{503, "CLAUDE_ADMISSION_FENCED", fenced.Error()}
+	}
 	var cli *managed.ClaudeUnavailableError
 	if errors.As(err, &cli) {
 		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
@@ -1161,6 +1165,10 @@ func managedLaunchError(err error) error {
 	var engine *managed.EngineSelectionError
 	if errors.As(err, &engine) {
 		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
+	}
+	var fenced *managed.ClaudeAdmissionFencedError
+	if errors.As(err, &fenced) {
+		return &managedHTTPError{503, "CLAUDE_ADMISSION_FENCED", fenced.Error()}
 	}
 	var cli *managed.ClaudeUnavailableError
 	if errors.As(err, &cli) {

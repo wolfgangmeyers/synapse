@@ -116,7 +116,6 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		return nil
 	}
 	config := ClaudeCodeProcessConfig{OrphanRoot: m.config.SessionRoot, Cwd: saved.Cwd, SessionID: claudeCodeSessionID(p.binding.SessionID), Model: saved.SelectedModel.ID, RootAuthority: authority.role == "root"}
-	config.OnUnconfirmedStop = m.claudeCodeProcesses.fence
 	grantFactory := func() (claudeCodeProcessGrant, error) {
 		mcpURL, err := m.ClaudeCodeMCPURL()
 		if err != nil {

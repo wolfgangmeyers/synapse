@@ -20,7 +20,11 @@ func TestClaudeChildRejectsFencedOrShutdownPoolBeforeSetup(t *testing.T) {
 			// No store is configured: admission must fail before any child setup.
 			status, _, diagnostic := m.runClaudeSubagent(context.Background(), &subagentTask{}, store.EmbeddedBinding{}, store.ManagedAgentRecord{})
 			require.Equal(t, "failed", status)
-			require.Contains(t, diagnostic, "pool closed")
+			if shutdown {
+				require.Contains(t, diagnostic, "pool closed")
+			} else {
+				require.Contains(t, diagnostic, "group absence unconfirmed")
+			}
 		})
 	}
 }
