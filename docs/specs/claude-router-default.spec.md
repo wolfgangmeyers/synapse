@@ -5,7 +5,7 @@
 - **Domain**: `AgentManagement`
 - **Target E2E Suite**: `tests/e2e/claude-router-default.spec.ts` (partial; additional suites below)
 
-**Root authority boundary:** Root processes disable built-in CLI tools with `--tools ""` and restrict MCP configuration with `--strict-mcp-config`; router tools use the checked role-scoped bridge and its existing policy. This limits model-facing tools, not OS-level authority: local user and managed hooks, plugins, and configuration are trusted workstation inputs, not sandboxed adversaries. Fake CLI argument checks do not prove CLI enforcement; see [local CLI evidence and limits](../sidecar-test-inventory.md#local-cli-contract-evidence). An incompatible managed MCP configuration must fail closed rather than grant broader tools.
+**Root authority boundary:** Root processes enable only the built-in CLI tools `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `ToolSearch` and restrict MCP configuration with `--strict-mcp-config`; router tools use the checked role-scoped bridge and its existing policy. This limits model-facing tools, not OS-level authority: local user and managed hooks, plugins, and configuration are trusted workstation inputs, not sandboxed adversaries. Fake CLI argument checks do not prove CLI enforcement; see [local CLI evidence and limits](../sidecar-test-inventory.md#local-cli-contract-evidence). An incompatible managed MCP configuration must fail closed rather than grant broader tools.
 
 ## 1. Intent & User Outcome
 

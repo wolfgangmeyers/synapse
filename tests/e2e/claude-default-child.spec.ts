@@ -25,6 +25,15 @@ test("delegates a policy-scoped Claude-default child and retrieves its persisted
       .toEqual([{ agent_id: expect.any(String), status: "completed", result_text: expect.stringContaining(answer), error: "" }]);
     const child = String(f.rows("SELECT agent_id FROM managed_subagents WHERE parent_agent_id=?", parent)[0].agent_id);
     expect(f.tableRows("managed_agents", child)[0]).toMatchObject({ selected_model_provider: "claude-code", selected_model_id: "haiku" });
+    const records = await f.records();
+    const childInputs = records.filter(row => row.kind === "stdin" && typeof row.line === "string" && JSON.parse(row.line).type === "user" && row.line.includes("Read child-evidence.txt for child task"));
+    expect(childInputs).toHaveLength(1);
+    const childStart = records.find(row => row.kind === "start" && row.pid === childInputs[0].pid);
+    expect(childStart).toBeTruthy();
+    const argv = childStart!.argv;
+    if (!Array.isArray(argv)) throw Error("missing child process argv");
+    expect(argv.filter(arg => arg === "--tools")).toHaveLength(1);
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,Glob,Grep,ToolSearch");
     const entries = () => f.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind IN ('toolResult','tool_result')", child).map(row => JSON.parse(String(row.body)));
     expect(entries().some(row => row.toolName === "read" && !row.isError && JSON.stringify(row).includes(evidence))).toBe(true);
     await expect.poll(() => f.rows("SELECT id,state,body FROM messages WHERE recipient=? AND id LIKE 'subagent-completed-%'", parent), { timeout: 20_000 })

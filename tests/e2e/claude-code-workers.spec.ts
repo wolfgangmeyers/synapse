@@ -362,6 +362,9 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     const starts = await f.starts(); expect(starts).toHaveLength(2);
     expect(starts[1].pid).not.toBe(starts[0].pid);
     expect(starts[1].argv).toEqual(expect.arrayContaining(["--model", "haiku"]));
+    expect(starts[1].argv).toContain("--resume");
+    expect(starts[1].argv.filter((arg: string) => arg === "--tools")).toHaveLength(1);
+    expect(starts[1].argv[starts[1].argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,Glob,Grep,ToolSearch");
     expect(f.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind='assistant'", agent)
       .some(row => String(row.body).includes("Before model change"))).toBe(true);
     expect((await f.api("/v1/models")).default_model).toBeNull();
@@ -542,8 +545,8 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     // workflowHarness strips these variables: fixture isolation evidence,
     // not transport-level environment scrubbing coverage.
     expect(env).not.toHaveProperty("TMUX"); expect(env).not.toHaveProperty("TMUX_PANE"); expect(env).not.toHaveProperty("CLAUDECODE");
-    expect(start.argv).toContain("--tools");
-    expect(start.argv[start.argv.indexOf("--tools") + 1]).toBe("");
+    expect(start.argv.filter((arg: string) => arg === "--tools")).toHaveLength(1);
+    expect(start.argv[start.argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,Glob,Grep,ToolSearch");
     expect(start.argv).not.toContain("--strict-mcp-config");
     expect(start.argv).not.toContain("--setting-sources");
     const grant = await f.grant(); const token = grant.headers.Authorization.replace(/^Bearer /, "");

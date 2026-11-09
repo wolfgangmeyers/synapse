@@ -125,7 +125,7 @@ func TestClaudeCodeProcessSharedFixtureRoundTrip(t *testing.T) {
 				}
 			}
 			if len(r.Argv) > 3 {
-				want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", "sonnet", "--permission-mode", "bypassPermissions", "--tools", "", "--mcp-config", "test-mcp.json", "--append-system-prompt-file", "test-prompt.txt", "--session-id", cfg.SessionID}
+				want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", "sonnet", "--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,Edit,Glob,Grep,ToolSearch", "--mcp-config", "test-mcp.json", "--append-system-prompt-file", "test-prompt.txt", "--session-id", cfg.SessionID}
 				a, _ := json.Marshal(r.Argv)
 				b, _ := json.Marshal(want)
 				if string(a) != string(b) {
@@ -449,6 +449,51 @@ func TestClaudeCodeProcessRejectsEchoWrongRole(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeProcessArgsRolesAndResume(t *testing.T) {
+	for _, role := range []struct {
+		name        string
+		root, child bool
+	}{
+		{"root", true, false},
+		{"worker", false, false},
+		{"child", false, true},
+	} {
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume=%t", role.name, resume), func(t *testing.T) {
+				cfg := ClaudeCodeProcessConfig{Model: "sonnet", SessionID: "session", MCPConfigFile: "role-mcp.json", RootAuthority: role.root, ChildAuthority: role.child, Resume: resume}
+				args := claudeCodeProcessArgs(cfg)
+				tools, strict, mcp := 0, 0, 0
+				for i, arg := range args {
+					switch arg {
+					case "--tools":
+						tools++
+						if i+1 >= len(args) || args[i+1] != "Bash,Read,Write,Edit,Glob,Grep,ToolSearch" {
+							t.Fatalf("unexpected tools: %q", args)
+						}
+					case "--strict-mcp-config":
+						strict++
+					case "--mcp-config":
+						mcp++
+						if i+1 >= len(args) || args[i+1] != cfg.MCPConfigFile {
+							t.Fatalf("unexpected MCP config: %q", args)
+						}
+					}
+				}
+				if tools != 1 || mcp != 1 || (strict == 1) != (role.root || role.child) || strict > 1 {
+					t.Fatalf("unexpected role flags: %q", args)
+				}
+				flag, other := "--session-id", "--resume"
+				if resume {
+					flag, other = other, flag
+				}
+				if !containsArg(args, flag) || containsArg(args, other) || args[len(args)-1] != cfg.SessionID {
+					t.Fatalf("unexpected session flags: %q", args)
+				}
+			})
+		}
+	}
+}
+
 func TestClaudeCodeChildProcessIsolationArguments(t *testing.T) {
 	cfg := claudeTestConfig(t, `{"turns":[[{"text":"done"}]]}`)
 	cfg.ChildAuthority = true
@@ -474,8 +519,8 @@ func TestClaudeCodeChildProcessIsolationArguments(t *testing.T) {
 		}
 		for i, arg := range r.Argv {
 			if arg == "--tools" {
-				if i+1 >= len(r.Argv) || r.Argv[i+1] != "" {
-					t.Fatalf("native tools not disabled: %q", r.Argv)
+				if i+1 >= len(r.Argv) || r.Argv[i+1] != "Bash,Read,Write,Edit,Glob,Grep,ToolSearch" {
+					t.Fatalf("unexpected native tools: %q", r.Argv)
 				}
 				found = true
 			}

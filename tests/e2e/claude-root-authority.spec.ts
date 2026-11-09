@@ -22,7 +22,7 @@ test("CD-003 root uses checked role tools and resumes its snapshot after router 
     expect(first.systemPrompt).toContain("always acknowledge the user with a brief conversational response first");
     expect(first.argv).toEqual(expect.arrayContaining(["--tools", "--strict-mcp-config", "--model", "sonnet"]));
     const argv = first.argv as string[];
-    expect(argv[argv.indexOf("--tools") + 1]).toBe("");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,Glob,Grep,ToolSearch");
     expect(argv).not.toContain("--setting-sources");
     await f.configure({ turns_by_input: [{ contains: "Record root fact", steps: [
       { mcp_call: { id: "root-scratch", name: "scratchpad", input: { action: "append", content: "root durable fact" }, require_catalog: true } },

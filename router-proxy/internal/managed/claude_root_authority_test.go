@@ -16,7 +16,7 @@ import (
 
 func TestClaudeRootToolIsolationArguments(t *testing.T) {
 	args := claudeCodeProcessArgs(ClaudeCodeProcessConfig{SessionID: "session", Model: "sonnet", MCPConfigFile: "/tmp/mcp", RootAuthority: true})
-	for _, pair := range [][2]string{{"--tools", ""}} {
+	for _, pair := range [][2]string{{"--tools", "Bash,Read,Write,Edit,Glob,Grep,ToolSearch"}} {
 		i := slices.Index(args, pair[0])
 		if i < 0 || i+1 >= len(args) || args[i+1] != pair[1] {
 			t.Fatalf("missing isolated argument %q %q: %q", pair[0], pair[1], args)
