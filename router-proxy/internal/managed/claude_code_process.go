@@ -31,8 +31,8 @@ const (
 type ClaudeCodeProcessConfig struct {
 	Binary, Cwd, SessionID, Model   string
 	MCPConfigFile, SystemPromptFile string
-	OrphanRoot                      string // managed private recovery root; empty only for standalone callers
-	OnUnconfirmedStop               func() // closes only the owning manager pool; no filesystem dependency
+	OrphanRoot                      string      // managed private recovery root; empty only for standalone callers
+	OnUnconfirmedStop               func(error) // closes only the owning manager pool; no filesystem dependency
 	admitExternal                   func() (func(), error)
 	releaseGate                     func(func() (int, error)) (int, error)
 	BeforeRelease                   func() error // durable admission immediately before CLI exec
@@ -95,7 +95,7 @@ type ClaudeCodeProcess struct {
 	stderr            []byte
 	done              chan struct{}
 	exited            chan struct{}
-	onUnconfirmedStop func()
+	onUnconfirmedStop func(error)
 	closeErr          error
 	waitErr           error
 	closeOnce         sync.Once
@@ -207,7 +207,8 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 		return "", fmt.Errorf("check Claude CLI sign-in on the host: %w", err)
 	}
 	err = waitClaudeShortCommand(ctx, cmd, cfg, orphanPath)
-	if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
+	var cleanupErr *claudeStartCleanupError
+	if errors.As(err, &cleanupErr) {
 		return "", err
 	}
 	var status struct {
@@ -336,7 +337,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 			stderr.Close()
 			outw.Close()
 			errw.Close()
-			cfg.blockUnconfirmedClaudeStop()
+			cfg.blockUnconfirmedClaudeStop(err)
 			return nil, fmt.Errorf("persist Claude orphan identity: %w", err)
 		}
 		record, readErr := readClaudeCodeOrphan(orphanPath)
@@ -360,11 +361,11 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 				}
 			})
 			if !confirmed {
-				cfg.blockUnconfirmedClaudeStop()
+				cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
 				cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, cleanupErr)
 			} else if removalErr != nil {
-				cfg.blockUnconfirmedClaudeStop()
-				cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, removalErr)
+				cfg.blockUnconfirmedClaudeStop(removalErr)
+				cleanupErr = removalErr
 			} else {
 				cleanupErr = nil
 			}
@@ -402,16 +403,16 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		outw.Close()
 		errw.Close()
 		if confirmed && removalErr != nil {
-			cfg.blockUnconfirmedClaudeStop()
-			cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, removalErr)
+			cfg.blockUnconfirmedClaudeStop(removalErr)
+			cleanupErr = removalErr
 		} else if confirmed {
 			cleanupErr = nil
 		} else {
-			cfg.blockUnconfirmedClaudeStop()
+			cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
 		}
 		if n == 0 && confirmed && cfg.afterFailedRelease != nil {
 			if restoreErr := cfg.afterFailedRelease(); restoreErr != nil {
-				return nil, errors.Join(writeErr, restoreErr)
+				return nil, errors.Join(writeErr, cleanupErr, restoreErr)
 			}
 		}
 		return nil, errors.Join(writeErr, cleanupErr)
@@ -450,7 +451,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
 			// The regular identity record remains durable recovery authority.
 			// Stop same-manager admission even if every filesystem write fails.
-			cfg.blockUnconfirmedClaudeStop()
+			cfg.blockUnconfirmedClaudeStop(err)
 			stdout.Close()
 			stderr.Close()
 		}
@@ -749,13 +750,13 @@ func (p *ClaudeCodeProcess) Close() error {
 			case <-p.done:
 			case <-deadline.C:
 				if p.onUnconfirmedStop != nil {
-					p.onUnconfirmedStop()
+					p.onUnconfirmedStop(errClaudeCodeGroupUnconfirmed)
 				}
 				p.closeErr = errors.New("Claude process stop unconfirmed")
 			}
 		case <-deadline.C:
 			if p.onUnconfirmedStop != nil {
-				p.onUnconfirmedStop()
+				p.onUnconfirmedStop(errClaudeCodeGroupUnconfirmed)
 			}
 			p.closeErr = errors.New("Claude process stop unconfirmed")
 		}
@@ -764,14 +765,16 @@ func (p *ClaudeCodeProcess) Close() error {
 			case <-stdinClosed:
 			case <-deadline.C:
 				if p.onUnconfirmedStop != nil {
-					p.onUnconfirmedStop()
+					p.onUnconfirmedStop(errClaudeCodeGroupUnconfirmed)
 				}
 				p.closeErr = errors.New("Claude process stop unconfirmed")
 			}
 		}
 		if p.closeErr == nil {
 			p.mu.Lock()
-			if errors.Is(p.waitErr, errClaudeCodeGroupUnconfirmed) {
+			if p.orphanCleanupErr != nil {
+				p.closeErr = p.orphanCleanupErr
+			} else if errors.Is(p.waitErr, errClaudeCodeGroupUnconfirmed) {
 				p.closeErr = p.waitErr
 			}
 			p.mu.Unlock()

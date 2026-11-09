@@ -37,12 +37,13 @@ type claudeCodeProcessEntry struct {
 	stopErr      error
 }
 type claudeCodeProcessPool struct {
-	mu         sync.Mutex
-	entries    map[string]*claudeCodeProcessEntry
-	closed     bool
-	starts     sync.WaitGroup
-	startErr   error
-	afterStart func(*ClaudeCodeProcess) // optional synchronization at the start/insert boundary
+	mu            sync.Mutex
+	entries       map[string]*claudeCodeProcessEntry
+	closed        bool
+	starts        sync.WaitGroup
+	startErr      error
+	fencedWorkers map[string]error
+	afterStart    func(*ClaudeCodeProcess) // optional synchronization at the start/insert boundary
 }
 
 // admitExternal registers non-pooled Claude work before it can create files or
@@ -51,11 +52,74 @@ func (pool *claudeCodeProcessPool) admitExternal() (func(), error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	if pool.closed {
-		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
+		return nil, &ClaudeAdmissionFencedError{Cause: errors.Join(errClaudeDefiniteStart, pool.startErr)}
 	}
 	pool.starts.Add(1)
 	var once sync.Once
 	return func() { once.Do(pool.starts.Done) }, nil
+}
+
+// Worker-scoped admission shares the same lock as shutdown and gate release.
+func (pool *claudeCodeProcessPool) workerErrorLocked(id string) error {
+	if pool.closed {
+		return &ClaudeAdmissionFencedError{Cause: pool.startErr}
+	}
+	if err := pool.fencedWorkers[id]; err != nil {
+		return &ClaudeAdmissionFencedError{Cause: err}
+	}
+	return nil
+}
+func (pool *claudeCodeProcessPool) admitWorker(id string) (func(), error) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if err := pool.workerErrorLocked(id); err != nil {
+		return nil, err
+	}
+	pool.starts.Add(1)
+	var once sync.Once
+	return func() { once.Do(pool.starts.Done) }, nil
+}
+func (pool *claudeCodeProcessPool) workerGate(id string) func(func() (int, error)) (int, error) {
+	return func(write func() (int, error)) (int, error) {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		if err := pool.workerErrorLocked(id); err != nil {
+			return 0, err
+		}
+		return write()
+	}
+}
+
+// Retain at most MaxManagedAgents worker fences for the pool lifetime. Overflow
+// closes global admission rather than evicting a fence. The first error wins.
+var errClaudeWorkerFenceCapacity = errors.New("Claude worker fence capacity exceeded")
+
+func (pool *claudeCodeProcessPool) fenceWorker(id string, err error) {
+	if id == "" {
+		pool.fenceStartup(err)
+		return
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.fenceWorkerLocked(id, err)
+}
+
+// fenceWorkerLocked requires pool.mu.
+func (pool *claudeCodeProcessPool) fenceWorkerLocked(id string, err error) {
+	if _, exists := pool.fencedWorkers[id]; exists {
+		return
+	}
+	if len(pool.fencedWorkers) >= MaxManagedAgents {
+		pool.closed = true
+		if !errors.Is(pool.startErr, errClaudeWorkerFenceCapacity) {
+			pool.startErr = errors.Join(pool.startErr, errClaudeWorkerFenceCapacity)
+		}
+		return
+	}
+	if pool.fencedWorkers == nil {
+		pool.fencedWorkers = make(map[string]error)
+	}
+	pool.fencedWorkers[id] = err
 }
 
 // releaseGate linearizes the pipe write with fencing. Never run cleanup or
@@ -64,7 +128,7 @@ func (pool *claudeCodeProcessPool) releaseGate(write func() (int, error)) (int, 
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	if pool.closed {
-		return 0, errors.New("Claude process pool closed")
+		return 0, &ClaudeAdmissionFencedError{Cause: pool.startErr}
 	}
 	return write()
 }
@@ -127,9 +191,9 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		return nil, err
 	}
 	pool.mu.Lock()
-	if pool.closed {
+	if err := pool.workerErrorLocked(b.AgentID); err != nil {
 		pool.mu.Unlock()
-		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
+		return nil, errors.Join(errClaudeDefiniteStart, err)
 	}
 	if pool.entries == nil {
 		pool.entries = make(map[string]*claudeCodeProcessEntry)
@@ -150,7 +214,14 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		cfg.MCPConfigFile = grant.MCPConfigFile
 		cfg.SystemPromptFile = grant.SystemPromptFile
 	}
-	cfg.releaseGate = pool.releaseGate
+	cfg.releaseGate = pool.workerGate(b.AgentID)
+	previousFence := cfg.OnUnconfirmedStop
+	cfg.OnUnconfirmedStop = func(cause error) {
+		pool.fenceWorker(b.AgentID, cause)
+		if previousFence != nil {
+			previousFence(cause)
+		}
+	}
 	proc, err := StartClaudeCodeProcess(ctx, cfg)
 	if err != nil {
 		if grant.Revoke != nil {
@@ -171,7 +242,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		pool.afterStart(proc)
 	}
 	pool.mu.Lock()
-	if pool.closed {
+	if fenceErr := pool.workerErrorLocked(b.AgentID); fenceErr != nil {
 		pool.mu.Unlock()
 		if entry.revoke != nil {
 			entry.revoke()
@@ -179,13 +250,14 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		closeErr := proc.Close()
 		if closeErr != nil {
 			pool.mu.Lock()
-			pool.startErr = errors.Join(pool.startErr, closeErr)
+			pool.fenceWorkerLocked(b.AgentID, closeErr)
 			pool.mu.Unlock()
 		}
 		if closeErr != nil {
-			return nil, errors.Join(errors.New("Claude process pool closed"), &claudeStartCleanupError{err: closeErr})
+			// Keep the cleanup marker and cause chain, but never format raw paths.
+			return nil, errors.Join(fenceErr, &claudeStartCleanupError{err: &ClaudeAdmissionFencedError{Cause: closeErr}})
 		}
-		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
+		return nil, errors.Join(errClaudeDefiniteStart, fenceErr)
 	}
 	pool.entries[b.AgentID] = entry
 	pool.mu.Unlock()
@@ -229,7 +301,7 @@ func (pool *claudeCodeProcessPool) finishStop(agentID string, entry *claudeCodeP
 	pool.mu.Lock()
 	entry.stopErr = err
 	if err != nil {
-		pool.closed = true
+		pool.fenceWorkerLocked(agentID, err)
 	}
 	if pool.entries[agentID] == entry && err == nil {
 		delete(pool.entries, agentID)
@@ -253,6 +325,9 @@ func (pool *claudeCodeProcessPool) stopAll() error {
 	pool.starts.Wait()
 	pool.mu.Lock()
 	err = errors.Join(err, pool.startErr)
+	for _, workerErr := range pool.fencedWorkers {
+		err = errors.Join(err, workerErr)
+	}
 	pool.mu.Unlock()
 	return err
 }

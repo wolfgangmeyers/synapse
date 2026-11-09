@@ -106,6 +106,12 @@ Historical unresolved restriction: the source indicator must be the only user-vi
 - **When**: The user logs in/out from the Web UI or chooses a model.
 - **Then**: UI status is non-secret and models reflect the shared available context. For the historical Pi-managed contract, current work may finish, then the agent must reload changed credentials through same-session restart before more work. ChatGPT, Google, and Cursor via pi-cursor-sdk were the required minimum. Current embedded credential storage, catalog/default-model changes, and provider support are not assumed equivalent. Their parity and approval remain open in the crosswalk.
 
+### Scenario: Claude startup safety failure
+- **User Goal**: Understand why a Claude launch is blocked without exposing local paths.
+- **Given**: Claude startup cannot persist its process identity, or preflight cleanup fails.
+- **When**: The user launches Claude and subsequently retries.
+- **Then**: Admission is fenced on the first launch and retry, reporting a sanitized cleanup or filesystem cause rather than sign-in guidance. A persistence failure is not reported as an unconfirmed process group unless group absence is actually unconfirmed.
+
 ### Scenario: [MR-010] Cross-origin managed controls
 - **User Goal**: Use the router from any reachable frontend without browser identity gates.
 - **Given**: Valid managed HTTP requests from unrelated HTTP(S) origins and a non-browser caller with no Origin.

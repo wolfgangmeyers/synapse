@@ -16,8 +16,8 @@ func waitClaudeShortCommand(ctx context.Context, cmd *exec.Cmd, cfg ClaudeCodePr
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		cfg.blockUnconfirmedClaudeStop()
-		return fmt.Errorf("%w: identify child: %v", errClaudeCodeGroupUnconfirmed, err)
+		cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
+		return &claudeStartCleanupError{err: fmt.Errorf("%w: identify child: %w", errClaudeCodeGroupUnconfirmed, err)}
 	}
 	identity := ProcessIdentity{PID: cmd.Process.Pid, StartMarker: marker, Incarnation: claudeCodeNewInputID()}
 	if path != "" {
@@ -25,8 +25,8 @@ func waitClaudeShortCommand(ctx context.Context, cmd *exec.Cmd, cfg ClaudeCodePr
 		if readErr != nil || record.Identity.PID != identity.PID || record.Identity.StartMarker != identity.StartMarker {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			cfg.blockUnconfirmedClaudeStop()
-			return errors.Join(errClaudeCodeGroupUnconfirmed, readErr)
+			cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
+			return &claudeStartCleanupError{err: errors.Join(errClaudeCodeGroupUnconfirmed, readErr)}
 		}
 		identity = record.Identity
 	}
@@ -45,12 +45,12 @@ func waitClaudeShortCommand(ctx context.Context, cmd *exec.Cmd, cfg ClaudeCodePr
 			}
 		})
 		if removalErr != nil {
-			cfg.blockUnconfirmedClaudeStop()
-			err = errors.Join(errClaudeCodeGroupUnconfirmed, err, removalErr)
+			cfg.blockUnconfirmedClaudeStop(removalErr)
+			err = errors.Join(err, &claudeStartCleanupError{err: removalErr})
 		}
 		if !confirmed {
-			cfg.blockUnconfirmedClaudeStop()
-			err = errors.Join(errClaudeCodeGroupUnconfirmed, err)
+			cfg.blockUnconfirmedClaudeStop(errClaudeCodeGroupUnconfirmed)
+			err = &claudeStartCleanupError{err: errors.Join(errClaudeCodeGroupUnconfirmed, err)}
 		}
 		done <- err
 	}()
@@ -60,7 +60,8 @@ func waitClaudeShortCommand(ctx context.Context, cmd *exec.Cmd, cfg ClaudeCodePr
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
 		err = <-done
-		if err != nil && errors.Is(err, errClaudeCodeGroupUnconfirmed) {
+		var cleanupErr *claudeStartCleanupError
+		if errors.As(err, &cleanupErr) {
 			return err
 		}
 		return ctx.Err()
@@ -81,8 +82,8 @@ func startClaudeShortCommand(cmd *exec.Cmd, gate *os.File, cfg ClaudeCodeProcess
 		if err != nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			cfg.blockUnconfirmedClaudeStop()
-			return "", fmt.Errorf("persist Claude orphan identity: %w", err)
+			cfg.blockUnconfirmedClaudeStop(err)
+			return "", &claudeStartCleanupError{err: fmt.Errorf("persist Claude orphan identity: %w", err)}
 		}
 	}
 	release := func() (int, error) { return gate.Write([]byte("ready\n")) }

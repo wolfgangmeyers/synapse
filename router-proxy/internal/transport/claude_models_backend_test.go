@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,4 +62,16 @@ func TestClaudeBackendCatalogAndAdmission(t *testing.T) {
 	require.NotNil(t, saved)
 	require.Equal(t, "claude-code", saved.Provider)
 	require.Equal(t, "sonnet", saved.ID)
+}
+
+func TestClaudeAdmissionFenceHTTPMapping(t *testing.T) {
+	for _, mapError := range []func(error) error{managedLaunchError, managedRestartError} {
+		got := mapError(&managed.ClaudeAdmissionFencedError{Cause: errors.New("private")})
+		var httpErr *managedHTTPError
+		require.ErrorAs(t, got, &httpErr)
+		require.Equal(t, 503, httpErr.status)
+		require.Equal(t, "CLAUDE_ADMISSION_FENCED", httpErr.code)
+		require.NotContains(t, httpErr.Error(), "private")
+		require.NotContains(t, httpErr.Error(), "sign in")
+	}
 }

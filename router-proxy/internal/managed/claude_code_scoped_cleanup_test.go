@@ -22,7 +22,7 @@ func TestClaudeCloseUnknownOwnershipIsBoundedAndFenced(t *testing.T) {
 	fenced := make(chan struct{}, 1)
 	path := filepath.Join(t.TempDir(), "record")
 	require.NoError(t, os.WriteFile(path, []byte("recovery authority"), 0600))
-	p := &ClaudeCodeProcess{orphanPath: path, stdin: scopedCloser{}, orphanIdentity: ProcessIdentity{PID: -1}, done: make(chan struct{}), exited: make(chan struct{}), closeDone: make(chan struct{}), onUnconfirmedStop: func() { fenced <- struct{}{} }}
+	p := &ClaudeCodeProcess{orphanPath: path, stdin: scopedCloser{}, orphanIdentity: ProcessIdentity{PID: -1}, done: make(chan struct{}), exited: make(chan struct{}), closeDone: make(chan struct{}), onUnconfirmedStop: func(error) { fenced <- struct{}{} }}
 	start := time.Now()
 	err := p.Close()
 	require.Error(t, err)

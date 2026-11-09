@@ -28,7 +28,7 @@ func TestClaudeStopBudgetFencesBlockedClose(t *testing.T) {
 	s := &cleanupBarrierStdin{make(chan struct{}), make(chan struct{})}
 	p := cleanupTestProcess(s)
 	fenced := make(chan struct{})
-	p.onUnconfirmedStop = func() { close(fenced) }
+	p.onUnconfirmedStop = func(error) { close(fenced) }
 	result := make(chan error, 1)
 	start := time.Now()
 	go func() { result <- p.Close() }()

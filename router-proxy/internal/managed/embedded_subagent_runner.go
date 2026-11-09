@@ -1508,13 +1508,18 @@ func cleanupClaudeChildTurn(turn *claudeChildTurn, closeProcess func() error) er
 }
 
 func (m *Manager) fenceClaudeChildConfig(cfg *ClaudeCodeProcessConfig) {
-	cfg.OnUnconfirmedStop = m.claudeCodeProcesses.fence
+	cfg.OnUnconfirmedStop = m.claudeCodeProcesses.fenceStartup
 	cfg.releaseGate = m.claudeCodeProcesses.releaseGate
 }
 
 func (m *Manager) fenceClaudeChildTaskConfig(cfg *ClaudeCodeProcessConfig, task *subagentTask) {
-	m.fenceClaudeChildConfig(cfg)
-	cfg.OnUnconfirmedStop = func() { task.mu.Lock(); task.retainSlot = true; task.mu.Unlock(); m.claudeCodeProcesses.fence() }
+	cfg.releaseGate = m.claudeCodeProcesses.workerGate(task.childID)
+	cfg.OnUnconfirmedStop = func(cause error) {
+		task.mu.Lock()
+		task.retainSlot = true
+		task.mu.Unlock()
+		m.claudeCodeProcesses.fenceWorker(task.childID, cause)
+	}
 }
 
 func (m *Manager) fenceClaudeChildToolError(task *subagentTask, err error) bool {
@@ -1524,12 +1529,12 @@ func (m *Manager) fenceClaudeChildToolError(task *subagentTask, err error) bool 
 	task.mu.Lock()
 	task.retainSlot = true
 	task.mu.Unlock()
-	m.claudeCodeProcesses.fence()
+	m.claudeCodeProcesses.fenceWorker(task.childID, err)
 	return true
 }
 
 func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, binding store.EmbeddedBinding, child store.ManagedAgentRecord) (status, result, diagnostic string) {
-	release, err := m.claudeCodeProcesses.admitExternal()
+	release, err := m.claudeCodeProcesses.admitWorker(task.childID)
 	if err != nil {
 		return "failed", "", err.Error()
 	}

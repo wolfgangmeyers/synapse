@@ -15,6 +15,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func requireClaudeWorkerFenced(t *testing.T, pool *claudeCodeProcessPool, id string) {
+	t.Helper()
+	pool.mu.Lock()
+	closed := pool.closed
+	err := pool.workerErrorLocked(id)
+	pool.mu.Unlock()
+	require.False(t, closed, "a worker cleanup failure must not globally fence admission")
+	require.ErrorIs(t, err, errClaudeCodeGroupUnconfirmed)
+	release, err := pool.admitWorker(id + "-unrelated")
+	require.NoError(t, err)
+	release()
+}
+
 func TestClaudeEarlyCleanupFailureRetainsExecution(t *testing.T) {
 	for _, path := range []string{"admission", "preflight"} {
 		t.Run(path, func(t *testing.T) {
@@ -34,7 +47,7 @@ func TestClaudeEarlyCleanupFailureRetainsExecution(t *testing.T) {
 			_, err = r.Run(ctx, "input")
 			require.ErrorIs(t, err, errClaudeCodeGroupUnconfirmed)
 			require.Equal(t, 1, revoked)
-			require.True(t, pool.closed)
+			requireClaudeWorkerFenced(t, pool, p.binding.AgentID)
 			closed := make(chan error, 1)
 			go func() { closed <- r.closeScoped() }()
 			require.ErrorIs(t, waitPoolShutdownError(t, closed, "scoped close"), errClaudeCodeGroupUnconfirmed)
@@ -64,11 +77,17 @@ func TestClaudeManagerPreflightFailureKeepsDurableExecution(t *testing.T) {
 	revoked := 0
 	pool := &f.m.claudeCodeProcesses
 	pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {binding: owner.binding, process: proc, revoke: func() { revoked++ }}}
-	t.Cleanup(func() { pool.mu.Lock(); pool.entries = nil; pool.closed = false; pool.mu.Unlock() })
+	t.Cleanup(func() {
+		pool.mu.Lock()
+		pool.entries = nil
+		pool.closed = false
+		pool.fencedWorkers = nil
+		pool.mu.Unlock()
+	})
 	err = f.m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, "input")
 	require.ErrorIs(t, err, errClaudeCodeGroupUnconfirmed)
 	require.Equal(t, 1, revoked)
-	require.True(t, pool.closed)
+	requireClaudeWorkerFenced(t, pool, owner.binding.AgentID)
 	var execution string
 	require.NoError(t, f.raw.QueryRow(`SELECT execution_json FROM embedded_sessions WHERE agent_id=?`, owner.binding.AgentID).Scan(&execution))
 	require.NotEmpty(t, execution)
@@ -133,7 +152,7 @@ while read line; do :; done
 			go func() { closed <- r.closeScoped() }()
 			require.ErrorContains(t, waitPoolShutdownError(t, closed, "scoped close"), "Claude process stop unconfirmed")
 			require.Equal(t, 1, revoked)
-			require.True(t, pool.closed)
+			requireClaudeWorkerFenced(t, pool, p.binding.AgentID)
 			data, err := os.ReadFile(starts)
 			require.NoError(t, err)
 			require.Equal(t, "start\n", string(data))
@@ -169,6 +188,14 @@ func TestClaudeManagerClaimedWakeUnconfirmedCleanup(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	pool := &f.m.claudeCodeProcesses
+	// Remove the deliberately injected fence before the fixture shuts down,
+	// including when an assertion fails.
+	t.Cleanup(func() {
+		pool.mu.Lock()
+		pool.entries = nil
+		pool.fencedWorkers = nil
+		pool.mu.Unlock()
+	})
 	pool.afterStart = func(proc *ClaudeCodeProcess) {
 		proc.stdin = probeBlockedClose{WriteCloser: proc.stdin, release: release}
 	}
@@ -184,12 +211,5 @@ func TestClaudeManagerClaimedWakeUnconfirmedCleanup(t *testing.T) {
 	wake, err := f.db.EmbeddedRestartWake(ctx, owner.binding, g, scope.id)
 	require.NoError(t, err)
 	require.Equal(t, "claimed", wake.State)
-	// The fixture manager's shutdown reports this deliberately injected failure.
-	pool.mu.Lock()
-	fenceErr := pool.startErr
-	pool.entries = nil
-	pool.closed = false
-	pool.startErr = nil
-	pool.mu.Unlock()
-	require.ErrorIs(t, fenceErr, errClaudeCodeGroupUnconfirmed)
+	requireClaudeWorkerFenced(t, pool, owner.binding.AgentID)
 }

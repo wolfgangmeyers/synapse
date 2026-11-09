@@ -827,6 +827,14 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 			return LaunchResult{}, &EngineSelectionError{Reason: "Claude does not support Pi RPC; use the embedded runtime"}
 		}
 		if _, preflightErr := PreflightClaudeCode(ctx, m.claudeShortCommandConfig(cwd)); preflightErr != nil {
+			var fenced *ClaudeAdmissionFencedError
+			if errors.As(preflightErr, &fenced) {
+				return LaunchResult{}, fenced
+			}
+			var cleanup *claudeStartCleanupError
+			if errors.As(preflightErr, &cleanup) || errors.Is(preflightErr, errClaudeCodeGroupUnconfirmed) {
+				return LaunchResult{}, &ClaudeAdmissionFencedError{Cause: preflightErr}
+			}
 			return LaunchResult{}, &ClaudeUnavailableError{Cause: preflightErr}
 		}
 	}

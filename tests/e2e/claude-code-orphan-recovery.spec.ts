@@ -91,8 +91,12 @@ for (const mismatch of [false, true]) test(`CC-009/015 ${mismatch ? "mismatched 
     for (const path of paths) expect(await exists(path)).toBe(false);
     if (mismatch) {
       const startsBefore = (await f.starts()).length;
-      const rejected = await f.request(page, "/v1/managed-agents", { name: "fenced-claude", cwd: `${f.router.root}/work`, runtime: "embedded", model: { provider: "claude-code", id: "sonnet" } }, "POST", true);
-      expect(rejected.status).toBeGreaterThanOrEqual(400);
+      const rejected = await f.request(page, "/v1/managed-agents", { name: "fenced-claude", cwd: `${f.router.root}/work`, runtime: "embedded", model: { provider: "claude-code", id: "sonnet" } }, "POST");
+      expect(rejected.status, JSON.stringify(rejected.body)).toBe(503);
+      expect(rejected.body.error.code).toBe("CLAUDE_ADMISSION_FENCED");
+      expect(rejected.body.error.message).toMatch(/orphan recovery failed/i);
+      expect(rejected.body.error.message).not.toMatch(/install|sign[ -]?in/i);
+      expect(f.rows("SELECT agent_id FROM managed_agents WHERE agent_id=?", "fenced-claude")).toEqual([]);
       expect((await f.starts()).length).toBe(startsBefore);
     } else {
     const recoveredAgent = await f.launch(page);
