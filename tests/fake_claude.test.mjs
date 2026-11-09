@@ -130,7 +130,7 @@ test('steer_mid_turn: a mid-turn input is absorbed by the active turn at its ste
   const echo = await f.next();
   assert.equal(echo.uuid, 'second');
   assert.equal(echo.isReplay, true);
-  assert.deepEqual((await f.records()).filter(row => row.kind === 'steer_echo').map(row => row.input_id), ['second']);
+  // The stdout echo can arrive before its record is written; check records after exit.
   // Nothing new starts while the turn is held: the steered input is not a turn.
   const [barrier] = (await f.records()).filter(row => row.kind === 'barrier');
   await writeFile(join(f.root, `barrier-${barrier.invocation}`), 'release');
@@ -140,6 +140,7 @@ test('steer_mid_turn: a mid-turn input is absorbed by the active turn at its ste
   f.child.stdin.end();
   assert.equal((await f.closed).code, 0);
   const rows = await f.records();
+  assert.deepEqual(rows.filter(row => row.kind === 'steer_echo').map(row => row.input_id), ['second']);
   assert.deepEqual(rows.filter(row => row.kind === 'steer_absorbed').map(row => [row.turn_input_id, row.input_id]), [['first', 'second']]);
   assert.equal(rows.filter(row => row.kind === 'start').length, 1);
   assert.equal(rows.filter(row => row.kind === 'stdin').length, 2);
