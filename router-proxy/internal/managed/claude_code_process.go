@@ -74,33 +74,36 @@ type claudeCodePendingInput struct {
 // SendUser and Control may be concurrent. Interrupt awaits a receipt, not a
 // turn result, and is deliberately distinct from Close.
 type ClaudeCodeProcess struct {
-	orphanPath        string
-	orphanIdentity    ProcessIdentity
-	orphanCleanupOnce sync.Once
-	orphanCleanupErr  error
-	ownedTasks        map[string]bool
-	ownedTaskBytes    int
-	cmd               *exec.Cmd
-	stdin             io.WriteCloser
-	writeMu           sync.Mutex
-	mu                sync.Mutex
-	events            []ClaudeCodeEvent
-	eventBytes        int
-	notify            chan struct{}
-	controls          map[string]chan claudeCodeControlResponse
-	inputs            map[string]claudeCodePendingInput
-	inputBytes        int
-	sequence          uint64
-	err               error
-	stderr            []byte
-	done              chan struct{}
-	exited            chan struct{}
-	onUnconfirmedStop func(error)
-	closeErr          error
-	waitErr           error
-	closeOnce         sync.Once
-	closeDone         chan struct{}
-	sessionID         string
+	orphanPath          string
+	orphanIdentity      ProcessIdentity
+	orphanCleanupOnce   sync.Once
+	orphanCleanupErr    error
+	ownedTasks          map[string]bool
+	ownedTaskBytes      int
+	cmd                 *exec.Cmd
+	stdin               io.WriteCloser
+	writeMu             sync.Mutex
+	mu                  sync.Mutex
+	events              []ClaudeCodeEvent
+	eventBytes          int
+	notify              chan struct{}
+	controls            map[string]chan claudeCodeControlResponse
+	inputs              map[string]claudeCodePendingInput
+	inputBytes          int
+	sequence            uint64
+	protocolRecent      []string
+	protocolReported    uint8
+	protocolDiagnostics *claudeDiagnosticQueue
+	err                 error
+	stderr              []byte
+	done                chan struct{}
+	exited              chan struct{}
+	onUnconfirmedStop   func(error)
+	closeErr            error
+	waitErr             error
+	closeOnce           sync.Once
+	closeDone           chan struct{}
+	sessionID           string
 }
 
 func claudeCodeEnvironment(env []string) []string {
@@ -538,6 +541,10 @@ func (p *ClaudeCodeProcess) read(r io.Reader) {
 			p.mu.Unlock()
 			return
 		}
+		p.recordProtocolEvent(event)
+		if event.Type == "result" && len(p.inputs) > 0 {
+			p.logProtocolDiagnostic(1, "result_with_pending_input")
+		}
 		if event.Type == "user" && event.IsReplay && event.ParentToolUseID == nil {
 			var origin struct {
 				Origin json.RawMessage `json:"origin"`
@@ -550,6 +557,11 @@ func (p *ClaudeCodeProcess) read(r io.Reader) {
 				}
 				_ = json.Unmarshal(event.Message, &message)
 				if !ok || !claudeCodeJSONEqual(pending.content, message.Content) {
+					if !ok {
+						p.logProtocolDiagnostic(2, "replay_unknown_identity")
+					} else {
+						p.logProtocolDiagnostic(4, "replay_content_mismatch")
+					}
 					p.mu.Unlock()
 					p.fail(errors.New("Claude replay input identity/content mismatch"))
 					return

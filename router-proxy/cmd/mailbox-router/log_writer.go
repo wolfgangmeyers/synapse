@@ -110,6 +110,7 @@ func managedEventLogger(writer *logWriter, errorWriter io.Writer) managed.EventS
 }
 
 var safeEventFields = map[string]map[string]struct{}{
+	"claude_protocol_diagnostic": {"reason": {}, "pending_count": {}, "recent": {}},
 	"router_started":             {"host": {}, "port": {}},
 	"router_stopped":             {},
 	"router_error":               {"error_code": {}, "policy": {}, "agent_id": {}},
@@ -141,7 +142,7 @@ var safeEventFields = map[string]map[string]struct{}{
 
 var closedEventValues = map[string]map[string]struct{}{
 	"error_code":      {"internal_error": {}, "sweep_failed": {}, "attachment_sweep_failed": {}, "lifecycle_projection_failed": {}, "projection_unavailable": {}, "native_policy_failed": {}, "delivery_timeout": {}, "invalid_candidate": {}, "invalid_reminder": {}, "queue_full": {}, "conversation_receipt_capacity": {}, "conversation_receipt_cleanup_failed": {}, "store_error": {}, "send_failed": {}},
-	"reason":          {"delivery_timeout": {}, "invalid_candidate": {}, "store_error": {}, "send_failed": {}},
+	"reason":          {"result_with_pending_input": {}, "replay_unknown_identity": {}, "replay_content_mismatch": {}, "delivery_timeout": {}, "invalid_candidate": {}, "store_error": {}, "send_failed": {}},
 	"state":           {"pending": {}, "queued": {}, "leased": {}, "injection_requested": {}, "sent": {}, "delivered": {}, "failed": {}, "dead_letter": {}, "dead_lettered": {}, "expired": {}},
 	"disposition":     {"accepted": {}, "duplicate": {}, "stale": {}, "rejected": {}, "persisted": {}, "applied": {}, "accepted_noop": {}, "conflict": {}},
 	"lifecycle_event": {"snapshot": {}, "started": {}, "terminal": {}, "agent_start": {}, "agent_settled": {}, "agent_end": {}, "message_start": {}, "message_end": {}},
