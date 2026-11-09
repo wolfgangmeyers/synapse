@@ -218,3 +218,12 @@ func TestClaudeChildCleanupFailureQuarantinesResult(t *testing.T) {
 	require.Empty(t, result)
 	require.Contains(t, diagnostic, "cleanup")
 }
+
+func TestClaudeChildAllowedToolClassification(t *testing.T) {
+	for _, name := range []string{"Bash", "Read", "Write", "Edit", "Glob", "Grep", "ToolSearch", "mcp__mecha__read"} {
+		require.True(t, claudeChildAllowedTool(name), name)
+	}
+	for _, name := range []string{"read", "Task", "mcp__other__read", ""} {
+		require.False(t, claudeChildAllowedTool(name), name)
+	}
+}

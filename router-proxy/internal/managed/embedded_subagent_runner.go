@@ -1450,6 +1450,18 @@ func quarantineClaudeChildOutcome(status, result, diagnostic string, err error) 
 	return status, result, diagnostic
 }
 
+func claudeChildAllowedTool(raw string) bool {
+	if strings.HasPrefix(raw, "mcp__mecha__") {
+		return true
+	}
+	switch raw {
+	case "Bash", "Read", "Write", "Edit", "Glob", "Grep", "ToolSearch":
+		return true
+	default:
+		return false
+	}
+}
+
 // claudeChildTurn joins stdout producers to MCP requests. All transcript writes
 // and tool execution are serialized; a request alone never grants authority.
 type claudeChildTurn struct {
@@ -1461,6 +1473,7 @@ type claudeChildTurn struct {
 	uncertain bool
 }
 type claudeChildCall struct {
+	bridge   bool
 	call     ai.ToolCall
 	original json.RawMessage
 	result   *ai.ToolResultMessage
@@ -1610,7 +1623,7 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 		if closed || item == nil {
 			return nil, errors.New("child turn closed")
 		}
-		if item.call.Name != req.Name || !claudeCodeJSONEqual(item.original, req.Arguments) {
+		if !item.bridge || item.call.Name != req.Name || !claudeCodeJSONEqual(item.original, req.Arguments) {
 			return nil, errors.New("child tool ID argument conflict")
 		}
 		if item.result != nil {
@@ -1868,9 +1881,23 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 			}
 			for _, got := range results {
 				item := turn.calls[got.ToolCallID]
-				if item == nil || item.result == nil || item.result.ToolName != got.ToolName || item.result.IsError != got.IsError || claudeCodeMessageText(*item.result) != claudeCodeMessageText(got) {
-					runErr = errors.New("Claude child tool result differs from checked result")
+				if item == nil {
+					runErr = errors.New("Claude child tool result has no producer")
 					break
+				}
+				if item.bridge {
+					if item.result == nil || item.result.ToolName != got.ToolName || item.result.IsError != got.IsError || claudeCodeMessageText(*item.result) != claudeCodeMessageText(got) {
+						runErr = errors.New("Claude child tool result differs from checked result")
+						break
+					}
+				} else {
+					if e = p.AppendCheckedMessage(ctx, got); e != nil {
+						runErr = e
+						break
+					}
+					task.mu.Lock()
+					task.toolUseCount++
+					task.mu.Unlock()
 				}
 				turn.mu.Lock()
 				delete(turn.calls, got.ToolCallID)
@@ -1890,8 +1917,8 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 				break
 			}
 			for _, block := range msg.Content {
-				if call, ok := block.(ai.ToolCall); ok && !strings.HasPrefix(parser.rawTools[call.ID], "mcp__mecha__") {
-					runErr = errors.New("Claude child used non-bridge tool")
+				if call, ok := block.(ai.ToolCall); ok && !claudeChildAllowedTool(parser.rawTools[call.ID]) {
+					runErr = errors.New("Claude child used disallowed tool")
 					break
 				}
 			}
@@ -1918,7 +1945,7 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 							break
 						}
 						original, _ := json.Marshal(call.Arguments)
-						turn.calls[call.ID] = &claudeChildCall{call: call, original: original}
+						turn.calls[call.ID] = &claudeChildCall{bridge: strings.HasPrefix(parser.rawTools[call.ID], "mcp__mecha__"), call: call, original: original}
 					}
 				}
 				turn.signal()

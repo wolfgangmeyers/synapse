@@ -221,3 +221,59 @@ func TestClaudeChildProcessLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(transcript.Entries), 4)
 }
+
+func TestClaudeChildNativeToolsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	parent := subagentTestParent(t, db, "claude-child-parent")
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer raw.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+	mgr := makeSubagentTestManager(t, db, reg, 2)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+	cfg := claudeTestConfig(t, `{"turns":[[{"tool":{"id":"1","name":"Bash","result":"ok"}},{"tool":{"id":"2","name":"Read","result":"ok"}},{"tool":{"id":"3","name":"Write","result":"ok"}},{"tool":{"id":"4","name":"Edit","result":"ok"}},{"tool":{"id":"5","name":"Glob","result":"ok"}},{"tool":{"id":"6","name":"Grep","result":"ok"}},{"tool":{"id":"7","name":"ToolSearch","result":"ok"}},{"mcp_call":{"id":"8","name":"read","input":{"path":"note.txt"}}},{"text":"child done"}]]}`)
+	require.NoError(t, os.WriteFile(filepath.Join(cfg.Cwd, "note.txt"), []byte("hello child"), 0600))
+	_, err = raw.Exec(`UPDATE managed_agents SET cwd=?, selected_model_provider='claude-code', selected_model_id='sonnet' WHERE agent_id=?`, cfg.Cwd, parent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, db.SetDefaultModel(ctx, &store.ManagedModel{Provider: "claude-code", ID: "sonnet"}))
+	t.Setenv("MECHA_CLAUDE_BIN", cfg.Binary)
+	for _, v := range cfg.Environment {
+		if strings.HasPrefix(v, "FAKE_CLAUDE_") {
+			k, val, _ := strings.Cut(v, "=")
+			t.Setenv(k, val)
+		}
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, store.ManagedSubagentRecord{AgentID: "claude-child-test", ParentAgentID: parent.AgentID, Status: "running"}))
+	task := &subagentTask{parent: parent, childID: "claude-child-test", attempt: 1, status: "running", prompt: "read note", timeout: 10 * time.Second}
+	mgr.subagentsMu.Lock()
+	mgr.subagentsActive[task.childID] = task
+	mgr.subagentsRegistry[task.childID] = task
+	mgr.subagentsMu.Unlock()
+	go mgr.runSubagent(task)
+	var last *store.ManagedSubagentRecord
+	var lookupErr error
+	defer func() {
+		if t.Failed() {
+			t.Logf("last record: %+v, lookup error: %v", last, lookupErr)
+		}
+	}()
+	require.Eventually(t, func() bool {
+		last, lookupErr = db.ManagedSubagent(ctx, parent, "claude-child-test")
+		return lookupErr == nil && IsTerminalSubagentStatus(last.Status)
+	}, 10*time.Second, 20*time.Millisecond)
+	rec, err := db.ManagedSubagent(ctx, parent, "claude-child-test")
+	require.NoError(t, err)
+	require.Equal(t, "completed", rec.Status, "error: %s", rec.Error)
+	require.Equal(t, "child done", rec.ResultText)
+	require.Equal(t, 8, rec.ToolUseCount)
+	transcript, err := db.ManagedSubagentTranscript(ctx, parent, "claude-child-test")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(transcript.Entries), 18)
+}
