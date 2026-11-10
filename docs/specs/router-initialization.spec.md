@@ -13,7 +13,7 @@ A developer runs `tools/initialize.sh` once after cloning the repository. It ins
 
 1. Initialization checks Git, Node.js (at least 22.19), npm, Go, and make before installations or local-state changes. Missing prerequisites produce actionable errors and a nonzero exit; the script does not install operating-system packages or invoke sudo.
 2. Upstream Pi is installed with npm only when missing. The Wolfgang-maintained `pi-packages` fork is cloned on `main` beside this checkout only when absent; existing checkouts are not reset, pulled, switched, or overwritten. Its declared pnpm version installs frozen workspace dependencies. A non-user-writable global npm prefix produces an actionable error rather than invoking sudo.
-3. Initialization installs locked repository, auth-helper, thin RPC extension, and Web UI dependencies and builds both the UI and router. Each failed step stops immediately with its name and the underlying command's diagnostics. Success is printed only after all steps pass.
+3. Initialization installs locked repository, auth-helper, and Web UI dependencies and builds both the UI and router. It does not attempt to install the removed thin RPC extension. Each failed step stops immediately with its name and the underlying command's diagnostics. Success is printed only after all steps pass.
 4. New runtime directories use private permissions. The script repairs the application's state root and required runtime leaves to 0700, never the user's home or other ancestors, and preserves existing credential, database, and configuration contents.
 5. Initialization never starts services, signs into providers, imports credentials, or changes the user's normal Pi extension configuration.
 6. The Codex credential directory must be owned by the current user and mode 0700. User-owned ancestors may be 0750 or 0755 but must not be group- or world-writable. Credential files retain their existing owner, regular-file, single-link, 0600, and no-symlink requirements; ancestor checks remain unchanged.
@@ -25,7 +25,7 @@ A developer runs `tools/initialize.sh` once after cloning the repository. It ins
 - **User Goal**: Prepare a machine for managed router startup with one command.
 - **Given**: Required host commands are installed; Pi, the sibling fork, dependencies, and runtime directories are missing.
 - **When**: The developer runs `tools/initialize.sh` from any working directory.
-- **Then**: The script installs missing Pi, clones the maintained fork, installs its frozen workspace and all required application dependencies, builds the UI, prepares private runtime directories, and prints launch and provider sign-in instructions, including the explicit sibling-fork path when starting the router.
+- **Then**: The script installs missing Pi, clones the maintained fork, installs its frozen workspace and application dependencies without accessing the removed RPC extension, builds the UI, prepares private runtime directories, and prints launch and provider sign-in instructions, including the explicit sibling-fork path when starting the router.
 
 ### Scenario: [SCN-INIT-002] Repeat initialization with existing state
 - **User Goal**: Repair setup without losing local work or credentials.

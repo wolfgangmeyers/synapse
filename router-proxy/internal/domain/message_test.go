@@ -84,3 +84,26 @@ func TestBatchItemSystemNotice(t *testing.T) {
 	require.Contains(t, item, "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
 	require.NotContains(t, item, "Reply via mailbox to system")
 }
+
+// The retired RPC fixture exercised these renderer boundaries before passing
+// text to Pi. Keep the renderer cases without claiming an embedded-runtime path.
+func TestMailboxContentSenderAndBodyBoundaries(t *testing.T) {
+	for _, tc := range []struct{ from, body, expected string }{
+		{"wolfgang", "hello", "hello\n\nReply via mailbox to wolfgang"},
+		{"supervisor", "", "\n\nReply via mailbox to supervisor"},
+		{"worker-a17", "line one\n雪\n[existing hint]", "line one\n雪\n[existing hint]\n\nReply via mailbox to worker-a17"},
+		{"self", "self body", "self body\n\nReply via mailbox to self"},
+	} {
+		t.Run(tc.from, func(t *testing.T) {
+			require.Equal(t, tc.expected, MailboxContent(tc.body, tc.from))
+		})
+	}
+	for _, size := range []int{protocol.DefaultMaxBodyBytes, 16 * 1024} {
+		body := strings.Repeat("雪", size/3) + strings.Repeat("x", size%3)
+		from := strings.Repeat("雪", 128)
+		require.NoError(t, protocol.ValidateEnvelope(protocol.Envelope{ID: "message-footer", From: from, To: "supervisor", Body: body, CreatedAt: "2026-06-01T00:00:00.000Z", Source: &protocol.MessageSource{Kind: "agent"}}, size))
+		got := MailboxContent(body, from)
+		require.Equal(t, body+"\n\nReply via mailbox to "+from, got)
+		require.Len(t, got, size+407)
+	}
+}

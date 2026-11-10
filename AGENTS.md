@@ -12,7 +12,7 @@ Any behavioral change, feature implementation, or bugfix in `mecha-developer` mu
 - **Retire Redundant Brittle Tests**: Integration tests that merely mock internal JavaScript functions or duplicate E2E test coverage without testing real end-to-end boundaries should be eliminated.
 - **Specification Index**: The complete catalog of active behavioral specifications is maintained in `docs/specs/INDEX.md`.
 
-Direct specifications: [memory capture](docs/specs/memory-capture.spec.md), [router native tooling](docs/specs/router-native-tooling.spec.md), [conversation send receipt retention](docs/specs/conversation-send-receipt-retention.spec.md), [attachment startup safety](docs/specs/attachment-startup-safety.spec.md), [desktop package payload](docs/specs/desktop-package-payload.spec.md), [UI polling and freshness](docs/specs/ui-polling-freshness.spec.md), and [managed runtime contracts](docs/specs/managed-runtime-contracts.spec.md) (Draft; acceptance incomplete). Each specification retains its own status. See the [retirement crosswalk](docs/retirement-crosswalk.md) and [CLI archive record](docs/cli-archive-migration.md) for archival disposition.
+Direct specifications: [background bash](docs/specs/background-bash.spec.md) (Draft; acceptance incomplete), [memory capture](docs/specs/memory-capture.spec.md), [router native tooling](docs/specs/router-native-tooling.spec.md), [conversation send receipt retention](docs/specs/conversation-send-receipt-retention.spec.md), [attachment startup safety](docs/specs/attachment-startup-safety.spec.md), [desktop package payload](docs/specs/desktop-package-payload.spec.md), [UI polling and freshness](docs/specs/ui-polling-freshness.spec.md), and [managed runtime contracts](docs/specs/managed-runtime-contracts.spec.md) (Draft; acceptance incomplete). Each specification retains its own status. See the [retirement crosswalk](docs/retirement-crosswalk.md) and [CLI archive record](docs/cli-archive-migration.md) for archival disposition.
 
 ## How skills work
 
@@ -20,7 +20,7 @@ A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, 
 
 ## Worker Runtime
 
-Managed worker runtime is machine-local configuration. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}` and falls back to Pi when absent; explicit `--agent` overrides it. Ordinary managed Pi workers, PR-review workers, and their subagents use `google-vertex/gemini-3.8-flash` by default. Use another model only when the task explicitly requires it. Set `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed Pi launches preserve Pi's normal extension configuration. Do not pass flags that disable, replace, or selectively reconstruct extensions: every managed worker needs the same normal tools, including goal support, as an ordinary Pi session. Other runtimes likewise keep their normal extension policy. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
+Managed worker runtime is machine-local configuration. `python3 .claude/skills/supervisor/tools/worker_launch.py` (the compatibility entry point for `tools/tmux-worker/worker_launch.py`) reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}` and falls back to Pi when absent; explicit `--agent` overrides it. Ordinary managed Pi workers, PR-review workers, and their subagents use `google-vertex/gemini-3.8-flash` by default. Use another model only when the task explicitly requires it. Set `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765` for compatible worker clients. The repository’s former `mecha-messaging` Pi extension has been removed; do not assume it provides mailbox delivery. Managed Pi launches preserve Pi's normal extension configuration. Do not pass flags that disable, replace, or selectively reconstruct extensions: every managed worker needs the same normal tools, including goal support, as an ordinary Pi session. Other runtimes likewise keep their normal extension policy. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
 
 The Wolfgang-maintained Pi Subagents fork at `$HOME/code/pi-packages` is a required dependency of the mecha-developer system whenever native Pi subagent lifecycle behavior is used.
 
@@ -34,7 +34,7 @@ This installs the regular upstream Pi package. Prefix the command with `sudo` on
 
 ## Router Proxy
 
-`router-proxy/` contains the official Go Mailbox V2 router and its optional Go reverse proxy. Start the router from the repository root with `tools/run_router.sh`; router-managed Pi is enabled by default, and `MECHA_ROUTER_MANAGED=false` preserves legacy-only routing when necessary. It binds loopback by default (`127.0.0.1:8765`) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
+`router-proxy/` contains the official Go Mailbox V2 router and its optional Go reverse proxy. Start the router from the repository root with `tools/run_router.sh`; managed routes are enabled by default, and `MECHA_ROUTER_MANAGED=false` disables them. Managed launches use the embedded runtime; the former Pi RPC integration is retired. It binds loopback by default (`127.0.0.1:8765`) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
 
 Use it when another machine on the LAN, or a local process on a different port, needs the full router API surface without changing the upstream router bind address. Typical local test: upstream `127.0.0.1:8765`, listen `0.0.0.0:9876`, then point clients at `http://127.0.0.1:9876`.
 
@@ -59,7 +59,7 @@ Required flags: `--upstream-host`, `--upstream-port`, `--listen-port`. Optional 
 MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:8765
 ```
 
-The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. Pi extension clients still require a loopback hostname in `MECHA_ROUTER_URL`; use `127.0.0.1` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
+The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. For compatible local clients, use `127.0.0.1` in `MECHA_ROUTER_URL` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
 
 ## System 1 Decision Model Integration
 
@@ -95,7 +95,7 @@ When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 
 ## Supervisor Mailbox And Compaction
 
-In a Pi supervisor session with the Mailbox V2 extension, use the native top-level `mecha_mailbox_send` tool for supervisor replies. It returns the accepted message ID and state through the existing router client. Use the Mailbox V2 router sender below as the fallback for runtimes without the native tool or launcher-side sends:
+If a Pi supervisor session has a compatible Mailbox V2 tool installed, use the native top-level `mecha_mailbox_send` tool for supervisor replies. The deleted repository `mecha-messaging` extension is not an installation source. It returns the accepted message ID and state through the existing router client. Use the Mailbox V2 router sender below as the fallback for runtimes without the native tool or launcher-side sends:
 `/home/ubuntu/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py`.
 Successful fallback sends print the accepted message ID and actual router state. Do not use stale
 legacy mailbox sender copies; they write legacy disk mailbox files that
@@ -145,12 +145,6 @@ Prioritize behavioral functional tests that put as many system-owned components 
 ## Behavioral Functional Testing Standard
 
 Behavioral functional tests should exercise things hooked together — ideally a full router running workers with mock LLMs in those tests, verifying all expected behavior end-to-end across the full lifecycle (inbound messages, turns, tool execution, answer synthesis, context reset, scratchpad, goal loops, outbox delivery, and WebSocket notifications).
-
-## TypeScript Type Safety
-
-In `pi-extensions/mecha-messaging`, TypeScript code must preserve type safety. Do not use `as any`, `as unknown as`, or assertion/casting escape hatches to silence or evade a type error. Use runtime validation and narrowing at external or untyped boundaries. An assertion is allowed only when a documented, narrow boundary-validation case is absolutely necessary: keep it at that boundary, validate the value first, and add a nearby comment naming the boundary and the validation that makes the assertion sound. Do not weaken the compiler or linter to make an unsafe assertion pass.
-
-Run `npm run lint:mecha-messaging` (or `npm --prefix pi-extensions/mecha-messaging run lint`) for the enforced checks. The package linter enables `@typescript-eslint/no-explicit-any` and `@typescript-eslint/no-unsafe-type-assertion`; this rule does not enable global TypeScript strict mode or change migration, runtime, settings, installer, or test behavior.
 
 ## Single-User Workstation Assumption and Directory Permissions
 

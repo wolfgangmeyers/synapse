@@ -98,3 +98,9 @@ Existing tests are partial evidence only; they have not been run for this docume
 - **When** an older request fails or is invalidated before committing.
 - **Then** the bounded window stays bounded and the user can retry. A snapshot captured before live trimming cannot restore a stale version of a trimmed live record.
 - **Verification**: focused component and hook regression tests; browser acceptance outstanding.
+
+### Scenario: [SCN-MANAGED-PAGE-011] History created during live subscription
+- **Given** a managed conversation is selected while its live connection opens or reconnects.
+- **When** the router persists activity during subscription after an earlier history request has completed, without delivering that activity as a live entry to this connection.
+- **Then** the selected conversation refreshes after the subscription snapshot and shows the durable activity once. A failed connection continues to recover normally, and stale requests cannot overwrite the refreshed view.
+- **Verification**: focused transport regression; deterministic browser acceptance outstanding.

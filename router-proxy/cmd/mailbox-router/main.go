@@ -305,7 +305,7 @@ func main() {
 	if err != nil {
 		log.Fatal(startupResult(stageStoreManifest, err))
 	}
-	storeOpts := store.Options{MaxBatchBodyChars: options.maxBatch}
+	storeOpts := store.Options{MaxBatchBodyChars: options.maxBatch, RejectLegacyRPC: true}
 	if testClock != nil {
 		storeOpts.Clock = testClock
 	}
@@ -428,7 +428,6 @@ func main() {
 	} else if err := startupResult(stageStoreManifest, nil); err != nil {
 		log.Fatal(err)
 	}
-	managedBridgeHandler := transport.NewManagedBridgeHandler(durable)
 	if err := startupEntered(stageListen); err != nil {
 		log.Fatal(err)
 	}
@@ -440,7 +439,7 @@ func main() {
 		return startupRun(stageRootAdmission, func() error {
 			return launchConfiguredEmbeddedRoot(startupCtx, options, manager)
 		})
-	}, ManagedBridge: managedBridgeHandler, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}, RouterLogReader: routerLogReader})
+	}, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}, RouterLogReader: routerLogReader})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

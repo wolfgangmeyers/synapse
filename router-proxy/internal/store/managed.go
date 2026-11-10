@@ -776,9 +776,9 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 		return errors.New("managed process limit must be positive")
 	}
 	if agent.Runtime == "" {
-		agent.Runtime = "rpc"
+		agent.Runtime = "embedded"
 	}
-	if agent.Runtime != "rpc" && agent.Runtime != "embedded" {
+	if agent.Runtime != "embedded" {
 		return errors.New("invalid managed runtime")
 	}
 	if agent.AgentID == "" || agent.Name == "" || operation.OperationID == "" {

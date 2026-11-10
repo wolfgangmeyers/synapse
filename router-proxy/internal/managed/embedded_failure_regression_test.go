@@ -37,12 +37,17 @@ type failureFixture struct {
 }
 
 func newFailureFixture(t *testing.T) *failureFixture {
+	return newFailureFixtureWithOptions(t, store.Options{})
+}
+
+func newFailureFixtureWithOptions(t *testing.T, options store.Options) *failureFixture {
 	t.Helper()
 	f := &failureFixture{root: t.TempDir(), clock: deterministic.NewFixedClock(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC))}
 	require.NoError(t, os.Chmod(f.root, 0700))
 	f.path = filepath.Join(f.root, "router.db")
 	var err error
-	f.db, err = store.Open(context.Background(), f.path, store.Options{Clock: f.clock})
+	options.Clock = f.clock
+	f.db, err = store.Open(context.Background(), f.path, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, f.db.Close()) })
 	f.raw, err = sql.Open("sqlite", f.path)

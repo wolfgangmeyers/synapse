@@ -116,7 +116,7 @@ func ValidateManagedLaunchConfig(config Config) error {
 	}
 	copy := config
 	copy.normalize()
-	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.RouterURL == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
+	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.RouterURL == "" || copy.ManifestPath == "" || copy.PiSubagentsExtension == "" {
 		return errors.New("managed mode requires core launch inputs")
 	}
 	if err := ValidateManagedRouterURL(copy.RouterURL); err != nil {
@@ -164,7 +164,6 @@ func ValidateManagedLaunchConfig(config Config) error {
 		path string
 	}{
 		{"manifest", copy.ManifestPath},
-		{"thin extension", copy.MechaRPCExtension},
 		{"pi-subagents entry", copy.PiSubagentsExtension},
 	} {
 		if err := ValidateContainedRegularFile(input.path, "", input.name); err != nil {
@@ -177,7 +176,6 @@ func ValidateManagedLaunchConfig(config Config) error {
 			path string
 		}{
 			{"managed manifest", copy.ManifestPath},
-			{"thin extension", copy.MechaRPCExtension},
 			{"auth helper", copy.AuthHelperPath},
 		}
 		if copy.CursorExtension != "" {

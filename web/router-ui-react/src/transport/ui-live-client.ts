@@ -74,7 +74,14 @@ function withoutLegacyRecordKey(frame: UILiveFrame): UILiveFrame {
 
 export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
   const listeners = new Set<(frame: UILiveFrame | "connected" | "disconnected") => void>();
-  const publish = (frame: UILiveFrame): void => { options.onFrame(frame); for (const listener of listeners) listener(frame); };
+  const publish = (frame: UILiveFrame): void => {
+    const source = socket;
+    options.onFrame(frame);
+    for (const listener of listeners) {
+      if (socket !== source || stopped || source?.readyState !== 1) break;
+      listener(frame);
+    }
+  };
   const url = directUILiveURL(options.routerUrl);
   const factory = options.webSocketFactory ?? defaultFactory;
   const baseRetryDelay = options.retryDelayMs ?? 250;
@@ -139,7 +146,7 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     scheduleReconnect();
   };
   const protocolError = (cause: string): UILiveTransportError => new UILiveTransportError("UI_LIVE_PROTOCOL_INVALID", cause);
-  const onMessage = (data: unknown): void => {
+  const onMessage = (data: unknown, candidate: WebSocketLike): void => {
     if (typeof data !== "string") { recover(protocolError("frame_not_text")); return; }
     let raw: unknown;
     try { raw = JSON.parse(data); } catch { recover(protocolError("frame_not_json")); return; }
@@ -154,8 +161,20 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
       // version; only a regressed snapshot could resurrect stale agent state.
       if (version !== undefined && frame.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
       version = frame.projection_version;
+      const firstSnapshot = !agentSnapshotAccepted;
       agentSnapshotAccepted = true;
       publish(frame);
+      // The WebSocket upgrade precedes server-side subscription and its durable
+      // history publication. The first snapshot is the subscription barrier.
+      if (firstSnapshot && socket === candidate && !stopped && candidate.readyState === 1) {
+        clearConnectTimeout();
+        retryAttempts = 0;
+        options.onConnect?.();
+        for (const listener of listeners) {
+          if (socket !== candidate || stopped || candidate.readyState !== 1) break;
+          listener("connected");
+        }
+      }
       return;
     }
     if (frame.type === "managed_agent_delta" || frame.type === "managed_agent_removed") {
@@ -189,30 +208,25 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     if (stopped) return;
     if (socket !== undefined) {
       if (socket.readyState === 0 || socket.readyState === 1) return;
-      try { socket.close(); } catch { /* ignore */ }
+      const oldSocket = socket;
       socket = undefined;
+      try { oldSocket.close(); } catch { /* ignore */ }
     }
     if (reconnectTimer !== undefined) {
       clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
     }
     clearConnectTimeout();
+    resetProjection();
     const candidate = factory(url);
     socket = candidate;
     connectTimeoutTimer = setTimeout(() => {
       connectTimeoutTimer = undefined;
-      if (socket === candidate && candidate.readyState === 0) {
-        recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_connect_timeout"));
+      if (socket === candidate && !agentSnapshotAccepted) {
+        recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", candidate.readyState === 0 ? "websocket_connect_timeout" : "websocket_snapshot_timeout"));
       }
     }, connectTimeoutMs);
-    candidate.addEventListener("open", () => {
-      if (socket !== candidate || stopped) return;
-      clearConnectTimeout();
-      retryAttempts = 0;
-      options.onConnect?.();
-      for (const listener of listeners) listener("connected");
-    });
-    candidate.addEventListener("message", (event) => { if (socket === candidate && !stopped) onMessage(event.data); });
+    candidate.addEventListener("message", (event) => { if (socket === candidate && !stopped && candidate.readyState === 1) onMessage(event.data, candidate); });
     candidate.addEventListener("close", () => {
       if (socket !== candidate) return;
       clearConnectTimeout();

@@ -17,7 +17,9 @@ func redBind(t *testing.T, s *Store, agent, session string, epoch int64, generat
 	t.Helper()
 	// Legacy fixture writes the session directly, but only after reserving its
 	// authoritative managed row. Rebind on reopen models a committed replacement.
-	_, err := s.db.Exec(`INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,?,'openai-codex','gpt-5','running','running','idle','embedded',?,?,?,1,?,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z') ON CONFLICT(agent_id) DO UPDATE SET pi_session_id=excluded.pi_session_id,session_epoch=excluded.session_epoch,runtime_generation=excluded.runtime_generation`, agent, agent, t.TempDir(), session, epoch, generation, testManifestHash)
+	_, err := s.db.Exec(`INSERT INTO agents(agent_id,first_seen_at) VALUES(?, '2026-01-01T00:00:00Z') ON CONFLICT(agent_id) DO NOTHING`, agent)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,?,'openai-codex','gpt-5','running','running','idle','embedded',?,?,?,1,?,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z') ON CONFLICT(agent_id) DO UPDATE SET pi_session_id=excluded.pi_session_id,session_epoch=excluded.session_epoch,runtime_generation=excluded.runtime_generation`, agent, agent, t.TempDir(), session, epoch, generation, testManifestHash)
 	require.NoError(t, err)
 	_, err = s.db.Exec(`INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, agent, session, epoch, generation, role)
 	require.NoError(t, err)

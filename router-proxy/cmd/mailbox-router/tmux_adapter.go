@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -48,7 +50,13 @@ func (adapter *tmuxAdapter) ProvisionSession(ctx context.Context, session, name 
 }
 
 func (adapter *tmuxAdapter) Windows(ctx context.Context, session string) ([]transport.TmuxWindow, error) {
-	output, err := adapter.run(ctx, "list-windows", "-t", session, "-F", "#{window_name}")
+	var seed [16]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return nil, err
+	}
+	// Both commands execute in one tmux queue. The option is scoped to the tmux
+	// server and disappears when it dies; concurrent routers do not replace it.
+	output, err := adapter.run(ctx, "if-shell", "-F", "#{==:#{@mecha_server_id},}", "set-option -g @mecha_server_id "+hex.EncodeToString(seed[:]), "", ";", "list-windows", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{@mecha_server_id}")
 	if exitCode(err, 1) {
 		return nil, fmt.Errorf("%w: %v", transport.ErrTmuxUnavailable, err)
 	}
@@ -57,8 +65,12 @@ func (adapter *tmuxAdapter) Windows(ctx context.Context, session string) ([]tran
 	}
 	names := splitTmuxLines(output)
 	windows := make([]transport.TmuxWindow, 0, len(names))
-	for _, name := range names {
-		windows = append(windows, transport.TmuxWindow{Name: name, Target: session + ":" + name})
+	for _, line := range names {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 || !validWindowID(fields[1]) || !validServerID(fields[2]) {
+			return nil, fmt.Errorf("invalid tmux window inventory")
+		}
+		windows = append(windows, transport.TmuxWindow{Name: fields[0], Target: session + ":" + fields[0], WindowID: fields[1], ServerID: fields[2]})
 	}
 	return windows, nil
 }
@@ -131,6 +143,43 @@ func (adapter *tmuxAdapter) Rename(ctx context.Context, session, name, nextName 
 
 func (adapter *tmuxAdapter) SendKeys(ctx context.Context, session, name, keys, _ string) error {
 	_, err := adapter.run(ctx, "send-keys", "-t", session+":"+name, "-l", keys)
+	return err
+}
+
+// Tmux window IDs are server-unique and never reused during the server lifetime.
+func validWindowID(id string) bool {
+	if len(id) < 2 || id[0] != '@' {
+		return false
+	}
+	for _, c := range id[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validServerID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil && strings.ToLower(id) == id
+}
+
+func (adapter *tmuxAdapter) SendKeysToWindowID(ctx context.Context, id, serverID, keys string) error {
+	if !validWindowID(id) || !validServerID(serverID) || keys == "" {
+		return fmt.Errorf("invalid tmux window identity")
+	}
+	// tmux evaluates the server token and executes send-keys in the same server
+	// command queue. Hex encoding keeps arbitrary terminal bytes out of tmux syntax.
+	bytes := []byte(keys)
+	hexKeys := make([]string, len(bytes))
+	for i, b := range bytes {
+		hexKeys[i] = fmt.Sprintf("%02x", b)
+	}
+	command := "send-keys -t " + id + " -H " + strings.Join(hexKeys, " ")
+	_, err := adapter.run(ctx, "if-shell", "-F", "#{==:#{@mecha_server_id},"+serverID+"}", command, "send-keys -t @999999999999999999999999999999 -H 00")
 	return err
 }
 

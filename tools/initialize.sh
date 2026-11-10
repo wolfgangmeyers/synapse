@@ -52,7 +52,6 @@ pnpm_package="$(node -p 'require(process.argv[1]).packageManager' "$FORK_DIR/pac
 step "Install fork workspace dependencies" npm exec --yes --package "$pnpm_package" -- pnpm --dir "$FORK_DIR" install --frozen-lockfile
 step "Install repository dependencies" npm --prefix "$ROOT_DIR" ci
 step "Install auth helper dependencies" npm --prefix "$ROOT_DIR/auth-helper" ci
-step "Install RPC extension dependencies" npm --prefix "$ROOT_DIR/pi-extensions/mecha-rpc" ci
 step "Install Web UI dependencies" npm --prefix "$ROOT_DIR/web/router-ui-react" ci
 step "Build Web UI" npm --prefix "$ROOT_DIR/web/router-ui-react" run build
 export GOCACHE="${GOCACHE:-$state_dir/go-build-cache}"

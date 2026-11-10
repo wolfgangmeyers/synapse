@@ -87,9 +87,10 @@ test("initializes a fresh checkout from another working directory", async () => 
     "git", "clone", "--branch", "main", "https://github.com/wolfgangmeyers/pi-packages.git", f.fork,
   ]);
   expect(commands.some(args => args.includes("pnpm@11.5.2") && args.includes("--frozen-lockfile"))).toBe(true);
-  for (const directory of ["", "auth-helper", "pi-extensions/mecha-rpc", "web/router-ui-react"]) {
+  for (const directory of ["", "auth-helper", "web/router-ui-react"]) {
     expect(commands).toContainEqual(["npm", "--prefix", join(f.checkout, directory), "ci"]);
   }
+  expect(commands.some(args => args.some(arg => arg.includes("pi-extensions/mecha-rpc")))).toBe(false);
   expect(commands).toContainEqual(["npm", "--prefix", join(f.checkout, "web/router-ui-react"), "run", "build"]);
   expect(commands).toContainEqual(["make", "-C", join(f.checkout, "router-proxy"), "build-router-local"]);
   for (const directory of [".mecha-developer", ".mecha-developer/managed-pi", ".mecha-developer/managed-pi/sessions", ".pi/agent"]) {

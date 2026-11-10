@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
-import { createClaudeSidecar, createTmuxInjector } from "../.claude/skills/supervisor/tools/claude_sidecar.mjs";
-import { createTmuxRestClient } from "../harness/tmux-rest-client.js";
+import { createMailboxClient } from "../tools/tmux-worker/mailbox-client.js";
+import { createClaudeSidecar, createTmuxInjector } from "../tools/tmux-worker/claude_sidecar.mjs";
+import { createTmuxRestClient } from "../tools/tmux-worker/tmux-rest-client.js";
 
 const cases = [
   { from: "wolfgang", to: "supervisor", body: "first\r\n雪\u001b[31mred\u001b[0m\u0000\u0085\tend",
@@ -37,18 +37,18 @@ async function fixture(t, transport, target) {
   // Only external HTTP, terminal execution and clocks are replaced.
   const tmuxRest = createTmuxRestClient({ fetchImpl: async (url, options) => {
     requests.push({ url, ...options });
-    if (options.method === "GET") return { ok: true, json: async () => ({ windows: [{ name: target }] }) };
+    if (options.method === "GET") return { ok: true, json: async () => ({ windows: [{ name: target, window_id: "@7", server_id: "a".repeat(32) }] }) };
     const { keys } = JSON.parse(options.body);
     return { ok: !(failText && keys.startsWith("Mailbox message")), json: async () => ({}) };
   } });
   if (transport === "rest") {
     t.mock.method(globalThis, "setTimeout", (callback, ms) => {
-      assert.equal(ms, 5000);
+      assert.equal(ms, 0);
       queueMicrotask(callback);
       return 1;
     });
   }
-  const inject = createTmuxInjector(transport === "rest" ? { tmuxRest } : {
+  const inject = createTmuxInjector(transport === "rest" ? { tmuxRest, windowId: "@7", serverId: "a".repeat(32), enterDelayMs: 0 } : {
     tmux: (args) => {
       argv.push(args);
       if (failText && args[1] === "-l") throw new Error("external terminal failure");
@@ -100,7 +100,7 @@ for (const transport of ["rest", "subprocess"]) {
       if (transport === "rest") {
         assert.deepEqual(f.requests.map((request) => [request.method, request.url, request.body]), [
           ["GET", "http://127.0.0.1:8765/v1/tmux/windows", undefined],
-          ...["\u001b[200~", expected, "\u001b[201~", "\r"].map((keys) => ["POST", `http://127.0.0.1:8765/v1/tmux/windows/${value.to}/keys`, JSON.stringify({ keys })]),
+          ...["\u001b[200~", expected, "\u001b[201~", "\r"].map((keys) => ["POST", `http://127.0.0.1:8765/v1/tmux/windows/${value.to}/keys`, JSON.stringify({ keys, window_id: "@7", server_id: "a".repeat(32) })]),
         ]);
       } else {
         assert.deepEqual(f.argv, [

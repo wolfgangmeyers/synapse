@@ -618,13 +618,10 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		}
 		selected = &managed.Model{Provider: provider, ID: id}
 	}
-	runtime := "rpc"
-	if r.defaultEmbeddedRoot {
-		runtime = "embedded"
-	}
+	runtime := "embedded"
 	if _, ok := payload["runtime"]; ok {
 		runtime, err = managedString(payload, "runtime", true)
-		if err != nil || (runtime != "rpc" && runtime != "embedded") {
+		if err != nil || runtime != "embedded" {
 			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_RUNTIME", "Runtime is invalid"})
 			return
 		}

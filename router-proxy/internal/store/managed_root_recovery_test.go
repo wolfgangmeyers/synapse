@@ -392,7 +392,6 @@ func TestManagedLaunchRecipeDigestLegacyGoldenHashAndAntigravityExtension(t *tes
 		func(r *ManagedLaunchRecipe) { r.Cwd = "" },
 		func(r *ManagedLaunchRecipe) { r.Provider = "" },
 		func(r *ManagedLaunchRecipe) { r.ModelID = "" },
-		func(r *ManagedLaunchRecipe) { r.MechaRPCExtension = "" },
 		func(r *ManagedLaunchRecipe) { r.PiSubagentsExtension = "" },
 	} {
 		bad := legacyRecipe
@@ -402,6 +401,8 @@ func TestManagedLaunchRecipeDigestLegacyGoldenHashAndAntigravityExtension(t *tes
 	}
 	for _, mutate := range []func(*ManagedLaunchRecipe){
 		func(r *ManagedLaunchRecipe) { r.PiExecutable = strings.Repeat("a", 4097) },
+		func(r *ManagedLaunchRecipe) { r.MechaRPCExtension = strings.Repeat("r", 4097) },
+		func(r *ManagedLaunchRecipe) { r.MechaRPCExtension = "\xff" },
 		func(r *ManagedLaunchRecipe) { r.CursorExtension = strings.Repeat("b", 4097) },
 	} {
 		bad := legacyRecipe
@@ -503,4 +504,17 @@ func TestManagedLaunchRecipeSchemaCorruptionSurfacesError(t *testing.T) {
 		_, err = durable.ManagedAgent(ctx, fence.AgentID)
 		require.Error(t, err, "corrupted schema_migrations table must surface error, not suppress")
 	}
+}
+
+func TestManagedLaunchRecipeOptionalRetiredRPC(t *testing.T) {
+	legacy := managedRootRecoveryRecipeFixture()
+	require.NoError(t, ValidateManagedLaunchRecipe(legacy))
+	empty := legacy
+	empty.MechaRPCExtension = ""
+	empty, err := ManagedLaunchRecipeDigest(empty)
+	require.NoError(t, err)
+	require.NoError(t, ValidateManagedLaunchRecipe(empty))
+	require.NotEqual(t, legacy.SHA256, empty.SHA256)
+	empty.MechaRPCExtension = legacy.MechaRPCExtension
+	require.ErrorContains(t, ValidateManagedLaunchRecipe(empty), "hash is invalid")
 }

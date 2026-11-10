@@ -110,6 +110,27 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     await f.final(page, agent, "Executable restored");
   });
 
+  test("native ToolSearch references survive checked storage", async ({ page }) => {
+    const refs = [{ type: "tool_reference", tool_name: "mcp__mecha__scratchpad" },
+      { type: "tool_reference", tool_name: "mcp__mecha__goal" }];
+    f = await claudeWorkersHarness({ turns: [[
+      { tool: { id: "search-ref", name: "ToolSearch", input: { query: "select:scratchpad,goal" }, result: refs } },
+      { tool: { id: "search-empty", name: "ToolSearch", input: { query: "missing" }, result: [] } },
+      { tool: { id: "read-text", name: "Read", input: { file_path: "note.txt" }, result: "ordinary output" } },
+      text("Search complete")]] });
+    await f.open(page); agent = await f.launch(page); await f.userTurn(page, "Search tools");
+    await f.final(page, agent, "Search complete");
+    const rows = f.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind IN ('toolResult','tool_result') ORDER BY seq", agent);
+    const results = rows.map(row => JSON.parse(String(row.body)));
+    const search = results.find(result => result.toolCallId === "search-ref");
+    expect(search).toBeDefined();
+    expect(search.content).toEqual([{ type: "text", text: refs.map(ref => JSON.stringify(ref)).join("") }]);
+    expect(JSON.stringify(results)).toContain("ordinary output");
+    const empty = results.find(result => result.toolCallId === "search-empty");
+    expect(empty).toBeDefined();
+    expect(empty.content).toEqual([{ type: "text", text: "" }]);
+  });
+
   test("CC-003 renders images tool steps and final without automatic mail", async ({ page }) => {
     f = await claudeWorkersHarness({ turns: [[{ thinking: "Inspecting deterministic image" },
       { tool: { id: "native-read", name: "Read", input: { file_path: "note.txt" }, result: "local fixture contents" } },

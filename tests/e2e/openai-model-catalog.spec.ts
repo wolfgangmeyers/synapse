@@ -435,7 +435,7 @@ import { startIsolatedRouter } from '${repoRoot}/tests/e2e/harness.ts';
 await assert.rejects(startIsolatedRouter({ repoRoot: '${root}/repo', managed: false }), /exited prematurely/);
 assert.equal(existsSync(dirname(readFileSync('${root}/binary-path', 'utf8'))), false);
 `);
-    execFileSync(process.execPath, ["--import", join(repoRoot, "pi-extensions/mecha-rpc/node_modules/tsx/dist/loader.mjs"), script], {
+    execFileSync(process.execPath, ["--experimental-strip-types", script], {
       env: { ...process.env, PATH: `${root}/bin:${process.env.PATH}`, TMPDIR: join(root, "tmp") },
       timeout: 6_000, killSignal: "SIGKILL", stdio: "pipe",
     });

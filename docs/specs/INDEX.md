@@ -39,11 +39,13 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-RESET-OWNER-HANDLES` | Reset owner-bound handles and transaction outcomes | `AgentManagement` | [`reset-owner-handles.spec.md`](./reset-owner-handles.spec.md) | Go regression tests; complete E2E mapping pending | `Draft` |
 | `SPEC-BB-FENCE-001` | Background bash owner lifetime fencing | `AgentManagement` | [`background-bash-owner-capability.spec.md`](./background-bash-owner-capability.spec.md) | `tests/e2e/background-bash-owner-isolation.spec.ts` (partial) | `Draft` |
 | `SPEC-AGENT-CLAUDE-LATE-STEER` | Claude late steering echo | `AgentManagement` | [`claude-late-steer.spec.md`](./claude-late-steer.spec.md) | `tests/e2e/claude-late-echo.spec.ts` | `Draft` |
+| `SPEC-AGENT-LEGACY-RPC-001` | Legacy RPC preservation | `AgentManagement` | [`legacy-rpc-preservation.spec.md`](./legacy-rpc-preservation.spec.md) | `tests/e2e/legacy-rpc-preservation.spec.ts` (planned) | `Draft` |
 | `SPEC-CLAUDE-CHILD-CAPACITY-001` | Claude child resource capacity and cancellation | `AgentManagement` | [`claude-child-capacity.spec.md`](./claude-child-capacity.spec.md) | `tests/e2e/claude-child-reservations.spec.ts` and `tests/e2e/claude-child-capacity-fixture.spec.ts` (partial); Go admission regressions | `Draft` |
 | `SPEC-CLAUDE-CHILD-ANSWER-001` | Claude child answer settlement | `AgentManagement` | [`claude-child-answer.spec.md`](./claude-child-answer.spec.md) | `tests/e2e/claude-child-answer-settlement-supplement.spec.ts` (eight settlement cases; Draft) | `Draft` |
 | `SPEC-CLAUDE-CHILD-RESUME-001` | Claude child single attempt | `AgentManagement` | [`claude-child-effect-resume.spec.md`](./claude-child-effect-resume.spec.md) | `tests/e2e/claude-child-effect-resume.spec.ts` (partial) | `Draft` |
 | `SPEC-AGENT-POLLING-001` | UI polling and freshness | `AgentManagement` | [`ui-polling-freshness.spec.md`](./ui-polling-freshness.spec.md) | `tests/e2e/ui-polling-freshness.spec.ts` | `Draft` |
 | `SPEC-MAILBOX-ATTACHMENT-STARTUP-001` | Attachment Safety During Router Startup | `Mailbox` | [`attachment-startup-safety.spec.md`](./attachment-startup-safety.spec.md) | `tests/e2e/attachment-startup-safety.spec.ts` | `Active` |
+| `SPEC-MAILBOX-TMUX-001` | tmux Claude worker mailbox | `Mailbox` | [`tmux-claude-mailbox.spec.md`](./tmux-claude-mailbox.spec.md) | `tests/e2e/tmux-claude-mailbox.spec.ts` | `Draft` |
 | `SPEC-MAILBOX-RECEIPTS-001` | Bounded Conversation Send Receipts | `Mailbox` | [`conversation-send-receipt-retention.spec.md`](./conversation-send-receipt-retention.spec.md) | `tests/e2e/conversation-send-receipt-retention.spec.ts` | `Active` |
 | `SPEC-MAILBOX-001` | Mailbox Progress Across Session Replacement | `Mailbox` | [`mailbox-session-recovery.spec.md`](./mailbox-session-recovery.spec.md) | `tests/e2e/mailbox-session-recovery.spec.ts` (one combined ordinary/reset TC; remaining matrix planned) | `Draft` |
 | `SPEC-GOAL-001` | Bounded Automatic Goal Wakeups | `AgentManagement` | [`goal-wake-safety.spec.md`](./goal-wake-safety.spec.md) | `tests/e2e/goal-wake-safety.spec.ts` (one partial GWS-002/003 TC; remaining matrix planned) | `Draft` |
@@ -123,10 +125,18 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `SPEC-MEMORY-001` | Memory Capture | `Mailbox` | [`memory-capture.spec.md`](./memory-capture.spec.md) | `tests/e2e/memory-capture.spec.ts` | `Active` |
+| `SPEC-MEMORY-001` | Memory policy & absent catalog; Pi capture lifecycle retired | `Mailbox` | [`memory-capture.spec.md`](./memory-capture.spec.md) | `tests/e2e/memory-capture.spec.ts` (router policy and absent catalog only) | `Active` (router scope); lifecycle retired |
 | `SPEC-ROUTER-TOOLS-001` | Router Native Tooling | `Mailbox` | [`router-native-tooling.spec.md`](./router-native-tooling.spec.md) | `tests/e2e/router-native-tooling.spec.ts` | `Active` |
 | `SPEC-DESKTOP-001` | Desktop Package Payload | `AgentManagement` | [`desktop-package-payload.spec.md`](./desktop-package-payload.spec.md) | `tests/e2e/desktop-package-payload.spec.ts` | `Active` |
 | `SPEC-MANAGED-RUNTIME-001` | Managed Runtime Contracts | `AgentManagement` | [`managed-runtime-contracts.spec.md`](./managed-runtime-contracts.spec.md) | Complete Playwright mapping pending | `Draft` |
+
+---
+
+## UI-live Readiness
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-AGENT-UI-LIVE-READINESS-001` | UI-live readiness and recovery | `AgentManagement` | [`ui-live-readiness.spec.md`](./ui-live-readiness.spec.md) | Pending | `Draft` |
 
 ---
 

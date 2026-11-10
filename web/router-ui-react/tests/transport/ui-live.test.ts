@@ -46,7 +46,7 @@ describe("direct UI-live transport", () => {
     expect(frames).toHaveLength(2);
     sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 10, base_version: 8, agent_id: "managed-alpha", changes: agent }) });
     expect(recoveries).toHaveBeenCalledTimes(1);
-    vi.runAllTimers();
+    vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 10, generated_at: "2030-01-01T00:00:02.000Z", agents: [agent] }) });
     expect(client.projectionVersion).toBe(10);
@@ -97,7 +97,45 @@ describe("direct UI-live transport", () => {
     }
   });
 
-  it("calls onConnect when the underlying websocket opens", () => {
+  it("recovers an open socket without a snapshot and accepts a timely retry", () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: UILiveSocket[] = [];
+      const errors = vi.fn();
+      const recoveries = vi.fn();
+      const connects = vi.fn();
+      const events = vi.fn();
+      const client = createUILiveClient({
+        routerUrl: "http://router.test", connectTimeoutMs: 100, retryDelayMs: 10,
+        webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; },
+        onFrame: () => {}, onError: errors, onRecovery: recoveries, onConnect: connects,
+      });
+      client.subscribe?.(events);
+      client.connect();
+      sockets[0]?.emit("open", {});
+      vi.advanceTimersByTime(99);
+      expect(recoveries).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(errors).toHaveBeenCalledWith(expect.objectContaining({ cause: "websocket_snapshot_timeout" }));
+      expect(recoveries).toHaveBeenCalledTimes(1);
+      expect(events).toHaveBeenCalledWith("disconnected");
+      expect(sockets[0]?.readyState).toBe(3);
+      expect(connects).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(10);
+      expect(sockets).toHaveLength(2);
+      sockets[1]?.emit("open", {});
+      vi.advanceTimersByTime(99);
+      sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] }) });
+      expect(connects).toHaveBeenCalledTimes(1);
+      expect(events).toHaveBeenCalledWith("connected");
+      vi.advanceTimersByTime(200);
+      expect(recoveries).toHaveBeenCalledTimes(1);
+      expect(sockets[1]?.readyState).toBe(1);
+      client.close();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("signals connection only after the first subscription snapshot", () => {
     const sockets: UILiveSocket[] = [];
     const connects = vi.fn();
     const client = createUILiveClient({
@@ -113,8 +151,196 @@ describe("direct UI-live transport", () => {
     client.connect();
     expect(connects).not.toHaveBeenCalled();
     sockets[0]?.emit("open", {});
+    expect(connects).not.toHaveBeenCalled();
+    const snapshot = { type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] };
+    sockets[0]?.emit("message", { data: JSON.stringify(snapshot) });
+    expect(connects).toHaveBeenCalledTimes(1);
+    sockets[0]?.emit("message", { data: JSON.stringify(snapshot) });
     expect(connects).toHaveBeenCalledTimes(1);
     client.close();
+  });
+
+  it.each(["onFrame", "subscriber", "onConnect"])("does not announce readiness after %s closes the client", (closer) => {
+    vi.useFakeTimers();
+    try {
+      const socket = new UILiveSocket();
+      const connects = vi.fn();
+      const events: unknown[] = [];
+      const client = createUILiveClient({
+        routerUrl: "http://router.test", webSocketFactory: () => socket,
+        onFrame: () => { if (closer === "onFrame") client.close(); },
+        onConnect: () => { connects(); if (closer === "onConnect") client.close(); },
+      });
+      client.subscribe?.((event) => { events.push(event); if (closer === "subscriber" && typeof event !== "string") client.close(); });
+      client.subscribe?.((event) => events.push(event));
+      client.connect();
+      socket.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] }) });
+      expect(connects).toHaveBeenCalledTimes(closer === "onConnect" ? 1 : 0);
+      expect(events).not.toContain("connected");
+      vi.advanceTimersByTime(20_000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not announce readiness when snapshot delivery starts an asynchronous socket close", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new UILiveSocket();
+      const connects = vi.fn();
+      const events = vi.fn();
+      const client = createUILiveClient({ routerUrl: "http://router.test", webSocketFactory: () => socket, onFrame: () => { socket.readyState = 2; }, onConnect: connects });
+      client.subscribe?.(events);
+      client.connect();
+      socket.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] }) });
+      expect(connects).not.toHaveBeenCalled();
+      expect(events).not.toHaveBeenCalledWith("connected");
+      socket.emit("close", {});
+      client.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("ignores messages arriving after the socket starts closing", () => {
+    const socket = new UILiveSocket();
+    const onFrame = vi.fn();
+    const subscriber = vi.fn();
+    const client = createUILiveClient({ routerUrl: "http://router.test", webSocketFactory: () => socket, onFrame });
+    client.subscribe?.(subscriber);
+    client.connect();
+    socket.readyState = 2;
+    socket.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] }) });
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(subscriber).not.toHaveBeenCalled();
+    expect(client.projectionVersion).toBeUndefined();
+    client.close();
+  });
+
+  it.each(["onFrame", "subscriber"])("stops frame delivery when %s starts an asynchronous close", (closer) => {
+    const socket = new UILiveSocket();
+    const received = vi.fn();
+    const client = createUILiveClient({
+      routerUrl: "http://router.test", webSocketFactory: () => socket,
+      onFrame: () => { if (closer === "onFrame") socket.readyState = 2; },
+    });
+    client.subscribe?.((event) => { if (closer === "subscriber" && typeof event !== "string") socket.readyState = 2; });
+    client.subscribe?.(received);
+    client.connect();
+    socket.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [] }) });
+    expect(received).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it.each(["onFrame", "subscriber"])("stops old frame delivery when %s replaces the socket", (replacer) => {
+    const sockets: UILiveSocket[] = [];
+    const received: unknown[] = [];
+    const snapshot = (version: number) => JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: version, generated_at: "2030-01-01T00:00:00.000Z", agents: [] });
+    const replace = () => {
+      if (sockets.length === 1) {
+        sockets[0]!.readyState = 2;
+        client.connect();
+        sockets[1]!.emit("message", { data: snapshot(1) });
+      }
+    };
+    const client = createUILiveClient({
+      routerUrl: "http://router.test",
+      webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; },
+      onFrame: () => { if (replacer === "onFrame") replace(); },
+    });
+    client.subscribe?.((event) => { if (replacer === "subscriber" && typeof event !== "string") replace(); });
+    client.subscribe?.((event) => { if (typeof event !== "string" && event.type === "managed_agents_snapshot") received.push(event.projection_version); });
+    client.connect();
+    sockets[0]!.emit("message", { data: snapshot(10) });
+    expect(received).toEqual([1]);
+    expect(client.projectionVersion).toBe(1);
+    client.close();
+  });
+
+  it.each(["stalled", "lower version"])("isolates a %s replacement started during snapshot delivery", (replacement) => {
+    vi.useFakeTimers();
+    try {
+      const sockets: UILiveSocket[] = [];
+      const errors = vi.fn();
+      const connects = vi.fn();
+      const events = vi.fn();
+      const snapshot = (version: number) => JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: version, generated_at: "2030-01-01T00:00:00.000Z", agents: [] });
+      const client = createUILiveClient({
+        routerUrl: "http://router.test", connectTimeoutMs: 100, retryDelayMs: 10,
+        webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; },
+        onFrame: () => {
+          if (sockets.length === 1) {
+            sockets[0]!.readyState = 2;
+            client.connect();
+          }
+        },
+        onConnect: connects, onError: errors,
+      });
+      client.subscribe?.(events);
+      client.connect();
+      sockets[0]!.emit("message", { data: snapshot(10) });
+      expect(sockets).toHaveLength(2);
+      expect(client.projectionVersion).toBeUndefined();
+      expect(connects).not.toHaveBeenCalled();
+      // Also exercise a delayed duplicate close after synchronous cleanup.
+      sockets[0]!.emit("close", {});
+      if (replacement === "stalled") {
+        vi.advanceTimersByTime(100);
+        expect(errors).toHaveBeenCalledWith(expect.objectContaining({ cause: "websocket_snapshot_timeout" }));
+        vi.advanceTimersByTime(10);
+        expect(sockets).toHaveLength(3);
+      } else {
+        sockets[1]!.emit("message", { data: snapshot(1) });
+        expect(client.projectionVersion).toBe(1);
+        expect(connects).toHaveBeenCalledTimes(1);
+        expect(events).toHaveBeenCalledWith("connected");
+        vi.advanceTimersByTime(100);
+        expect(errors).not.toHaveBeenCalled();
+        expect(sockets).toHaveLength(2);
+      }
+      client.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    [42, "frame_not_text"],
+    ["{", "frame_not_json"],
+    [JSON.stringify({ type: "managed_agents_snapshot", agents: [] }), "frame_invalid"],
+  ])("recovers from malformed initial frames (%s)", (data, cause) => {
+    vi.useFakeTimers();
+    try {
+      const socket = new UILiveSocket();
+      const errors = vi.fn();
+      const connects = vi.fn();
+      const client = createUILiveClient({ routerUrl: "http://router.test", webSocketFactory: () => socket, onFrame: () => {}, onError: errors, onConnect: connects });
+      client.connect();
+      socket.emit("message", { data });
+      expect(errors).toHaveBeenCalledWith(expect.objectContaining({ cause }));
+      expect(connects).not.toHaveBeenCalled();
+      expect(client.projectionVersion).toBeUndefined();
+      client.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("ignores stale socket messages and errors without cancelling the replacement deadline", () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: UILiveSocket[] = [];
+      const errors = vi.fn();
+      const frames = vi.fn();
+      const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, connectTimeoutMs: 50, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: frames, onError: errors });
+      client.connect();
+      sockets[0]?.emit("error", {});
+      vi.advanceTimersByTime(1);
+      sockets[0]?.emit("message", { data: "{" });
+      sockets[0]?.emit("error", {});
+      expect(errors).toHaveBeenCalledTimes(1);
+      expect(frames).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(50);
+      expect(errors).toHaveBeenLastCalledWith(expect.objectContaining({ cause: "websocket_snapshot_timeout" }));
+      client.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("applies new and bounded legacy lifecycle frames without recovery", () => {
@@ -167,7 +393,7 @@ describe("direct UI-live transport", () => {
     sockets[0]?.emit("message", { data: JSON.stringify({ type: "history_entry", protocol: "mecha.web/v1", projection_version: 4, view: "complete", entry: { id: "history-1", message: "A managed event" } }) });
     expect(frames).toHaveLength(0);
     expect(recoveries).toHaveBeenCalledTimes(1);
-    vi.runAllTimers();
+    vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 4, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
     expect(frames).toHaveLength(1);
@@ -260,7 +486,7 @@ describe("direct UI-live transport", () => {
     expect(recoveries).not.toHaveBeenCalled();
     sockets[0]?.emit("message", { data: JSON.stringify(childSnapshot(8)) });
     expect(recoveries).toHaveBeenCalledTimes(1);
-    vi.runAllTimers();
+    vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
@@ -269,7 +495,7 @@ describe("direct UI-live transport", () => {
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 8, generated_at: "2030-01-01T00:00:02.000Z", agents: [agent] }) });
     expect(recoveries).toHaveBeenCalledTimes(2);
     expect(frames).toHaveLength(5);
-    vi.runAllTimers();
+    vi.advanceTimersByTime(3);
     expect(sockets).toHaveLength(3);
     client.close();
     vi.useRealTimers();

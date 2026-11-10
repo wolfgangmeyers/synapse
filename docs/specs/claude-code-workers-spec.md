@@ -71,7 +71,7 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
   - tool cards, which go from running to succeeded or failed and show an argument preview plus any assistant text that came just before the call;
   - the final answer.
 
-  It updates per completed step, not per token, which is the same as for embedded workers.
+  It updates per completed step, not per token, which is the same as for embedded workers. Native ToolSearch results containing tool references retain those references in the checked tool result as JSON text; ordinary text and image placeholders keep their existing rendering. An empty search remains empty.
 - **Tool names** appear in the router's vocabulary:
   - Claude built-in names map to lowercase display names only and do not gain router authority;
   - router tools appear without any prefix.
@@ -395,7 +395,7 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the ne
 - **Given**: An idle Claude worker and fake CLI capturing stdin.
 - **When**: Text/image mail from browser and agent/reminder sources runs through thinking, tool and final steps, including inherited MCP and router tools.
 - **Then**: Text/images arrive in order; checked consumption alone ACKs; timeline shows per-step thinking/tool outcomes/answer, activity and reported context. Nothing is automatically mailed. Each managed Claude role receives the exact built-in list `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `ToolSearch`, including on resume; other built-ins are not enabled by that list. Worker MCP inheritance and root/child strict MCP configuration remain unchanged. Unexpected raw built-in names do not gain router authority.
-- **Evidence boundary**: The current CC-003 E2E scripts an unexpected raw `Read` event and a router `scratchpad` call; it checks display translation without router authority for `Read`, not inherited MCP availability. The scripted `Read` is not evidence that a built-in is offered or executed, or that an inherited MCP tool was called. The requested CLI names were confirmed against Claude 2.1.316; end-to-end verification of this revised contract remains pending.
+- **Evidence boundary**: The current CC-003 E2E scripts a raw `Read` event and a router `scratchpad` call; it checks display translation without router authority for `Read`, not inherited MCP availability. The scripted `Read` is not evidence that a built-in is offered or executed, or that an inherited MCP tool was called. The requested CLI names were confirmed against Claude 2.1.316; end-to-end verification of this revised contract remains pending.
 
 ### Scenario: [CC-003A] Built-ins across Claude roles
 - **User Goal**: Let managed Claude roots, workers and subagents use the requested built-in tools.
@@ -409,6 +409,12 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the ne
 - **Given**: A running turn with equal-text distinct messages and deterministic echo/result barriers.
 - **When**: More messages arrive during normal/startup/recovery work, or execution ends before their submission or echo.
 - **Then**: Mail and direct prompts are steered into the active process; input that cannot be steered stays durably queued for a later execution. Each steered input gets its own ACK only on its exact correlated echo. Definitely unsubmitted reservations are released; write-started inputs without checked echo are held, not redelivered. Equal text never swaps identities.
+
+### Scenario: [CC-021] Serialize checked input with tool persistence
+- **Given**: A Claude foreground execution has a checked tool producer and the tool is executing.
+- **When**: An exact steered mail echo or a separate in-execution notice arrives while the tool owns the persistence lane.
+- **Then**: The tool result is checked before the input is appended. A mail echo appends its own checked user entry and ACK atomically; a notice is projected as a notification and does not create a mail ACK. Neither path may use a stale conversation head or report a successful tool effect as unknown due to this contention.
+- **Supporting verification**: `TestClaudeCheckedInputContendsWithExecutingTool` exercises the store and tool bridge with a blocked reminder call. It does not exercise CLI echo correlation or the browser; acceptance remains pending.
 
 ### Scenario: [CC-005] Keep mail through every reset race
 - **User Goal**: Keep mail through every reset race.

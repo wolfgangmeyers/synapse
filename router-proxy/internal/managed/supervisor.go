@@ -783,9 +783,9 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		return LaunchResult{}, errors.New("managed manager is closed")
 	}
 	if request.Runtime == "" {
-		request.Runtime = "rpc"
+		request.Runtime = "embedded"
 	}
-	if request.Runtime != "rpc" && request.Runtime != "embedded" {
+	if request.Runtime != "embedded" {
 		return LaunchResult{}, errors.New("invalid managed runtime")
 	}
 	if !managedNameRE.MatchString(request.Name) {
@@ -825,11 +825,6 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 	if candidate.Provider == claudeCodeProvider {
 		if _, modelErr := claudeCodeModel(candidate.ID); modelErr != nil {
 			return LaunchResult{}, modelErr
-		}
-		// RPC launches Pi with --mode rpc and the mecha RPC extension; Claude's
-		// stream-json CLI is a different protocol, not an interchangeable engine.
-		if request.Runtime != "embedded" {
-			return LaunchResult{}, &EngineSelectionError{Reason: "Claude does not support Pi RPC; use the embedded runtime"}
 		}
 		if _, preflightErr := PreflightClaudeCode(ctx, m.claudeShortCommandConfig(cwd)); preflightErr != nil {
 			var fenced *ClaudeAdmissionFencedError
@@ -977,56 +972,18 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 	lane := m.laneFor(agent.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
-	if agent.Runtime == "embedded" {
-		if parent != nil {
-			err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
-		} else {
-			err = m.store.ReserveManagedEmbeddedLaunch(ctx, agent, op, m.config.Limits.MaxAgents, embeddedRole)
-		}
+	if parent != nil {
+		err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
 	} else {
-		err = m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents)
+		err = m.store.ReserveManagedEmbeddedLaunch(ctx, agent, op, m.config.Limits.MaxAgents, embeddedRole)
 	}
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	if agent.Runtime == "embedded" {
-		m.startEmbeddedRoot(agent, request.RequestID, false)
-		return LaunchResult{Agent: &agent}, nil
-	}
-	sessionPathHash := hashString(request.RequestID)
-	sessionRelativePath := sessionPathHash + ".jsonl"
-	sessionReservationID := hashString("managed-stock-pi-session\x00" + request.RequestID)
-	if err := m.store.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
-		ReservationID: sessionReservationID, AgentID: agent.AgentID, SessionEpoch: agent.SessionEpoch,
-		LaunchOperationID: request.RequestID, RootRelativePath: sessionRelativePath,
-	}); err != nil {
-		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "SESSION_RESERVATION_FAILED", "managed session path reservation failed")
-		return LaunchResult{}, err
-	}
-	sessionPath := filepath.Join(m.config.SessionRoot, sessionRelativePath)
-	launchReservation, err := materializeFreshStockPiSession(sessionPath, agent.PiSessionID, agent.Cwd, now)
-	if err != nil {
-		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "SESSION_RESERVATION_FAILED", "managed session file materialization failed")
-		return LaunchResult{}, err
-	}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		rollbackErr := launchReservation.rollback()
-		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MANAGER_CLOSED", "managed manager closed")
-		return LaunchResult{}, errors.Join(errors.New("managed manager is closed"), rollbackErr)
-	}
-	binding := &managedBinding{agentID: agent.AgentID, lane: lane, operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash, sessionReservationID: sessionReservationID, sessionRelativePath: sessionRelativePath, sessionPath: sessionPath, launchReservation: launchReservation}
-	m.bindings[agent.AgentID] = binding
-	m.operationIDs[agent.AgentID] = request.RequestID
-	m.startWG.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer m.startWG.Done()
-		m.start(m.runCtx, agent, request, binding)
-	}()
+	m.startEmbeddedRoot(agent, request.RequestID, false)
 	return LaunchResult{Agent: &agent}, nil
 }
+
 func manifestRevision(value Manifest) int {
 	if value.Revision < 1 {
 		return 1

@@ -317,7 +317,7 @@ func TestCompleteRouteMatrix(t *testing.T) {
 	}
 	manifestBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "router", "contract", "manifest.json"))
 	require.NoError(t, err)
-	matrixBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "mecha-rpc", "route-matrix.json"))
+	matrixBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "route-matrix.json"))
 	require.NoError(t, err)
 	var manifest manifestDocument
 	var matrix routeMatrix

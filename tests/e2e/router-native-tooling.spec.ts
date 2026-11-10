@@ -8,7 +8,6 @@ import { resolve, join } from "node:path";
 import { once } from "node:events";
 import { WebSocket } from "ws";
 import { startIsolatedRouter, allocatePort, type IsolatedRouter } from "./harness";
-import { createOperationalToolDefinitions } from "../../pi-extensions/mecha-messaging/operational-tools";
 
 const exec = promisify(execFile);
 const repo = resolve(import.meta.dirname, "../..");
@@ -106,7 +105,6 @@ test("persists Python and native worker mail through proxy", async ({ page }) =>
     const persisted = await page.evaluate(async ({ url, id }) => (await fetch(`${url}/v1/messages/${id}`, { credentials: "omit" })).json(), { url, id });
     expect(JSON.stringify(persisted)).toContain("durable mail");
     await expect.poll(() => JSON.stringify(frames)).toContain(id);
-    expect(createOperationalToolDefinitions().some(tool => tool.name === "mecha_worker")).toBe(false);
     // Native mailbox persistence is exercised through the embedded SDK in worker-tool-actions.
     // Read the actual SQLite store with Python's stdlib; no internal JS mocks.
     const db = await python(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute('select count(*) from messages').fetchone()[0])", router.databasePath]);
@@ -174,13 +172,6 @@ test("reports retired operations unavailable before subprocess", async () => {
     expect(result.status).toBe("error"); expect(result.error_code, `${operation}: ${JSON.stringify(result)}`).toBe("ROOT_OPERATION_UNAVAILABLE");
     expect(result.error_message).not.toMatch(/No such file|can't open/);
   }
-  let calls = 0;
-  const tools = createOperationalToolDefinitions({ runFile: async () => { calls++; throw new Error("must not spawn"); } });
-  for (const [name, args] of [["mecha_state", { action: "query", task: "task" }]] as const) {
-    expect(JSON.stringify(await tools.find(tool => tool.name === name)!.execute("call", args))).toContain("ROOT_OPERATION_UNAVAILABLE");
-  }
-  expect(tools.some(tool => tool.name === "mecha_worker")).toBe(false);
-  expect(calls).toBe(0);
 });
 
 test("forwards correlation and replays without resending", async () => {
