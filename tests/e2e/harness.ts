@@ -543,7 +543,7 @@ export async function startRouterProxy(options: {
       processChild.stdout!.on("data", chunk => { stdout += String(chunk); if (stdout.includes("MECHA_ROUTER_PROXY_READY")) finish(); });
       processChild.stderr!.on("data", chunk => { stderr += String(chunk); });
       processChild.once("error", error => finish(error));
-      processChild.once("close", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
+      processChild.once("exit", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
       options.onSpawn?.(processChild);
     });
     let closing: Promise<void> | undefined;
