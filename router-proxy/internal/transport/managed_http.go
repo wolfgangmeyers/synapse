@@ -1385,12 +1385,34 @@ func (r *Router) handleManagedArchive(w http.ResponseWriter, req *http.Request) 
 }
 
 func (r *Router) handleManagedAgentsGET(w http.ResponseWriter, req *http.Request) {
+	r.handleManagedAgentsGETWithSnapshot(w, req, r.managed.BackgroundBashJobsSnapshot)
+}
+
+func (r *Router) handleManagedAgentsGETWithSnapshot(w http.ResponseWriter, req *http.Request, jobsSnapshot func(context.Context, *store.ManagedAgentRecord) ([]map[string]string, error)) {
 	snapshot, err := r.store.ManagedAgentsProjectionSnapshot(req.Context())
 	if err != nil {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agents"})
 		return
 	}
-	r.writeManagedJSON(w, req, http.StatusOK, managed.ProjectionListEnvelope(snapshot), nil)
+	envelope := managed.ProjectionListEnvelope(snapshot)
+	if agents, ok := envelope["agents"].([]map[string]any); ok {
+		records := make(map[string]*store.ManagedAgentRecord, len(snapshot.Agents))
+		for _, record := range snapshot.Agents {
+			if record != nil {
+				records[record.AgentID] = record
+			}
+		}
+		for _, agent := range agents {
+			id, _ := agent["agent_id"].(string)
+			jobs, err := jobsSnapshot(req.Context(), records[id])
+			if err != nil {
+				r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agents"})
+				return
+			}
+			agent["background_bash_jobs"] = jobs
+		}
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, envelope, nil)
 }
 
 func (r *Router) handleManagedChildrenGET(w http.ResponseWriter, req *http.Request, agentID string) {
@@ -1407,6 +1429,10 @@ func (r *Router) handleManagedChildrenGET(w http.ResponseWriter, req *http.Reque
 }
 
 func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request) {
+	r.handleManagedAgentGETWithSnapshot(w, req, r.managed.BackgroundBashJobsSnapshot)
+}
+
+func (r *Router) handleManagedAgentGETWithSnapshot(w http.ResponseWriter, req *http.Request, jobsSnapshot func(context.Context, *store.ManagedAgentRecord) ([]map[string]string, error)) {
 	id := strings.TrimPrefix(req.URL.Path, "/v1/managed-agents/")
 	if id == "" || strings.Contains(id, "/") {
 		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
@@ -1425,7 +1451,16 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
 		return
 	}
-	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
+	envelope := managed.ProjectionEnvelope(snapshot)
+	if agent, ok := envelope["agent"].(map[string]any); ok {
+		jobs, err := jobsSnapshot(req.Context(), snapshot.Agent)
+		if err != nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the managed agent"})
+			return
+		}
+		agent["background_bash_jobs"] = jobs
+	}
+	r.writeManagedJSON(w, req, 200, envelope, nil)
 }
 
 func (r *Router) handleManagedScratchpadGET(w http.ResponseWriter, req *http.Request, agentID string) {

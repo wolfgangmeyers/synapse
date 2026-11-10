@@ -171,51 +171,54 @@ func incrementGoalAttempt(counter *atomic.Int64) {
 // close, and exit handling all acquire this one owner before they can touch the
 // durable transition or either process group.
 type managedAgentLane struct {
-	serial                      sync.Mutex
-	admission                   sync.Mutex // short decisions only; never wait for serial here
-	resetPending                bool
-	resetToolGates              map[*contextResetRequest]struct{}
-	terminationPending          int
-	resetRunning                bool
-	resetDone                   chan struct{}
-	selection                   sync.Mutex // saved model snapshot at SDK turn admission only
-	activeMu                    sync.RWMutex
-	activeSession               embeddedRuntime
-	activePersistence           *embeddedPersistence
-	claudeRestartGeneration     atomic.Uint64
-	consecutiveContinuations    atomic.Int64
-	goalNextAttempt             time.Time // lane.serial-owned
-	goalOwnerInvalid            bool      // lane.serial-owned
-	consecutiveEmptyTurns       atomic.Int64
-	consecutiveErrors           int
-	goalAttempt                 atomic.Int64
-	mailAttempts                map[string]int
-	claudePendingSettlement     *store.EmbeddedMailAttempt
-	claudePendingHold           bool
-	claudeUnclassifiedBlocked   *store.EmbeddedMailAttempt
-	claudePendingDiagnostic     *store.EmbeddedMailAttempt
-	claudeRetryScheduled        bool
-	claudeRetryDeadline         time.Time
-	claudeRetryWake             chan struct{}
-	warningEpoch                int64
-	warningEmitted              bool
-	claudeWindowBinding         store.EmbeddedBinding
-	claudeWindowModel           string
-	claudeWindowValue           int
-	claudeFreshResetGuard       *store.EmbeddedBinding // lane.serial-owned; one binding, cleared below reset threshold
-	extendedTimeoutUntil        time.Time
-	defaultTimeoutOverride      time.Duration
-	extendedTimeoutOverride     time.Duration
-	inlineAllowances            map[string]int
-	inlinePoolRemainingMs       int64
-	inlinePoolUpdatedAt         time.Time
-	subagentReadPoolRemainingMs int64
-	subagentReadPoolUpdatedAt   time.Time
-	contextUsage                *ContextUsage
-	baseTools                   []agent.AgentTool
-	activeTools                 []agent.AgentTool
-	restartRejectedAt           time.Time
-	restartConflictDetail       string
+	serial                            sync.Mutex
+	admission                         sync.Mutex // short decisions only; never wait for serial here
+	resetPending                      bool
+	resetToolGates                    map[*contextResetRequest]struct{}
+	terminationPending                int
+	resetRunning                      bool
+	resetDone                         chan struct{}
+	selection                         sync.Mutex // saved model snapshot at SDK turn admission only
+	activeMu                          sync.RWMutex
+	activeSession                     embeddedRuntime
+	activeBinding                     store.EmbeddedBinding
+	activePersistence                 *embeddedPersistence
+	claudeRestartGeneration           atomic.Uint64
+	consecutiveContinuations          atomic.Int64
+	goalNextAttempt                   time.Time // lane.serial-owned
+	goalOwnerInvalid                  bool      // lane.serial-owned
+	consecutiveEmptyTurns             atomic.Int64
+	consecutiveErrors                 int
+	goalAttempt                       atomic.Int64
+	mailAttempts                      map[string]int
+	claudePendingSettlement           *store.EmbeddedMailAttempt
+	claudePendingHold                 bool
+	claudeUnclassifiedBlocked         *store.EmbeddedMailAttempt
+	claudePendingDiagnostic           *store.EmbeddedMailAttempt
+	claudeRetryScheduled              bool
+	claudeRetryDeadline               time.Time
+	claudeRetryWake                   chan struct{}
+	warningEpoch                      int64
+	warningEmitted                    bool
+	claudeWindowBinding               store.EmbeddedBinding
+	claudeWindowModel                 string
+	claudeWindowValue                 int
+	claudeFreshResetGuard             *store.EmbeddedBinding // lane.serial-owned; one binding, cleared below reset threshold
+	extendedTimeoutUntil              time.Time
+	defaultTimeoutOverride            time.Duration
+	extendedTimeoutOverride           time.Duration
+	inlineAllowances                  map[string]int
+	inlinePoolRemainingMs             int64
+	inlinePoolUpdatedAt               time.Time
+	subagentReadPoolRemainingMs       int64
+	subagentReadPoolUpdatedAt         time.Time
+	backgroundBashReadPoolRemainingMs int64
+	backgroundBashReadPoolUpdatedAt   time.Time
+	contextUsage                      *ContextUsage
+	baseTools                         []agent.AgentTool
+	activeTools                       []agent.AgentTool
+	restartRejectedAt                 time.Time
+	restartConflictDetail             string
 }
 
 func (l *managedAgentLane) recordRestartRouterRejection(t time.Time, reason string) {
@@ -491,6 +494,7 @@ type Manager struct {
 	embeddedAfterWorkerLaunch  func(context.Context)
 	embeddedStartupGeneration  int64
 	embeddedOwners             map[string]embeddedOwner
+	backgroundBash             *BackgroundBashManager
 	// Test-only tick/cleanup barrier for the production owner heartbeat.
 	embeddedOwnerTicker                        func() (<-chan time.Time, func())
 	embeddedRecovery                           map[string]store.EmbeddedBinding
@@ -529,7 +533,7 @@ type Manager struct {
 	beforeSubagentWakeReservation              func(parent store.EmbeddedBinding)
 	activeEmbeddedSessions                     map[string]embeddedRuntime
 	activeSessionsMu                           sync.Mutex
-	projectionPublisher                        func()
+	projectionPublisher                        func(context.Context) error
 	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
 	embeddedReplyPublisher                     func(context.Context, store.EmbeddedReply) error
@@ -3749,7 +3753,20 @@ func (m *Manager) Close(ctx context.Context) error {
 		bindings = append(bindings, binding)
 	}
 	m.closeErr = nil
+	backgroundBash := m.backgroundBash
+	owners := make([]embeddedOwner, 0, len(m.embeddedOwners))
+	for _, owner := range m.embeddedOwners {
+		owners = append(owners, owner)
+	}
 	m.mu.Unlock()
+	if backgroundBash != nil {
+		m.recordCloseError(backgroundBash.CloseContext(ctx))
+	}
+	for _, owner := range owners {
+		if owner.backgroundBash != nil {
+			m.recordCloseError(owner.backgroundBash.revokeContext(ctx, func() error { return nil }))
+		}
+	}
 
 	m.closeClaudePrivateMCP()
 	// Cancel child work before joining the shared Claude admission barrier.

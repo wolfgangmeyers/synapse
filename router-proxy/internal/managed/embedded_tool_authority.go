@@ -357,6 +357,8 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		tools = append(tools, m.embeddedRestartRouterTool(owner))
 		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd))
+		m.ensureBackgroundBash()
+		tools = append(tools, m.backgroundBashTools(owner, saved.Cwd)...)
 		readTool, err := coding.CreateTool("read", saved.Cwd)
 		if err != nil {
 			return nil, fmt.Errorf("embedded read tool: %w", err)
@@ -461,6 +463,9 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 			return err
 		}
 		toolName := call.ToolCall.Name
+		if isBackgroundBashTool(toolName) && role != "root" && role != "worker" {
+			return &agent.PolicyDenial{Reason: "background bash requires embedded root or worker"}
+		}
 		if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, toolName); err != nil {
 			return &agent.PolicyDenial{Reason: err.Error()}
 		}
@@ -582,6 +587,14 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 				return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
 			}
 			return nil
+		}
+		if isBackgroundBashTool(call.ToolCall.Name) {
+			if role != "root" && role != "worker" {
+				return &agent.PolicyDenial{Reason: "background bash requires embedded root or worker"}
+			}
+			if call.ToolCall.Name == "list_background_bash_jobs" || call.ToolCall.Name == "get_background_bash_job" || call.ToolCall.Name == "wait_background_bash_job" {
+				return nil
+			}
 		}
 		if call.ToolCall.Name == "read" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "write" || call.ToolCall.Name == "bash" {
 			if role != "root" && role != "worker" {

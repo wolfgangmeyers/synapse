@@ -126,7 +126,9 @@ func (s *Store) GetAgentProgress(ctx context.Context, agentID string) (*int, str
 		return nil, "", "", 0, errors.New("agent_id must not be empty")
 	}
 
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return nil, "", "", 0, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, "", "", 0, errors.New("store is closed")

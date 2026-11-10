@@ -77,6 +77,7 @@ type subagentTask struct {
 	lastStage          string
 	lastStageTime      time.Time
 	inactivityTimedOut bool
+	backgroundWaits    int
 }
 
 func (t *subagentTask) touchActivity(now time.Time) {
@@ -260,27 +261,19 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 		if task != nil {
 			task.mu.Lock()
 			started := !task.startTime.IsZero()
-			startTime := task.startTime
-			lastAct := task.lastActivity
-			taskTimeout := task.timeout
-			task.mu.Unlock()
-
-			if started {
-				limit := taskTimeout
-				if limit <= 0 {
-					limit = maxDuration
-				}
-				if now.Sub(startTime) > limit {
-					toAbort = append(toAbort, task)
-					continue
-				}
+			limit := task.timeout
+			if limit <= 0 {
+				limit = maxDuration
 			}
-			if !lastAct.IsZero() && now.Sub(lastAct) >= DefaultSubagentInactivityTimeout {
-				task.mu.Lock()
+			expired := started && now.Sub(task.startTime) > limit
+			inactive := task.backgroundWaits == 0 && !task.lastActivity.IsZero() && now.Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
+			if !expired && inactive {
 				task.inactivityTimedOut = true
-				task.mu.Unlock()
+			}
+			if expired || inactive {
 				toAbort = append(toAbort, task)
 			}
+			task.mu.Unlock()
 		}
 	}
 	m.subagentsMu.Unlock()
@@ -997,6 +990,61 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		return
 	}
 
+	// Each attempt gets a fresh, fenced child identity and its own job capability.
+	childIdentity, err := newEmbeddedOwnerIdentity()
+	if err != nil {
+		terminalStatus, errorMsg = "failed", err.Error()
+		return
+	}
+	token, err := m.store.AcquireEmbeddedOwner(taskCtx, childBinding, childIdentity, embeddedOwnerTTL)
+	if err != nil {
+		terminalStatus, errorMsg = "failed", err.Error()
+		return
+	}
+	childBinding.OwnerToken = token
+	childOwner := embeddedOwner{binding: childBinding, identity: childIdentity, backgroundBash: &backgroundBashOwnerCapability{}}
+	m.mu.Lock()
+	if m.embeddedOwners == nil {
+		m.embeddedOwners = make(map[string]embeddedOwner)
+	}
+	m.embeddedOwners[task.childID] = childOwner
+	m.mu.Unlock()
+	defer func() {
+		if err := m.retireBackgroundBashOwner(childOwner); err != nil {
+			log.Printf("subagent %s background bash cleanup: %v", task.childID, err)
+		}
+		m.mu.Lock()
+		if current, ok := m.embeddedOwners[task.childID]; ok && current.identity == childOwner.identity {
+			delete(m.embeddedOwners, task.childID)
+		}
+		m.mu.Unlock()
+	}()
+	checkChild := func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := taskCtx.Err(); err != nil {
+			return err
+		}
+		if err := m.store.RenewEmbeddedOwner(ctx, childBinding, childIdentity, embeddedOwnerTTL); err != nil {
+			return err
+		}
+		rec, err := m.store.ManagedSubagent(ctx, task.parent, task.childID)
+		if err != nil {
+			return err
+		}
+		if rec.Attempt != task.attempt || rec.Status != "running" {
+			return errors.New("stale child attempt")
+		}
+		task.mu.Lock()
+		stopped := task.stopped
+		task.mu.Unlock()
+		if stopped {
+			return errors.New("child stopped")
+		}
+		return nil
+	}
+
 	// 2. Checked SDK persistence
 	p := &embeddedPersistence{
 		db:                 m.store,
@@ -1015,6 +1063,21 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		return
 	}
 	defer toolsCleanup()
+	m.ensureBackgroundBash()
+	for i := range tools {
+		if tools[i].Name == "bash" {
+			tools[i] = embeddedSubagentBashTool(childAgent.Cwd, func(ctx context.Context, cwd, command string, timeout time.Duration) (agent.AgentToolResult, error) {
+				if err := checkChild(ctx); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if backgroundBashPlatformSupport() != nil {
+					return executeSubagentBash(ctx, cwd, command, timeout)
+				}
+				return m.executePromotableBash(ctx, childOwner, cwd, embeddedBashCommand{command: command, timeout: timeout})
+			})
+		}
+	}
+	tools = append(tools, task.wrapBackgroundWait(m.backgroundBashToolsForOwner(childOwner, childAgent.Cwd, task.parent.AgentID, checkChild), m.clock.Now)...)
 
 	model, stream, err := m.resolveSubagentModel(*childAgent)
 	if err != nil {
@@ -1259,7 +1322,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			case <-ticker.C:
 				task.mu.Lock()
 				last := task.lastActivity
-				timedOut := !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
+				timedOut := task.backgroundWaits == 0 && !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
 				if timedOut && !task.stopped && !task.inactivityTimedOut {
 					task.inactivityTimedOut = true
 					task.mu.Unlock()
@@ -1561,6 +1624,23 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 		return "failed", "", err.Error()
 	}
 	binding.OwnerToken = token
+	childOwner := embeddedOwner{binding: binding, identity: owner, backgroundBash: &backgroundBashOwnerCapability{}, claudeOrphanRoot: m.config.SessionRoot}
+	m.mu.Lock()
+	if m.embeddedOwners == nil {
+		m.embeddedOwners = make(map[string]embeddedOwner)
+	}
+	m.embeddedOwners[task.childID] = childOwner
+	m.mu.Unlock()
+	defer func() {
+		if err := m.retireBackgroundBashOwner(childOwner); err != nil {
+			log.Printf("subagent %s background bash cleanup: %v", task.childID, err)
+		}
+		m.mu.Lock()
+		if current, ok := m.embeddedOwners[task.childID]; ok && current.identity == childOwner.identity {
+			delete(m.embeddedOwners, task.childID)
+		}
+		m.mu.Unlock()
+	}()
 	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", publishComplete: m.publishCompleteHistory, toolInputs: map[string]any{}, toolCompanionTexts: map[string]string{}}
 	snap, err := m.store.ReopenEmbedded(ctx, binding)
 	if err != nil {
@@ -1675,6 +1755,25 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 	}
 	bridge, cleanup, err := newClaudeChildBridge(m.store, task.parent, binding, task.attempt, owner, incarnation, child.Cwd, m.config.SessionRoot, checked)
 	if err != nil {
+		return "failed", "", err.Error()
+	}
+	// This is the managed MCP bash, not Claude's native Bash tool.
+	managedBash := embeddedSubagentBashTool(child.Cwd, func(callCtx context.Context, cwd, command string, timeout time.Duration) (agent.AgentToolResult, error) {
+		if err := check(callCtx); err != nil {
+			return agent.AgentToolResult{}, err
+		}
+		if backgroundBashPlatformSupport() != nil {
+			return executeSubagentBashOwned(callCtx, cwd, command, timeout, m.config.SessionRoot)
+		}
+		return m.executePromotableBash(callCtx, childOwner, cwd, embeddedBashCommand{command: command, timeout: timeout})
+	})
+	if err := bridge.replaceTool(managedBash); err != nil {
+		cleanup()
+		return "failed", "", err.Error()
+	}
+	childTools := task.wrapBackgroundWait(m.backgroundBashToolsForOwner(childOwner, child.Cwd, task.parent.AgentID, check), m.clock.Now)
+	if err := bridge.addTools(childTools); err != nil {
+		cleanup()
 		return "failed", "", err.Error()
 	}
 	task.mu.Lock()
@@ -1804,7 +1903,7 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 				return
 			case <-ticker.C:
 				task.mu.Lock()
-				expired := !task.lastActivity.IsZero() && m.clock.Now().Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
+				expired := task.backgroundWaits == 0 && !task.lastActivity.IsZero() && m.clock.Now().Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
 				if expired {
 					task.inactivityTimedOut = true
 				}

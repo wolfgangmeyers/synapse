@@ -356,6 +356,10 @@ func (p *ClaudeCodeProcess) forgetClaudeOrphanConfirmed() {
 
 func removeClaudeCodeOrphan(path string, identity ProcessIdentity) error {
 	record, err := readClaudeCodeOrphan(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// A previous unlink may have succeeded while the directory sync failed.
+		return claudeCodeOrphanSync(filepath.Dir(path))
+	}
 	if err != nil {
 		return err
 	}

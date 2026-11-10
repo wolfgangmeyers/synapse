@@ -74,12 +74,16 @@ func installedToolCount(manifestRevision int) int {
 // PublicAgent is the safe first-slice projection. It contains no PID, session
 // identity, auth path, environment, or raw process output.
 func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
+	return publicAgentContext(context.Background(), agent)
+}
+
+func publicAgentContext(ctx context.Context, agent *store.ManagedAgentRecord) map[string]any {
 	if agent == nil {
 		return nil
 	}
 	allowInline := agent.AllowInlineTools
 	if !allowInline && defaultManagerInstance != nil {
-		if enabled, err := defaultManagerInstance.ManagedInlineToolsEnabled(context.Background(), agent.AgentID); err == nil && enabled {
+		if enabled, err := defaultManagerInstance.ManagedInlineToolsEnabled(ctx, agent.AgentID); err == nil && enabled {
 			allowInline = true
 		}
 	}
@@ -93,15 +97,16 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"workflow_name":            "",
 		"workflow_state":           "",
 		"worktree":                 agent.Worktree,
-		"worktree_base_path":        agent.WorktreeBasePath,
+		"worktree_base_path":       agent.WorktreeBasePath,
 		"allow_inline_tools":       allowInline,
 		"urgent":                   agent.Urgent,
 		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
-		"blocked":                  agent.Blocked,
-		"blocked_reason":           nil,
-		"blocked_at":               nil,
-		"is_background":            agent.IsBackground,
+		"blocked":              agent.Blocked,
+		"blocked_reason":       nil,
+		"blocked_at":           nil,
+		"is_background":        agent.IsBackground,
+		"background_bash_jobs": backgroundBashPublicJobs(nil),
 	}
 	if agent.Blocked {
 		result["blocked_reason"] = agent.BlockedReason
@@ -111,12 +116,12 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 	// display human-readable workflow metadata alongside active IDs without secondary lookups.
 	if defaultManagerInstance != nil && defaultManagerInstance.store != nil {
 		if agent.ActiveWorkflowStateID != "" {
-			if st, err := defaultManagerInstance.store.GetWorkflowState(context.Background(), agent.ActiveWorkflowStateID); err == nil && st != nil {
+			if st, err := defaultManagerInstance.store.GetWorkflowState(ctx, agent.ActiveWorkflowStateID); err == nil && st != nil {
 				result["workflow_state"] = st.Name
 			}
 		}
 		if agent.ActiveWorkflowID != "" {
-			if wf, err := defaultManagerInstance.store.GetWorkflow(context.Background(), agent.ActiveWorkflowID); err == nil && wf != nil {
+			if wf, err := defaultManagerInstance.store.GetWorkflow(ctx, agent.ActiveWorkflowID); err == nil && wf != nil {
 				result["workflow_name"] = wf.Name
 			}
 		}
@@ -168,7 +173,7 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		}
 	}
 	if defaultManagerInstance != nil && defaultManagerInstance.store != nil {
-		if percent, note, timestamp, _, err := defaultManagerInstance.store.GetAgentProgress(context.Background(), agent.AgentID); err == nil && percent != nil {
+		if percent, note, timestamp, _, err := defaultManagerInstance.store.GetAgentProgress(ctx, agent.AgentID); err == nil && percent != nil {
 			result["progress"] = map[string]any{
 				"percent":   *percent,
 				"note":      note,
@@ -182,7 +187,11 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 // PublicAgentWithGoal adds only the embedded agent's own durable desired
 // policy. Applied revision and projection state remain separate from SDK set.
 func PublicAgentWithGoal(agent *store.ManagedAgentRecord, policy *store.ManagedGoalPolicy) map[string]any {
-	result := PublicAgent(agent)
+	return PublicAgentWithGoalContext(context.Background(), agent, policy)
+}
+
+func PublicAgentWithGoalContext(ctx context.Context, agent *store.ManagedAgentRecord, policy *store.ManagedGoalPolicy) map[string]any {
+	result := publicAgentContext(ctx, agent)
 	if result == nil || agent.Runtime != "embedded" || policy == nil || policy.AgentID != agent.AgentID {
 		return result
 	}
@@ -194,9 +203,9 @@ func PublicAgentWithGoal(agent *store.ManagedAgentRecord, policy *store.ManagedG
 	result["goal_state"] = map[string]any{
 		"enabled": policy.Config.Enabled, "goal": goal,
 		"desired_revision": policy.DesiredRevision, "applied_revision": policy.AppliedRevision,
-		"projection_state":  policy.ProjectionState,
-		"outcome_counts":    map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
-		"snooze_enabled": settings.SnoozeEnabled,
+		"projection_state":   policy.ProjectionState,
+		"outcome_counts":     map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
+		"snooze_enabled":     settings.SnoozeEnabled,
 		"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
 		"snooze_budget_cap_ms":   settings.SnoozeBudgetCapMS,
 		"snooze_refill_yield_ms": settings.SnoozeRefillYieldMS, "snooze_refill_elapsed_ms": settings.SnoozeRefillElapsedMS,

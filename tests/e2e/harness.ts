@@ -2,7 +2,7 @@ import { test } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, chmod, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, chmod, rm, writeFile, mkdir, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -24,6 +24,8 @@ export interface IsolatedRouter {
   logPath: string;
   readinessStderr: () => string;
   stderr: () => string;
+  countStderr: (needle: string) => number;
+  stderrLineContains: (...needles: string[]) => boolean;
   port: number;
   httpUrl: string;
   websocketUrl: string;
@@ -144,7 +146,7 @@ export async function startMockLLMServer(): Promise<MockLLMServer> {
 // as the test body; each build adds its own deadline to the active test.
 const DEFAULT_BUILD_TIMEOUT_MS = 300_000;
 const buildBudgets = new WeakMap<object, number>();
-async function buildGo(args: string[], cwd: string, label: string, timeoutMs: number): Promise<void> {
+export async function buildGo(args: string[], cwd: string, label: string, timeoutMs: number): Promise<void> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("buildTimeoutMs must be positive and finite");
   try {
     const info = test.info();
@@ -157,9 +159,9 @@ async function buildGo(args: string[], cwd: string, label: string, timeoutMs: nu
   await new Promise<void>((resolve, reject) => {
     const posix = process.platform !== "win32";
     const build = spawn("go", args, { cwd, detached: posix, stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
     let settled = false;
-    build.stderr.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-16384); });
+    // Drain compiler output without retaining or exposing potentially sensitive data.
+    build.stderr.resume();
     // Best effort while the direct child is alive. SIGKILL of the worker, a
     // signal without an exit event, or descendants leaving the group cannot be
     // handled here; Windows only terminates the direct child.
@@ -180,7 +182,7 @@ async function buildGo(args: string[], cwd: string, label: string, timeoutMs: nu
       // leader's process group cannot safely be signalled. Never await close.
       build.stderr.destroy();
       cleanup();
-      reject(new Error(`${label} build timed out after ${timeoutMs}ms${stderr ? `: ${stderr}` : ""}`));
+      reject(new Error(`${label} build timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     build.once("error", error => {
       if (settled) return;
@@ -193,7 +195,7 @@ async function buildGo(args: string[], cwd: string, label: string, timeoutMs: nu
       settled = true;
       cleanup();
       if (code === 0) resolve();
-      else reject(new Error(`${label} build failed (${code ?? signal}): ${stderr}`));
+      else reject(new Error(`${label} build failed (${code ?? signal})`));
     });
   });
 }
@@ -221,6 +223,9 @@ async function stopRouterChild(child: ChildProcess, signal: NodeJS.Signals = "SI
 
 export async function startIsolatedRouter(options: {
   repoRoot: string;
+  routerExecutableFixture?: string;
+  onRouterSpawnFixture?: (child: ChildProcess) => void;
+  startupTimeoutFixtureMs?: number;
   managed?: boolean;
   buildTimeoutMs?: number;
   testClock?: boolean;
@@ -231,6 +236,7 @@ export async function startIsolatedRouter(options: {
   rootControlFixture?: boolean;
   piReviewBarrier?: boolean;
   capacityFixture?: boolean;
+  backgroundCountRetentionFixture?: boolean;
   mcpQueueFixture?: boolean;
   embeddedRoot?: { name: string; requestId: string; model: { provider: string; id: string }; instruction: string };
 }): Promise<IsolatedRouter> {
@@ -246,10 +252,22 @@ export async function startIsolatedRouter(options: {
   const port = await allocatePort();
 
   const routerProxyDir = join(options.repoRoot, "router-proxy");
-  const binaryPath = join(root, "mailbox-router");
+  const binaryPath = options.routerExecutableFixture || join(root, "mailbox-router");
 
-  // Compile router binary into the temporary directory for isolation.
-  await buildGo(["build", ...(options.embedded ? [`-tags=embedded_restart_test_only${options.capacityFixture ? ",claude_capacity_test_only" : ""}${options.mcpQueueFixture ? ",claude_mcp_queue_test_only" : ""}`] : []), "-o", binaryPath, "./cmd/mailbox-router"], routerProxyDir, "mailbox-router", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
+  // The count-retention fixture changes only the compiled source, never production configuration.
+  let overlayArgs: string[] = [];
+  if (options.backgroundCountRetentionFixture) {
+    const source = join(routerProxyDir, "internal/managed/background_bash_lifecycle.go");
+    const original = await readFile(source, "utf8");
+    const needle = "BackgroundBashMaxRecords     = 256";
+    if (original.split(needle).length !== 2) throw new Error("count-retention overlay requires exactly one matching production limit");
+    const replacement = join(root, "background_bash_lifecycle.go");
+    const overlay = join(root, "overlay.json");
+    await writeFile(replacement, original.replace(needle, "BackgroundBashMaxRecords     = 3"));
+    await writeFile(overlay, JSON.stringify({ Replace: { [source]: replacement } }));
+    overlayArgs = [`-overlay=${overlay}`];
+  }
+  if (!options.routerExecutableFixture) await buildGo(["build", ...overlayArgs, ...(options.embedded ? [`-tags=embedded_restart_test_only${options.capacityFixture ? ",claude_capacity_test_only" : ""}${options.mcpQueueFixture ? ",claude_mcp_queue_test_only" : ""}`] : []), "-o", binaryPath, "./cmd/mailbox-router"], routerProxyDir, "mailbox-router", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
 
   const isManaged = options.managed ?? false;
   const args = [
@@ -348,7 +366,12 @@ export async function startIsolatedRouter(options: {
         await writeFile(fixturePath, filtered);
       }
       await copyFile(join(options.repoRoot, "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
-      await symlink(join(options.repoRoot, "auth-helper/node_modules"), join(fixtureAuth, "node_modules"), "dir");
+      // Worktrees do not share installed packages. An explicit dependency path
+      // supports isolated checkouts without inheriting Node's loader environment.
+      const dependencies = resolve(process.env.MECHA_E2E_AUTH_NODE_MODULES || join(options.repoRoot, "auth-helper/node_modules"));
+      try { await access(join(dependencies, "@earendil-works/pi-coding-agent/package.json")); }
+      catch { throw new Error("E2E auth-helper dependencies unavailable; run npm ci --prefix auth-helper or set MECHA_E2E_AUTH_NODE_MODULES"); }
+      await symlink(dependencies, join(fixtureAuth, "node_modules"), "dir");
       const helperIndex = args.indexOf("--managed-auth-helper");
       args[helperIndex + 1] = join(fixtureAuth, "index.mjs");
       // Match providerFixture's disposable runtime root without relaxing path
@@ -365,17 +388,16 @@ export async function startIsolatedRouter(options: {
   }
   if (options.codexCredentialPath) args.push("--codex-credential-path", options.codexCredentialPath);
 
-  // Keep build/toolchain settings above; allow only disposable runtime config here.
-  let runtimeEnvironment = process.env;
-  if (options.embedded || options.codexCredentialPath) {
-    for (const directory of ["config", "cache", "tmp"]) await mkdir(join(root, directory), { mode: 0o700 });
-    runtimeEnvironment = {
-      PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
-      XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
-      ...(options.embedded ? { EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint } : {}),
-      ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
-    };
-  }
+  // Build tooling uses the caller environment; the router and its descendants
+  // never receive machine credentials, cloud config, or Node preload hooks.
+  for (const directory of ["managed-home", "config", "cache", "tmp"]) await mkdir(join(root, directory), { recursive: true, mode: 0o700 });
+  let runtimeEnvironment: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
+    XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
+    CLOUDSDK_CONFIG: join(root, "config", "gcloud"),
+    ...(options.embedded ? { EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint } : {}),
+    ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
+  };
   if (options.capacityFixture) runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_CLAUDE_CAPACITY_DIR: root };
   if (options.piReviewBarrier) runtimeEnvironment = { ...runtimeEnvironment, MECHA_PI_REVIEW_BARRIER: root };
   if (options.backgroundExpiryInterval) {
@@ -386,7 +408,7 @@ export async function startIsolatedRouter(options: {
     await writeFile(join(root, "managed-home/sessions/root-control-fixture"), options.repoRoot, { mode: 0o600 });
     const wrapper = join(root, "python-sentinel");
     await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${root}/python-spawns.log'\nexec "$MECHA_TEST_PYTHON" "$@"\n`, { mode: 0o700 });
-    runtimeEnvironment = { PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
+    runtimeEnvironment = { ...runtimeEnvironment,
       PYTHON: wrapper, MECHA_TEST_PYTHON: process.env.PYTHON || "python3", PYTHONDONTWRITEBYTECODE: "1", MECHA_SUPERVISOR_TOOLS: join(options.repoRoot, "tools"),
       MECHA_MANAGED_ROOT_CONTROL_HOME: join(root, "managed-home"), MECHA_TEST_ROOT_CONTROL: root,
       MECHA_TEST_ROOT_MANIFEST: join(options.repoRoot, "router/contract/managed-tools-v1.json") };
@@ -404,6 +426,7 @@ export async function startIsolatedRouter(options: {
     });
 
     ownedChild = child;
+    options.onRouterSpawnFixture?.(child);
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -413,14 +436,16 @@ export async function startIsolatedRouter(options: {
         if (!settled) {
           settled = true;
           child.kill("SIGQUIT");
-          rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
+          rej(new Error(`Isolated router timed out during startup.${readinessStderr ? `\n${readinessStderr}` : ""}`));
         }
-      }, options.embedded ? 45_000 : 15_000);
+      }, options.startupTimeoutFixtureMs ?? (options.embedded ? 45_000 : 15_000));
 
       const checkReady = (chunk: Buffer) => {
         const text = chunk.toString();
         stdout += text;
-        if (text.includes("MECHA_V2_ROUTER_READY")) {
+        const ready = stdout.includes("MECHA_V2_ROUTER_READY");
+        stdout = stdout.slice(-128);
+        if (ready) {
           if (!settled) {
             settled = true;
             clearTimeout(timeout);
@@ -431,7 +456,7 @@ export async function startIsolatedRouter(options: {
 
       child.stdout.on("data", checkReady);
       child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
+        stderr = (stderr + chunk.toString()).slice(-1024);
         capturedStderr = (capturedStderr + chunk.toString()).slice(-65536);
         // Closed vocabulary only: never expose arbitrary helper stderr, auth,
         // stack locals or credentials through readiness artifacts.
@@ -447,7 +472,7 @@ export async function startIsolatedRouter(options: {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          rej(new Error(`Isolated router exited prematurely (code ${code}).\nStderr: ${stderr}`));
+          rej(new Error(`Isolated router exited prematurely (code ${code}).`));
         }
       });
     });
@@ -477,7 +502,11 @@ export async function startIsolatedRouter(options: {
     databasePath,
     logPath,
     readinessStderr: () => readinessStderr,
-    stderr: () => capturedStderr,
+    // Never return free-form process output; these fixed signatures are safe to attach.
+    stderr: () => ["managed provider status is unavailable", "embedded head mismatch", "tool outcome UNKNOWN after execution", "event log write failed"]
+      .filter(signature => capturedStderr.includes(signature)).join("\n"),
+    countStderr: needle => needle ? capturedStderr.split(needle).length - 1 : 0,
+    stderrLineContains: (...needles) => needles.length > 0 && capturedStderr.split("\n").some(line => needles.every(needle => needle !== "" && line.includes(needle))),
     port,
     httpUrl,
     websocketUrl,
@@ -516,6 +545,8 @@ export async function startRouterProxy(options: {
   upstreamPort: number;
   buildTimeoutMs?: number;
   onSpawn?: (child: ChildProcess) => void;
+  proxyExecutableFixture?: string;
+  startupTimeoutFixtureMs?: number;
 }): Promise<IsolatedProxy> {
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-proxy-"));
   let child: ChildProcess | undefined;
@@ -526,24 +557,24 @@ export async function startRouterProxy(options: {
     await cleanupAll([() => rm(root, { recursive: true, force: true })], errors);
   };
   try {
-    const binary = join(root, "router-proxy");
-    await buildGo(["build", "-o", binary, "./"], join(options.repoRoot, "router-proxy"), "Proxy", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
+    const binary = options.proxyExecutableFixture || join(root, "router-proxy");
+    if (!options.proxyExecutableFixture) await buildGo(["build", "-o", binary, "./"], join(options.repoRoot, "router-proxy"), "Proxy", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
     const port = await allocatePort();
-    child = spawn(binary, ["--upstream-host", "127.0.0.1", "--upstream-port", String(options.upstreamPort), "--listen-port", String(port), "--listen-host", "127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn(binary, ["--upstream-host", "127.0.0.1", "--upstream-port", String(options.upstreamPort), "--listen-port", String(port), "--listen-host", "127.0.0.1"], { env: { HOME: root, TMPDIR: root, LANG: "C.UTF-8" }, stdio: ["ignore", "pipe", "pipe"] });
     const processChild = child;
     await new Promise<void>((res, rej) => {
-      let stdout = "", stderr = "", settled = false;
+      let stdout = "", settled = false;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         error ? rej(error) : res();
       };
-      const timeout = setTimeout(() => finish(new Error(`Router proxy timed out.\nStdout: ${stdout}\nStderr: ${stderr}`)), 15_000);
-      processChild.stdout!.on("data", chunk => { stdout += String(chunk); if (stdout.includes("MECHA_ROUTER_PROXY_READY")) finish(); });
-      processChild.stderr!.on("data", chunk => { stderr += String(chunk); });
+      const timeout = setTimeout(() => finish(new Error("Router proxy timed out.")), options.startupTimeoutFixtureMs ?? 15_000);
+      processChild.stdout!.on("data", chunk => { stdout += String(chunk); const ready = stdout.includes("MECHA_ROUTER_PROXY_READY"); stdout = stdout.slice(-128); if (ready) finish(); });
+      processChild.stderr!.resume(); // Drain without exposing arbitrary process output.
       processChild.once("error", error => finish(error));
-      processChild.once("exit", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
+      processChild.once("exit", code => finish(new Error(`Router proxy exited (code ${code}).`)));
       options.onSpawn?.(processChild);
     });
     let closing: Promise<void> | undefined;
@@ -743,14 +774,13 @@ export async function startEmbeddedSafetyFixture() {
     router = await startIsolatedRouter({ repoRoot, managed: true, embedded: { endpoint: `http://127.0.0.1:${address.port}` } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     frontend = await serveFrontendDist(join(repoRoot, "web/router-ui-react/dist"));
-    let stderr = "";
-    router.process.stderr?.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-16000); });
+
     const db = new DatabaseSync(router.databasePath);
     db.exec("PRAGMA busy_timeout=5000");
     const url = proxy.url;
     return {
       router, proxy, frontend, db,
-      get diagnostics() { return stderr; },
+      get diagnostics() { return router!.stderr(); },
       get requests() { return requests; },
       setReply(value: Reply, held = false) { reply = value; hold = held; },
       release() { const send = gate; gate = undefined; send?.(); },

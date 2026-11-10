@@ -1,3 +1,4 @@
+import { BackgroundBashActivity } from "./BackgroundBashActivity";
 import { isClaudeCodeAgent } from "../state/agent-projection";
 import type { ReactElement, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
@@ -903,6 +904,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
           <div className="conversation-header-subagents-row">
+            <BackgroundBashActivity jobs={agent?.managed_agent?.background_bash_jobs} />
             {agent ? (
             <div
               className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}

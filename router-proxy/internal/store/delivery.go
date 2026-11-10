@@ -84,6 +84,9 @@ type EnqueueOptions struct {
 	// The caller may already hold router.mu. The returned function settles
 	// this admission with the actual SQLite COMMIT outcome, even on a later error.
 	OnFreshAdmission func() (settle func(committed bool), err error)
+	// ownerNotificationDistinct is internal: owner-fenced notifications use ID
+	// replay, not content deduplication across independent operations.
+	ownerNotificationDistinct bool
 }
 type EnqueueResult struct {
 	Created             bool                        `json:"created"`
@@ -144,7 +147,7 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 	return s.enqueue(ctx, envelope, option, nil)
 }
 
-func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option *EnqueueOptions, producer *EmbeddedToolInvocation) (EnqueueResult, error) {
+func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option *EnqueueOptions, producer *EmbeddedToolInvocation, guards ...func() error) (EnqueueResult, error) {
 	if strings.EqualFold(envelope.To, "system") {
 		return EnqueueResult{}, errors.New("cannot send message to 'system': system notifications do not accept incoming messages or replies")
 	}
@@ -180,6 +183,11 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 	var result EnqueueResult
 	var settleAdmission func(bool)
 	committed, conclusive, transactionErr := s.runImmediateWithCommitOutcome(ctx, func() error {
+		for _, guard := range guards {
+			if err := guard(); err != nil {
+				return err
+			}
+		}
 		if producer != nil {
 			if err := s.embeddedToolMailGuardTx(ctx, producer, candidate); err != nil {
 				return err
@@ -246,9 +254,12 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 				return err
 			}
 		}
-		duplicate, err := s.selectLiveDuplicate(ctx, candidate, sentinelJSON)
-		if err != nil {
-			return err
+		var duplicate *domain.Message
+		if !enqueueOptions.ownerNotificationDistinct {
+			duplicate, err = s.selectLiveDuplicate(ctx, candidate, sentinelJSON)
+			if err != nil {
+				return err
+			}
 		}
 		if enqueueOptions.OnFreshAdmission != nil {
 			settleAdmission, err = enqueueOptions.OnFreshAdmission()

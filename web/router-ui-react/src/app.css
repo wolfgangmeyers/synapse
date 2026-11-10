@@ -7698,3 +7698,20 @@ select.form-control option,
   line-height: 1.2;
   text-transform: uppercase;
 }
+
+.background-bash-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 9px;
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #e2e8f0;
+  font-size: 0.75rem;
+}
+.background-bash-title { color: #93c5fd; white-space: nowrap; }
+.background-bash-activity ul { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0; padding: 0; list-style: none; }
+.background-bash-activity li { overflow-wrap: anywhere; }
+.background-bash-job-list { max-height: 60vh; overflow: auto; overflow-wrap: anywhere; }

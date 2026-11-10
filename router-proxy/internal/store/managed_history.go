@@ -341,6 +341,35 @@ func (s *Store) RecordManagedCompleteHistoryWithFullDetails(ctx context.Context,
 	return entry, err
 }
 
+// RecordManagedLifecycleHistoryForIncarnation discards stale UI projection facts
+// atomically with termination cleanup and same-ID relaunch.
+func (s *Store) RecordManagedLifecycleHistoryForIncarnation(ctx context.Context, agentID, incarnation, message, eventKey string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
+	if ctx == nil || !isLifecycleText(agentID) || !managedHistoryText(message, 512, false) || len(eventKey) > 200 || !utf8.ValidString(eventKey) {
+		return ManagedHistoryEntry{}, errors.New("managed lifecycle history entry is invalid")
+	}
+	if incarnation == "" {
+		return ManagedHistoryEntry{}, nil
+	}
+	encoded, err := managedHistoryPresentationJSON(presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	var entry ManagedHistoryEntry
+	err = s.runImmediate(ctx, func() error {
+		var exists int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_history_boundaries b JOIN managed_agents a ON a.agent_id=b.agent_id WHERE b.agent_id=? AND b.incarnation_id=?`, agentID, incarnation).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, "managed_lifecycle", "info", message, eventKey, encoded, presentation)
+		return err
+	})
+	return entry, err
+}
+
 // recordManagedCompleteHistoryStrictTx is the fail-closed variant used by
 // acknowledgement transactions. A reused event key is valid only when every
 // canonical display field matches the fact being acknowledged.

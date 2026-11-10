@@ -23,13 +23,13 @@ test("expiry retries failed termination of an active background workflow", async
       WHEN NEW.kind = 'terminate' BEGIN SELECT RAISE(ABORT, 'e2e termination admission failure'); END`);
     await f.advance(24 * 60 * 60 * 1000 + 1000);
     // Observe dispatch for this worker while the provider still holds its turn.
-    await expect.poll(() => f.router.stderr().includes(`test background expiry dispatch: ${agent}`), { timeout: 10000 }).toBe(true);
+    await expect.poll(() => f.router.countStderr(`test background expiry dispatch: ${agent}`) > 0, { timeout: 10000 }).toBe(true);
     // Expiry must not report success while the real provider turn holds the lane.
     await expect.poll(() => f.rows("SELECT desired_state FROM managed_agents WHERE agent_id=?", agent)).toEqual([{ desired_state: "running" }]);
     // End the external provider connection so the existing lane can drain.
     f.releaseHeld();
     // The real periodic sweep reports the rejected reservation and retries.
-    await expect.poll(() => (f.router.stderr().match(/background termination:/g) ?? []).length, { timeout: 10000 }).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => f.router.countStderr("background termination:"), { timeout: 10000 }).toBeGreaterThanOrEqual(2);
     expect(f.rows("SELECT desired_state FROM managed_agents WHERE agent_id=?", agent)).toEqual([{ desired_state: "running" }]);
     await expect(page.locator(`[data-agent-id="${agent}"]`)).toBeVisible();
     db.exec("DROP TRIGGER e2e_reject_expiry");

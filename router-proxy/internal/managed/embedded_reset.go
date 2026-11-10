@@ -57,7 +57,7 @@ func (m *Manager) reserveEmbeddedReset(ctx context.Context, request ResetRequest
 		ResponseHeaders:   map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID},
 		ResponseBody:      body,
 	}
-	active, ok := lane.beginEmbeddedReset()
+	active, ok := lane.beginEmbeddedReset(owner.binding)
 	if !ok {
 		return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
@@ -88,7 +88,7 @@ func (m *Manager) reserveEmbeddedReset(ctx context.Context, request ResetRequest
 
 // beginEmbeddedReset closes the short admission gate before interrupting. The
 // caller must release admission before waiting on serial or engine callbacks.
-func (lane *managedAgentLane) beginEmbeddedReset() (embeddedRuntime, bool) {
+func (lane *managedAgentLane) beginEmbeddedReset(bindings ...store.EmbeddedBinding) (embeddedRuntime, bool) {
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
 	if lane.resetRunning {
@@ -99,6 +99,9 @@ func (lane *managedAgentLane) beginEmbeddedReset() (embeddedRuntime, bool) {
 	lane.resetDone = make(chan struct{})
 	lane.activeMu.RLock()
 	defer lane.activeMu.RUnlock()
+	if len(bindings) > 0 && lane.activeBinding != bindings[0] {
+		return nil, true
+	}
 	return lane.activeSession, true
 }
 
@@ -130,6 +133,10 @@ func (lane *managedAgentLane) installEmbeddedRuntime(runtime embeddedRuntime, p 
 	lane.activeMu.Lock()
 	defer lane.activeMu.Unlock()
 	lane.activeSession, lane.activePersistence = runtime, p
+	lane.activeBinding = store.EmbeddedBinding{}
+	if p != nil {
+		lane.activeBinding = p.binding
+	}
 	return true
 }
 
@@ -138,6 +145,7 @@ func (lane *managedAgentLane) removeEmbeddedRuntime(runtime embeddedRuntime) {
 	defer lane.activeMu.Unlock()
 	if lane.activeSession == runtime {
 		lane.activeSession, lane.activePersistence = nil, nil
+		lane.activeBinding = store.EmbeddedBinding{}
 	}
 }
 

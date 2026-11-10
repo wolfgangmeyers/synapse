@@ -21,7 +21,7 @@ func (m *Manager) reserveClaudeCodeRestart(ctx context.Context, request RestartR
 	lane := m.laneFor(request.AgentID)
 	lane.selection.Lock()
 	defer lane.selection.Unlock()
-	active, ok := lane.beginEmbeddedReset()
+	active, ok := lane.beginEmbeddedReset(owner.binding)
 	if !ok {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
@@ -41,10 +41,10 @@ func (m *Manager) reserveClaudeCodeRestart(ctx context.Context, request RestartR
 				m.startManagedTask(func() { m.dispatchEmbeddedMail(request.AgentID) })
 			}
 		}()
-		if active != nil {
+		if hasOwner && active != nil {
 			active.Interrupt()
 		}
-		if err := m.claudeCodeProcesses.stop(request.AgentID); err != nil {
+		if err := m.claudeCodeProcesses.stopBinding(owner.binding); err != nil {
 			log.Printf("[embedded:%s] restart stop failed: %v", request.AgentID, m.recordClaudeRestartStopFailure(owner, hasOwner, err))
 			return
 		}
@@ -55,7 +55,7 @@ func (m *Manager) reserveClaudeCodeRestart(ctx context.Context, request RestartR
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
 		// The old callbacks have settled. Future acquisition resumes this binding.
-		if err := m.claudeCodeProcesses.stop(request.AgentID); err != nil {
+		if err := m.claudeCodeProcesses.stopBinding(owner.binding); err != nil {
 			log.Printf("[embedded:%s] restart stop failed: %v", request.AgentID, m.recordClaudeRestartStopFailure(owner, hasOwner, err))
 			return
 		}

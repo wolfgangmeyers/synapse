@@ -238,7 +238,9 @@ func (s *Store) ManagedSubagents(ctx context.Context, parent EmbeddedBinding) ([
 	if ctx == nil {
 		return nil, errors.New("context is required")
 	}
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, errors.New("store is closed")

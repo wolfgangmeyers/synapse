@@ -23,28 +23,31 @@ const (
 )
 
 type uiLiveProjection struct {
-	version         int64
-	generatedAt     string
-	agents          map[string]map[string]any
-	childrenVersion int64
-	children        []map[string]any
+	version             int64
+	generatedAt         string
+	agents              map[string]map[string]any
+	childrenVersion     int64
+	historyIncarnations map[string]string
+	children            []map[string]any
 }
 
 type uiLiveClient struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
+	conn      *websocket.Conn
+	writeGate chan struct{}
 }
 
 type uiLiveHub struct {
-	router  *Router
-	mu      sync.Mutex
-	closed  bool
-	peers   map[*uiLiveClient]struct{}
-	current *uiLiveProjection
+	publishGate chan struct{}
+	router      *Router
+	mu          sync.Mutex
+	closed      bool
+	peers       map[*uiLiveClient]struct{}
+	current     *uiLiveProjection
+	pending     *uiLiveProjection
 }
 
 func newUILiveHub(router *Router) *uiLiveHub {
-	return &uiLiveHub{router: router, peers: make(map[*uiLiveClient]struct{})}
+	return &uiLiveHub{router: router, peers: make(map[*uiLiveClient]struct{}), publishGate: make(chan struct{}, 1)}
 }
 
 // serveUILive owns a projection-only connection. It deliberately derives no
@@ -64,7 +67,7 @@ func (r *Router) serveUILive(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	conn.SetReadLimit(int64(r.maxFrame))
-	client := &uiLiveClient{conn: conn}
+	client := &uiLiveClient{conn: conn, writeGate: make(chan struct{}, 1)}
 	if !r.uiLive.subscribe(client) {
 		_ = conn.Close(websocket.StatusTryAgainLater, "UI-live connection limit reached")
 		return
@@ -88,19 +91,42 @@ func (r *Router) serveUILive(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *uiLiveHub) subscribe(client *uiLiveClient) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Refresh through the normal publication path so existing peers and durable
+	// lifecycle history advance together before a reconnect sees the snapshot.
+	if err := h.publishContext(ctx); err != nil {
+		return false
+	}
+	select {
+	case h.publishGate <- struct{}{}:
+		defer func() { <-h.publishGate }()
+	case <-ctx.Done():
+		return false
+	}
+	h.mu.Lock()
+	if h.closed || len(h.peers) >= maxUILivePeers {
+		h.mu.Unlock()
+		return false
+	}
+	snapshot := h.current
+	h.mu.Unlock()
+	if snapshot == nil {
+		var err error
+		snapshot, err = h.snapshot(ctx)
+		if err != nil {
+			return false
+		}
+	}
+	if !client.sendContext(ctx, snapshot.frame()) || !client.sendContext(ctx, snapshot.childrenFrame()) {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed || len(h.peers) >= maxUILivePeers {
 		return false
 	}
-	// Sample while publication is excluded. The first frame and registration
-	// are then one ordered hand-off: the next committed change is delivered
-	// after this snapshot instead of falling in a subscribe race.
-	snapshot, err := h.snapshot(context.Background())
-	if err != nil || !client.send(snapshot.frame()) || !client.send(snapshot.childrenFrame()) {
-		return false
-	}
-	if h.current == nil || snapshot.version >= h.current.version {
+	if h.current == nil {
 		h.current = snapshot
 	}
 	h.peers[client] = struct{}{}
@@ -140,16 +166,33 @@ func (h *uiLiveHub) snapshot(ctx context.Context) (*uiLiveProjection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return uiLiveProjectionFromStored(stored, childrenVersion, generatedAt, children), nil
+	projection := uiLiveProjectionFromStoredContext(ctx, stored, childrenVersion, generatedAt, children)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, record := range stored.Agents {
+		if record != nil && projection.agents[record.AgentID] != nil {
+			jobs, err := h.router.managed.BackgroundBashJobsSnapshot(ctx, record)
+			if err != nil {
+				return nil, err
+			}
+			projection.agents[record.AgentID]["background_bash_jobs"] = jobs
+		}
+	}
+	return projection, nil
 }
 
 func uiLiveProjectionFromStored(stored store.ManagedAgentsSnapshot, childrenVersion int64, childrenGeneratedAt string, children []map[string]any) *uiLiveProjection {
+	return uiLiveProjectionFromStoredContext(context.Background(), stored, childrenVersion, childrenGeneratedAt, children)
+}
+
+func uiLiveProjectionFromStoredContext(ctx context.Context, stored store.ManagedAgentsSnapshot, childrenVersion int64, childrenGeneratedAt string, children []map[string]any) *uiLiveProjection {
 	agents := make(map[string]map[string]any, len(stored.Agents))
 	for _, record := range stored.Agents {
 		if record == nil || record.ParentAgentID != "" {
 			continue
 		}
-		public := managed.PublicAgentWithGoal(record, stored.GoalPolicies[record.AgentID])
+		public := managed.PublicAgentWithGoalContext(ctx, record, stored.GoalPolicies[record.AgentID])
 		if record.AgentID != "" {
 			agents[record.AgentID] = public
 		}
@@ -158,7 +201,7 @@ func uiLiveProjectionFromStored(stored store.ManagedAgentsSnapshot, childrenVers
 	if childrenGeneratedAt != "" {
 		generatedAt = childrenGeneratedAt
 	}
-	return &uiLiveProjection{version: stored.ProjectionVersion, generatedAt: generatedAt, agents: agents, childrenVersion: childrenVersion, children: children}
+	return &uiLiveProjection{version: stored.ProjectionVersion, generatedAt: generatedAt, agents: agents, historyIncarnations: stored.HistoryIncarnations, childrenVersion: childrenVersion, children: children}
 }
 
 func (snapshot *uiLiveProjection) childrenFrame() map[string]any {
@@ -207,24 +250,61 @@ func uiLiveRecordLess(leftKey, rightKey string, left, right map[string]any) bool
 // polling interval missed any version, a full snapshot replaces deltas. That
 // gives the client a safe recovery path and prevents an invented merge over an
 // unseen state transition.
-func (h *uiLiveHub) publish(ctx context.Context) {
-	snapshot, err := h.snapshot(ctx)
-	if err != nil {
-		h.router.emitEvent(UILiveSnapshotFailedEvent("projection_unavailable"))
-		return
+func (h *uiLiveHub) publish(ctx context.Context) { _ = h.publishContext(ctx) }
+
+func (h *uiLiveHub) publishContext(ctx context.Context) error {
+	select {
+	case h.publishGate <- struct{}{}:
+		defer func() { <-h.publishGate }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	h.mu.Lock()
-	if h.closed || snapshot.version == 0 && h.current == nil {
-		h.current = snapshot
+	snapshot := h.pending
+	h.mu.Unlock()
+	var err error
+	if snapshot == nil {
+		snapshot, err = h.snapshot(ctx)
+		if err != nil {
+			h.router.emitEvent(UILiveSnapshotFailedEvent("projection_unavailable"))
+			return err
+		}
+	}
+	h.mu.Lock()
+	if h.closed {
 		h.mu.Unlock()
-		return
+		return nil
 	}
 	prior := h.current
+	if prior != nil && snapshot.version < prior.version {
+		h.mu.Unlock()
+		return fmt.Errorf("stale UI projection version %d before %d", snapshot.version, prior.version)
+	}
 	agentsChanged := prior == nil || snapshot.version != prior.version || !reflect.DeepEqual(prior.agents, snapshot.agents)
 	childrenChanged := prior == nil || prior.childrenVersion != snapshot.childrenVersion || !reflect.DeepEqual(prior.children, snapshot.children)
 	if !agentsChanged && !childrenChanged {
 		h.mu.Unlock()
-		return
+		return nil
+	}
+	// Jobs are in memory and may change after the durable version was read.
+	// Never send different agent data under a previously published version.
+	if h.pending == nil && prior != nil && snapshot.version == prior.version && !reflect.DeepEqual(prior.agents, snapshot.agents) {
+		h.mu.Unlock()
+		if _, err := h.router.store.ReserveProjectionVersion(ctx); err != nil {
+			return err
+		}
+		// A durable write may have raced the initial sample.
+		snapshot, err = h.snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		h.mu.Lock()
+		if h.closed {
+			h.mu.Unlock()
+			return nil
+		}
+		agentsChanged = snapshot.version != prior.version || !reflect.DeepEqual(prior.agents, snapshot.agents)
+		childrenChanged = prior.childrenVersion != snapshot.childrenVersion || !reflect.DeepEqual(prior.children, snapshot.children)
 	}
 	frames := make([]map[string]any, 0, 2)
 	if agentsChanged {
@@ -238,7 +318,27 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 	// again from this lossy browser projection would create a second history row
 	// for one accepted transition.
 	historyFacts := managedLifecycleHistoryFacts(prior, snapshot)
+	h.pending = snapshot
+	h.mu.Unlock()
+	// Persist before advancing the baseline. Event keys make a partial batch
+	// safe to retry if cancellation or a store error interrupts it.
+	historyEntries := make([]store.ManagedHistoryEntry, 0, len(historyFacts))
+	for _, fact := range historyFacts {
+		entry, err := h.router.store.RecordManagedLifecycleHistoryForIncarnation(ctx, fact.agentID, snapshot.historyIncarnations[fact.agentID], fact.message, fact.eventKey, fact.presentation)
+		if err != nil {
+			return err
+		}
+		if entry.ID != "" {
+			historyEntries = append(historyEntries, entry)
+		}
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil
+	}
 	h.current = snapshot
+	h.pending = nil
 	peers := make([]*uiLiveClient, 0, len(h.peers))
 	for peer := range h.peers {
 		peers = append(peers, peer)
@@ -246,20 +346,28 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 	h.mu.Unlock()
 	for _, peer := range peers {
 		for _, frame := range frames {
-			if peer.send(frame) {
+			if peer.sendContext(ctx, frame) {
 				continue
 			}
 			h.unsubscribe(peer)
+			if ctx.Err() != nil {
+				_ = peer.conn.CloseNow()
+				// Even peers that received the projection may miss its history.
+				// Force all of them to reconnect.
+				for _, affected := range peers {
+					h.unsubscribe(affected)
+					_ = affected.conn.CloseNow()
+				}
+				return ctx.Err()
+			}
 			_ = peer.conn.Close(websocket.StatusInternalError, "UI-live write failed")
 			break
 		}
 	}
-	for _, fact := range historyFacts {
-		entry, appendErr := h.router.store.RecordManagedCompleteHistoryWithPresentation(ctx, fact.agentID, "managed_lifecycle", "info", fact.message, fact.eventKey, fact.presentation)
-		if appendErr == nil {
-			h.publishHistory("complete", managedHistoryFrame(entry))
-		}
+	for _, entry := range historyEntries {
+		h.publishHistoryContext(ctx, "complete", managedHistoryFrame(entry))
 	}
+	return ctx.Err()
 }
 
 type managedLifecycleHistoryFact struct {
@@ -332,6 +440,9 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 		if agentID == "" {
 			continue
 		}
+		if prior.historyIncarnations != nil && current.historyIncarnations != nil && prior.historyIncarnations[agentID] != current.historyIncarnations[agentID] {
+			continue
+		}
 		previousModel, previousModelOK := previous["model"].(map[string]any)
 		nextModel, nextModelOK := next["model"].(map[string]any)
 		if previousModelOK && nextModelOK && !reflect.DeepEqual(previousModel, nextModel) {
@@ -381,14 +492,22 @@ func uiLiveTransition(prior, current *uiLiveProjection) map[string]any {
 }
 
 func (client *uiLiveClient) send(frame map[string]any) bool {
+	return client.sendContext(context.Background(), frame)
+}
+
+func (client *uiLiveClient) sendContext(parent context.Context, frame map[string]any) bool {
 	payload, err := json.Marshal(frame)
 	if err != nil {
 		return false
 	}
-	client.writeMu.Lock()
-	defer client.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
+	select {
+	case client.writeGate <- struct{}{}:
+		defer func() { <-client.writeGate }()
+	case <-ctx.Done():
+		return false
+	}
 	return client.conn.Write(ctx, websocket.MessageText, payload) == nil
 }
 
@@ -479,6 +598,10 @@ func (h *uiLiveHub) publishProvider(frame map[string]any) {
 }
 
 func (h *uiLiveHub) publishHistory(view string, raw map[string]any) {
+	h.publishHistoryContext(context.Background(), view, raw)
+}
+
+func (h *uiLiveHub) publishHistoryContext(ctx context.Context, view string, raw map[string]any) {
 	if view != "quiet" && view != "complete" {
 		return
 	}
@@ -506,8 +629,9 @@ func (h *uiLiveHub) publishHistory(view string, raw map[string]any) {
 	}
 	h.mu.Unlock()
 	for _, peer := range peers {
-		if !peer.send(frame) {
+		if !peer.sendContext(ctx, frame) {
 			h.unsubscribe(peer)
+			_ = peer.conn.CloseNow()
 		}
 	}
 }
