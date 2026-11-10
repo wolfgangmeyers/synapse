@@ -137,7 +137,7 @@ No tests were added or run for this docs-only backfill. These are existing evide
 
 | Scenario | Existing evidence | Scope / remaining acceptance |
 |---|---|---|
-| MR-001 | `router-proxy/internal/transport/managed_launch_behavioral_functional_test.go`; `managed_launch_validation_behavioral_test.go` in the same directory | HTTP/store/controlled child process, not full browser/stock-Pi launch |
+| MR-001 | `router-proxy/internal/transport/managed_launch_validation_behavioral_test.go` | HTTP launch validation; historical `managed_launch_behavioral_functional_test.go` Pi RPC cases are skipped after RPC retirement and are not embedded launch evidence |
 | MR-002 | `router-proxy/internal/managed/crash_recovery_behavioral_functional_test.go`; `router-proxy/internal/transport/managed_reset_native_test.go`; `managed_termination_native_test.go` | Controlled recovery and historical installed-Pi lifecycle paths, where still present, not joined browser crash matrix |
 | MR-003 | Retired: Pi extension and its tests deleted | No replacement manifest-installation acceptance claimed |
 | MR-004 | `router-proxy/internal/transport/domain1_behavioral_functional_test.go`; `managed_root_control_native_test.go` | Fake process/host seams and historical native goal status, where still present, not root tool to real tmux launch |

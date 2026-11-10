@@ -453,6 +453,7 @@ func managedFunctionalRequest(t *testing.T, method, url, requestID string, body 
 }
 
 func TestManagedLaunchBehavioralFunctional(t *testing.T) {
+	t.Skip("historical Pi RPC launch retired; embedded launch has separate coverage")
 	syntheticHostHome := t.TempDir()
 	t.Setenv("HOME", syntheticHostHome)
 	t.Setenv("MECHA_HOST_HOME", syntheticHostHome)
@@ -602,6 +603,7 @@ initialObserved:
 }
 
 func TestManagedLaunchBehavioralRetainsImmediateChildFailure(t *testing.T) {
+	t.Skip("historical Pi RPC launch retired; embedded launch has separate coverage")
 	fixture := newManagedFunctionalFixture(t, "MECHA_FUNCTIONAL_IMMEDIATE_FAILURE=1")
 	body := []byte(fmt.Sprintf(`{"name":"alpha","cwd":%q}`, fixture.root))
 	status, _ := managedFunctionalRequest(t, http.MethodPost, fixture.serverURL+"/v1/managed-agents", "123e4567-e89b-42d3-a456-426614174082", body)
