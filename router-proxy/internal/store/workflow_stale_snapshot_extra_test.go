@@ -89,7 +89,7 @@ func TestWorkflowSnapshotUsesCurrentReturnPermission(t *testing.T) {
 			if enabled {
 				require.NoError(t, err)
 			} else {
-				require.ErrorContains(t, err, "not permitted")
+				require.ErrorContains(t, err, "has no outgoing transitions")
 			}
 			current, err := s.GetManagedAgentActiveWorkflowState(ctx, agent.AgentID)
 			require.NoError(t, err)

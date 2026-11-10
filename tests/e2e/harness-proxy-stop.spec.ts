@@ -21,3 +21,19 @@ test('proxy cleanup does not wait for a descendant holding its pipes', async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('proxy startup reports an exit without waiting for inherited pipes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'proxy-exit-test-'));
+  const oldPath = process.env.PATH;
+  try {
+    const proxyScript = `#!${process.execPath}\nconst {spawn}=require('node:child_process');\nspawn(process.execPath,['-e','setTimeout(() => {}, 5000)'],{stdio:['ignore','inherit','inherit']});\nconsole.error('proxy fixture failed');\nprocess.exit(7);\n`;
+    await writeFile(join(dir, 'go'), `#!${process.execPath}\nconst fs=require('node:fs'); const args=process.argv; fs.writeFileSync(args[args.indexOf('-o')+1],${JSON.stringify(proxyScript)},{mode:0o755});\n`, { mode: 0o755 });
+    process.env.PATH = `${dir}:${oldPath}`;
+    const started = Date.now();
+    await expect(startRouterProxy({ repoRoot: resolve('.'), upstreamPort: 1 })).rejects.toThrow(/Router proxy exited \(code 7\).*\nStderr: proxy fixture failed/);
+    expect(Date.now() - started).toBeLessThan(3000);
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
