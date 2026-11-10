@@ -130,3 +130,5 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 2. **Scenario Completeness**: Every specification must detail both Happy Paths and Non-Happy/Edge/Error paths using strict `Given / When / Then` contracts.
 3. **Verification Coupling**: Every scenario must map 1:1 to an automated Playwright E2E test case in Section 4 of the specification.
 4. **Deprecation**: Deprecated specifications must have their status changed to `Deprecated` with a pointer to the superseding specification.
+
+- [Goal evaluation activity publication](goal-activity-publication.spec.md) (Draft; acceptance testing pending).

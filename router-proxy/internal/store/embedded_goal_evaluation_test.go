@@ -231,10 +231,13 @@ func TestBackfillEmbeddedGoalEvaluations(t *testing.T) {
 	require.Equal(t, "Found top 5 cookie recipes", *page.Entries[0].MessageContent)
 }
 
-func TestBackfillEmbeddedGoalEvaluationsDeduplicatesAndCapsSpam(t *testing.T) {
+func TestBackfillEmbeddedGoalEvaluationsPreservesDistinctReasons(t *testing.T) {
 	s, b, _ := evaluationFixture(t)
 	defer s.Close()
 	ctx := context.Background()
+
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET applied_revision=desired_revision,projection_state='applied' WHERE agent_id=?`, b.AgentID)
+	require.NoError(t, err)
 
 	// Insert 20 NOT_DONE evaluations and 2 DONE evaluations into embedded_goal_evaluations
 	for i := int64(1); i <= 20; i++ {
@@ -254,10 +257,10 @@ func TestBackfillEmbeddedGoalEvaluationsDeduplicatesAndCapsSpam(t *testing.T) {
 
 	require.NoError(t, s.BackfillEmbeddedGoalEvaluations(ctx))
 
-	// NOT_DONE should be capped at 5 most recent, plus 2 completed = at most 7 rows
+	// Distinct reasons and completed evaluations are retained.
 	var countAfter int
 	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=?`, b.AgentID).Scan(&countAfter))
-	require.Equal(t, 7, countAfter)
+	require.Equal(t, 20, countAfter)
 
 	// Verify ShouldRecordGoalEvaluation deduplication
 	shouldRecord, err := s.ShouldRecordGoalEvaluation(ctx, b.AgentID, "NOT_DONE", "Eval reason 20")

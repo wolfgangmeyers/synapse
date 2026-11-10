@@ -350,3 +350,72 @@ func (s *Store) RecordEmbeddedGoalEvaluationFailure(ctx context.Context, b Embed
 	})
 	return entry, err
 }
+
+// RecordEmbeddedGoalEvaluationActivity atomically fences publication against the
+// exact completed claim and policy revision, including self-disabled completion.
+func (s *Store) RecordEmbeddedGoalEvaluationActivity(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey, outcome, reason, message, eventKey string, presentation *ManagedHistoryPresentation, content string) (ManagedHistoryEntry, error) {
+	if ctx == nil || !validEmbeddedGoalEvaluationKey(k) || !managedHistoryText(message, 512, false) || len(eventKey) > 200 || (outcome != EmbeddedGoalEvaluationDone && outcome != EmbeddedGoalEvaluationCompleted && outcome != EmbeddedGoalEvaluationNotDone) {
+		return ManagedHistoryEntry{}, errors.New("invalid evaluator activity")
+	}
+	presentationJSON, err := managedHistoryPresentationJSON(presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	content = strings.ToValidUTF8(content, "")
+	content = strings.ReplaceAll(content, "\x00", "")
+	if len(content) > 65536 {
+		content = content[:65536]
+		content = strings.ToValidUTF8(content, "")
+	}
+	var entry ManagedHistoryEntry
+	err = s.runImmediate(ctx, func() error {
+		if err := s.embeddedFence(ctx, b); err != nil {
+			return err
+		}
+		e, err := s.embeddedEvaluationRow(ctx, b, k)
+		if err != nil {
+			return err
+		}
+		expected := outcome
+		if expected == EmbeddedGoalEvaluationCompleted {
+			expected = EmbeddedGoalEvaluationDone
+		}
+		if e.Generation != b.Generation || e.OwnerToken != b.OwnerToken || e.FinalSeq != k.FinalSeq || e.FinalDigest != k.FinalDigest || e.State != expected || e.Reason != reason || e.CompletedAt == "" {
+			return errors.New("stale embedded evaluation claim")
+		}
+		var desired, applied int64
+		var enabled int
+		var projection, evaluator, last string
+		err = s.db.QueryRowContext(ctx, `SELECT desired_revision,applied_revision,goal_enabled,projection_state,COALESCE(evaluator_state,''),COALESCE(last_outcome,'') FROM managed_agent_policies WHERE agent_id=?`, b.AgentID).Scan(&desired, &applied, &enabled, &projection, &evaluator, &last)
+		if err != nil {
+			return err
+		}
+		if desired != k.GoalRevision || applied != desired || projection != "applied" || (enabled != 1 && !(expected == EmbeddedGoalEvaluationDone && enabled == 0 && evaluator == "done" && last == "COMPLETED")) {
+			return errors.New("superseded embedded evaluation activity")
+		}
+		var published int
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_goal_activity_publications WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&published)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		duplicate := false
+		if expected == EmbeddedGoalEvaluationNotDone {
+			duplicate, err = s.lastGoalActivityMatchesReasonTx(ctx, b.AgentID, reason)
+			if err != nil {
+				return err
+			}
+		}
+		if !duplicate {
+			entry, err = s.recordManagedCompleteHistoryTx(ctx, b.AgentID, "managed_goal_evaluation", "info", message, eventKey, presentationJSON, presentation, managedHistoryDetails{MessageContent: &content})
+			if err != nil {
+				return err
+			}
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason) VALUES (?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, eventKey, reason)
+		return err
+	})
+	return entry, err
+}
