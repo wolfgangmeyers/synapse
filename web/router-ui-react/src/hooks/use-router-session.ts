@@ -66,6 +66,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const scopeRef = useRef(scope); scopeRef.current = scope;
   const providerAuthFrameRef = useRef(options.onProviderAuthFrame); providerAuthFrameRef.current = options.onProviderAuthFrame;
   const uiLiveErrorRef = useRef(options.onUILiveError); uiLiveErrorRef.current = options.onUILiveError;
+  const liveReadyRef = useRef({ agents: false, children: false });
   const startManagedSurfaceRef = useRef<(() => void) | undefined>(undefined);
   const syncGroundTruthRef = useRef<((includeHistory?: boolean) => Promise<void>) | undefined>(undefined);
   const resyncRef = useRef<(() => Promise<void>) | undefined>(undefined);
@@ -82,6 +83,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         void syncGroundTruthRef.current?.();
         transport.invalidateAgents();
       } else if (frame.type === "managed_agents_snapshot") {
+        liveReadyRef.current.agents = true;
         dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
         refreshManagedGoalProjection(transport, dispatch, currentScope, frame.agents);
       } else if (frame.type === "managed_agent_delta") {
@@ -89,10 +91,14 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         refreshManagedGoalProjection(transport, dispatch, currentScope, [frame.changes]);
       }
       else if (frame.type === "managed_agent_removed") dispatch({ type: "managed/removed", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agentId: frame.agent_id });
-      else if (frame.type === "managed_children_snapshot") dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
+      else if (frame.type === "managed_children_snapshot") {
+        liveReadyRef.current.children = true;
+        dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
+      }
       else if (frame.type === "provider_auth_prompt" || frame.type === "provider_auth_state") providerAuthFrameRef.current?.(frame);
     },
     onRecovery: () => {
+      liveReadyRef.current = { agents: false, children: false };
       dispatch({ type: "managed/recover", scope: scopeRef.current });
       startManagedSurfaceRef.current?.();
     },
@@ -124,7 +130,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           const childrenSettled = await Promise.allSettled(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
           const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
           if (!active) return;
-          if (children.length > 0) dispatch({ type: "managed/children", scope, children });
+          if (!liveReadyRef.current.children && children.length > 0) dispatch({ type: "managed/children", scope, children });
         } catch {
           // A child projection can be repaired by the next refresh or live frame.
         }
@@ -195,7 +201,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           try {
             const childrenSettled = await Promise.allSettled(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
             const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-            if (active && children.length > 0) dispatch({ type: "managed/children", scope: currentScope, children });
+            if (active && !liveReadyRef.current.children && children.length > 0) dispatch({ type: "managed/children", scope: currentScope, children });
           } catch {
             // child projection can be repaired on next pass
           }
@@ -211,7 +217,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
                 agentsToPoll.map((agent) => transport.http.managedChildren(agent.agent_id))
               );
               const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-              if (active && children.length > 0) {
+              if (active && !liveReadyRef.current.children && children.length > 0) {
                 dispatch({ type: "managed/children", scope: currentScope, children });
               }
             } catch {
@@ -258,7 +264,12 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
 
     const pollIntervalTimer = setInterval(() => {
       if (active && options.connect !== false) {
-        void reconcileGroundTruth(false);
+        if (liveReadyRef.current.agents && liveReadyRef.current.children) {
+          // Runtime goal state is not guaranteed to change the durable live projection.
+          refreshManagedGoalProjection(transport, dispatch, scopeRef.current, stateRef.current.managedAgents ?? []);
+        } else {
+          void reconcileGroundTruth(false);
+        }
       }
     }, 3_000);
 
@@ -286,6 +297,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     }
     return () => {
       active = false;
+      liveReadyRef.current = { agents: false, children: false };
       startManagedSurfaceRef.current = undefined;
       syncGroundTruthRef.current = undefined;
       resyncRef.current = undefined;
@@ -316,6 +328,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       startManagedSurfaceRef.current?.();
     },
     disconnect: () => {
+      liveReadyRef.current = { agents: false, children: false };
       transport.close();
       uiLive.close();
     },
