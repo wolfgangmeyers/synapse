@@ -132,3 +132,5 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 4. **Deprecation**: Deprecated specifications must have their status changed to `Deprecated` with a pointer to the superseding specification.
 
 - [Goal evaluation activity publication](goal-activity-publication.spec.md) (Draft; acceptance testing pending).
+
+- [Tool permissions popups](tool-permissions-popup.spec.md)
