@@ -477,3 +477,74 @@ test('execution selection fails closed for no match, ambiguous match, and confli
   assert.equal((await f.closed).code, 2);
   assert.match(f.stderr(), /invalid executions_by_input/);
 });
+
+test('parallel MCP calls overlap and return results in input order', { timeout: 8000 }, async t => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  let bothReceived;
+  const both = new Promise(resolve => { bothReceived = resolve; });
+  const seen = [];
+  const tools = [{ id: 'one', name: 'first' }, { id: 'two', name: 'second' }];
+  const f = await mcpFixture(t, async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const call = JSON.parse(body);
+    if (call.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    if (call.method === 'tools/call') {
+      seen.push(call.params._meta['claudecode/toolUseId']);
+      if (seen.length === 2) bothReceived();
+      await gate;
+    }
+    const result = call.method === 'initialize' ? { protocolVersion: '2025-03-26' }
+      : call.method === 'tools/list' ? { tools: [] }
+      : call.method === 'tools/call' ? { content: [{ type: 'text', text: call.params.name }] } : {};
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+  }, { turns: [[{ mcp_parallel: tools }, { text: 'done' }]] });
+  f.send(user('parallel'));
+  await f.next(); await f.next();
+  assert.deepEqual((await f.next()).message.content.map(x => x.id), ['one', 'two']);
+  await both;
+  assert.deepEqual([...seen].sort(), ['one', 'two']);
+  release();
+  const results = (await f.next()).message.content;
+  assert.deepEqual(results.map(x => [x.tool_use_id, x.content[0].text]), [['one', 'first'], ['two', 'second']]);
+  assert.equal((await f.next()).message.content[0].text, 'done');
+  assert.equal((await f.next()).subtype, 'success');
+  f.child.stdin.end(); assert.equal((await f.closed).code, 0);
+});
+
+test('interrupt aborts parallel MCP calls and permits the next turn', { timeout: 8000 }, async t => {
+  let bothReceived;
+  const both = new Promise(resolve => { bothReceived = resolve; });
+  let bothClosed;
+  const closed = new Promise(resolve => { bothClosed = resolve; });
+  let seen = 0, disconnected = 0;
+  const tools = [{ id: 'one', name: 'first' }, { id: 'two', name: 'second' }];
+  const f = await mcpFixture(t, async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const call = JSON.parse(body);
+    if (call.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    if (call.method === 'tools/call') {
+      res.on('close', () => { if (++disconnected === 2) bothClosed(); });
+      if (++seen === 2) bothReceived();
+      return;
+    }
+    const result = call.method === 'initialize' ? { protocolVersion: '2025-03-26' }
+      : call.method === 'tools/list' ? { tools: [] } : {};
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+  }, { turns: [[{ mcp_parallel: tools }, { text: 'stale' }], [{ text: 'next' }]] });
+  f.send(user('parallel'));
+  await f.next(); await f.next(); await f.next();
+  await both;
+  f.send(control('stop', 'interrupt'));
+  assert.equal((await f.next()).response.request_id, 'stop');
+  assert.equal((await f.next()).result, 'Interrupted');
+  await closed;
+  f.send(user('next'));
+  assert.equal((await f.next()).subtype, 'init');
+  assert.equal((await f.next()).uuid, 'next');
+  assert.equal((await f.next()).message.content[0].text, 'next');
+  assert.equal((await f.next()).result, 'next');
+  f.child.stdin.end();
+  assert.equal((await f.closed).code, 0);
+});

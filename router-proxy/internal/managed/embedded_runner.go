@@ -19,8 +19,10 @@ const embeddedOwnerTTL = 30 * time.Second
 
 type embeddedOwnerContextKey struct{}
 type embeddedOwner struct {
-	binding  store.EmbeddedBinding
-	identity string
+	binding          store.EmbeddedBinding
+	identity         string
+	backgroundBash   *backgroundBashOwnerCapability
+	claudeOrphanRoot string
 }
 
 // ensureEmbeddedOwner guarantees that the Manager holds an active, valid owner claim
@@ -59,8 +61,12 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 		return embeddedOwner{}, fmt.Errorf("acquire embedded owner for agent %s: %w", agentID, err)
 	}
 	binding.OwnerToken = token
-	owner = embeddedOwner{binding: binding, identity: ownerID}
+	owner = embeddedOwner{binding: binding, identity: ownerID, backgroundBash: &backgroundBashOwnerCapability{}}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return embeddedOwner{}, errors.New("manager closed")
+	}
 	if m.embeddedOwners == nil {
 		m.embeddedOwners = make(map[string]embeddedOwner)
 	}
@@ -192,16 +198,28 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		completed = true
 		runCtx, cancel := context.WithCancel(m.runCtx)
 		defer cancel()
-		owner := embeddedOwner{binding: binding, identity: ownerID}
+		owner := embeddedOwner{binding: binding, identity: ownerID, backgroundBash: &backgroundBashOwnerCapability{}}
+		// Retire the previous incarnation before exposing its replacement.
+		m.mu.Lock()
+		previous, hadPrevious := m.embeddedOwners[agent.AgentID]
+		m.mu.Unlock()
+		if hadPrevious && backgroundBashOwnerKey(previous) != backgroundBashOwnerKey(owner) {
+			if err := m.retireBackgroundBashOwner(previous); err != nil {
+				m.failEmbeddedOwner(binding, operationID, "EMBEDDED_START_FAILED", fmt.Errorf("cleanup previous background bash owner: %w", err))
+				return
+			}
+		}
 		// Publish the acquired identity before any fallible recovery work. Even
 		// failed startup must not leave an obsolete cached identity behind.
 		m.mu.Lock()
-		if _, cached := m.embeddedOwners[agent.AgentID]; cached || recovered {
-			if m.embeddedOwners == nil {
-				m.embeddedOwners = make(map[string]embeddedOwner)
-			}
-			m.embeddedOwners[agent.AgentID] = owner
+		if m.embeddedOwners == nil {
+			m.embeddedOwners = make(map[string]embeddedOwner)
 		}
+		if m.closed {
+			m.mu.Unlock()
+			return
+		}
+		m.embeddedOwners[agent.AgentID] = owner
 		m.mu.Unlock()
 		runCtx = context.WithValue(runCtx, embeddedOwnerContextKey{}, owner)
 		runner := m.embeddedRunnerFactory

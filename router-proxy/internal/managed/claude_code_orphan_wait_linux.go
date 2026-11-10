@@ -17,6 +17,10 @@ func waitClaudeCodeCommand(cmd *exec.Cmd, identity ProcessIdentity) error {
 }
 
 func waitClaudeCodeCommandConfirmed(cmd *exec.Cmd, identity ProcessIdentity, confirmed func()) error {
+	return waitClaudeCodeCommandWithReapHook(cmd, identity, confirmed, nil)
+}
+
+func waitClaudeCodeCommandWithReapHook(cmd *exec.Cmd, identity ProcessIdentity, confirmed func(), reap func(func() error) error) error {
 	// WNOWAIT pins the exact zombie leader until all executable members vanish.
 	var info unix.Siginfo
 	for {
@@ -56,6 +60,9 @@ func waitClaudeCodeCommandConfirmed(cmd *exec.Cmd, identity ProcessIdentity, con
 	}
 	if confirmed != nil {
 		confirmed()
+	}
+	if reap != nil {
+		return reap(cmd.Wait)
 	}
 	return cmd.Wait()
 }

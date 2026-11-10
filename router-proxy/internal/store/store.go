@@ -239,14 +239,14 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if maxQueuedMessages < 1 || maxQueuedBytes < 1 || maxBatchBodyChars < 0 {
 		return closeOnError(errors.New("queue limits must be positive"))
 	}
-	store := &Store{db: db, path: databasePath, clock: clock, ids: ids,
+	store := &Store{db: db, path: absolutePath, clock: clock, ids: ids,
 		maxBodyBytes: maxBodyBytes, maxQueuedMessages: maxQueuedMessages,
 		maxQueuedBytes: maxQueuedBytes, maxBatchBodyChars: maxBatchBodyChars,
 		reminderIncarnations: make(map[string]string), migrations: append([]Migration(nil), migrations...)}
 	if err := db.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("ping SQLite database: %w", err))
 	}
-	if err := chmodStateFiles(databasePath); err != nil {
+	if err := chmodStateFiles(absolutePath); err != nil {
 		return closeOnError(err)
 	}
 	if err := store.configureAndVerify(ctx, busyTimeout); err != nil {
@@ -281,7 +281,7 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := store.pruneManagedArchives(ctx); err != nil {
 		return closeOnError(err)
 	}
-	if err := chmodStateFiles(databasePath); err != nil {
+	if err := chmodStateFiles(absolutePath); err != nil {
 		return closeOnError(err)
 	}
 	var retentionSchema int
@@ -1100,6 +1100,27 @@ func (s *Store) applyWidenManagedAgentsLifecycleState104(ctx context.Context, mi
 	return chmodStateFiles(s.path)
 }
 
+// lockContext lets deadline-bound projection work stop while another store
+// operation holds the single-connection mutex.
+func (s *Store) lockContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for !s.mu.TryLock() {
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
 func (s *Store) runImmediate(ctx context.Context, operation func() error) error {
 	_, _, err := s.runImmediateWithCommitOutcome(ctx, operation)
 	return err
@@ -1109,7 +1130,9 @@ func (s *Store) runImmediate(ctx context.Context, operation func() error) error 
 // after COMMIT (notably state-file permissions). A caller with an in-memory
 // admission reservation must settle it using committed, not err == nil.
 func (s *Store) runImmediateWithCommitOutcome(ctx context.Context, operation func() error) (committed, conclusive bool, err error) {
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return false, true, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return false, true, errors.New("store is closed")

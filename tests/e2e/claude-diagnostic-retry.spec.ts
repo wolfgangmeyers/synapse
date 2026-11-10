@@ -33,9 +33,7 @@ test('unclassified diagnostic is retried after a witnessed SQLite write failure'
     const id = randomUUID();
     const sending = f.request(page, '/v1/messages', { id, from: 'user', to: agent, body: 'Diagnostic retry fixture', created_at: new Date(now).toISOString() });
     // A positive router error is the handshake: an absent row alone cannot prove an attempted write.
-    await expect.poll(() => f.router.stderr(), { timeout: 20_000 }).toMatch(/cannot record blocked Claude mail diagnostic:.*diagnostic fault/);
-    const failure = f.router.stderr().split('\n').find(line => line.includes(`embedded:${agent}`) && line.includes('cannot record blocked Claude mail diagnostic:') && line.includes('diagnostic fault'));
-    expect(failure).toBeTruthy();
+    await expect.poll(() => f.router.stderrLineContains(`embedded:${agent}`, 'cannot record blocked Claude mail diagnostic:', 'diagnostic fault'), { timeout: 20_000 }).toBe(true);
     expect(f.rows('SELECT id FROM messages WHERE id=?', id)).toHaveLength(1);
     const cleared = db.prepare('UPDATE embedded_sessions SET execution_json=NULL WHERE agent_id=? AND current=1 AND owner_token=? AND execution_token=? AND json_extract(execution_json,\'$.kind\')=\'sdk\' AND json_extract(execution_json,\'$.owner\')=? AND json_extract(execution_json,\'$.token\')=?').run(agent, execution.owner_token, execution.execution_token, execution.owner_token, execution.execution_token);
     expect(cleared.changes).toBe(1);

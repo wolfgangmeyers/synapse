@@ -59,8 +59,10 @@ export type WorkflowHarnessOptions = {
   capacityFixture?: boolean;
   mcpQueueFixture?: boolean;
   backgroundExpiryInterval?: string;
+  backgroundCountRetentionFixture?: boolean;
   piReviewBarrier?: boolean;
   initialReplies?: Reply[];
+  inspectRequest?: (request: Record<string, unknown>) => { error: string } | { reply: Reply } | undefined;
   embeddedRoot?: { name: string; requestId: string; model: { provider: string; id: string }; instruction: string };
 };
 export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
@@ -94,25 +96,32 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
       const parsed = JSON.parse(body);
       requests.push(parsed);
       const requestNumber = requests.length;
+      if (parsed.model !== (options.expectedCodexModels?.[requests.length - 1] ?? options.expectedCodexModel ?? model.id)) {
+        violations.push(`unexpected provider request ${requests.length}: ${parsed.model}`); res.writeHead(400).end(); return;
+      }
+      const inspection = options.inspectRequest?.(parsed);
+      if (inspection && "error" in inspection) {
+        violations.push(inspection.error); res.writeHead(400).end(); return;
+      }
       const interleaved = interleavedReplies[0]?.ownsRequest?.(parsed) === true;
       if (!interleaved && interleavedOwners.some(owns => owns(parsed))) {
         violations.push(`unexpected owned provider request ${requests.length}: ${JSON.stringify(parsed)}`);
         res.writeHead(400).end(); return;
       }
       const queue = interleaved ? interleavedReplies : replies;
-      const reply = queue[0];
+      const reply = inspection && "reply" in inspection ? inspection.reply : queue[0];
       if (reply?.ownsRequest && !reply.ownsRequest(parsed)) {
         violations.push(`unowned provider request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
         res.writeHead(400).end(); return;
       }
-      if (reply) queue.shift();
+      if (reply && !(inspection && "reply" in inspection)) queue.shift();
       const isEvaluation = typeof parsed.instructions === "string" && parsed.instructions.toLowerCase().startsWith("goal:");
       if (reply && (("evaluation" in reply && reply.evaluation === true) !== isEvaluation)) {
         violations.push(`unexpected ${isEvaluation ? "evaluator" : "worker"} request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
         res.writeHead(400).end(); return;
       }
-      if (!reply || parsed.model !== (options.expectedCodexModels?.[requests.length - 1] ?? options.expectedCodexModel ?? model.id)) {
-        violations.push(`unexpected provider request ${requests.length}: ${JSON.stringify(parsed)}`); res.writeHead(400).end(); return;
+      if (!reply) {
+        violations.push(`unexpected provider request ${requests.length}: ${parsed.model}`); res.writeHead(400).end(); return;
       }
       if ("hold" in reply) { held.push(res); return; }
       if (("answer" in reply || "failure" in reply) && reply.barrier) {
@@ -245,7 +254,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
-    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, capacityFixture: options.capacityFixture, mcpQueueFixture: options.mcpQueueFixture, piReviewBarrier: options.piReviewBarrier, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, embeddedRoot: options.embeddedRoot, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir, omitGoogle: options.omitGoogle } });
+    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, capacityFixture: options.capacityFixture, mcpQueueFixture: options.mcpQueueFixture, piReviewBarrier: options.piReviewBarrier, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, backgroundCountRetentionFixture: options.backgroundCountRetentionFixture, embeddedRoot: options.embeddedRoot, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir, omitGoogle: options.omitGoogle } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     await expect.poll(async () => {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }

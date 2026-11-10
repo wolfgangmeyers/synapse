@@ -354,7 +354,8 @@ type ManagedAgentsSnapshot struct {
 	Archives []*ManagedAgentArchive
 	// ReadinessSources are read in the same transaction as Agents so child
 	// telemetry can never mix a newer runtime snapshot with an older agent row.
-	ReadinessSources map[string]*ManagedReadinessSource
+	ReadinessSources    map[string]*ManagedReadinessSource
+	HistoryIncarnations map[string]string
 }
 
 // ManagedOrphanSessionError means an embedded identity is still reserved by
@@ -2940,7 +2941,9 @@ func validManagedRuntimeFence(fence ManagedRuntimeFence) bool {
 }
 
 func (s *Store) LoadManagedDesiredPolicy(ctx context.Context, agentID string) (ManagedDesiredPolicy, error) {
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return ManagedDesiredPolicy{}, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return ManagedDesiredPolicy{}, errors.New("store is closed")
@@ -4636,7 +4639,9 @@ func (s *Store) ReleaseManagedSlot(ctx context.Context, agentID string) error {
 }
 
 func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgentRecord, error) {
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, errors.New("store is closed")
@@ -4760,13 +4765,13 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	return result, nil
 }
 
-const managedAgentSelect = `SELECT agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at FROM managed_agents`
+const managedAgentSelect = `SELECT agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at,runtime FROM managed_agents`
 
 func scanManagedAgent(scanner interface{ Scan(...any) error }, _ any) (*ManagedAgentRecord, error) {
 	var result ManagedAgentRecord
 	var slot, accepting, pid, sent sql.NullInt64
 	var pi, marker, incarnation, runtime, pending, errorCode, errorMessage, errorAt, started sql.NullString
-	if err := scanner.Scan(&result.AgentID, &result.Name, &slot, &result.Cwd, &result.SelectedModel.Provider, &result.SelectedModel.ID, &result.DesiredState, &result.LifecycleState, &result.ActivityState, &accepting, &pi, &result.SessionEpoch, &pid, &marker, &incarnation, &runtime, &result.ManifestRevision, &result.ManifestHash, &pending, &sent, &errorCode, &errorMessage, &errorAt, &result.CreatedAt, &started, &result.UpdatedAt); err != nil {
+	if err := scanner.Scan(&result.AgentID, &result.Name, &slot, &result.Cwd, &result.SelectedModel.Provider, &result.SelectedModel.ID, &result.DesiredState, &result.LifecycleState, &result.ActivityState, &accepting, &pi, &result.SessionEpoch, &pid, &marker, &incarnation, &runtime, &result.ManifestRevision, &result.ManifestHash, &pending, &sent, &errorCode, &errorMessage, &errorAt, &result.CreatedAt, &started, &result.UpdatedAt, &result.Runtime); err != nil {
 		return nil, err
 	}
 	result.SlotHeld = slot.Int64 != 0
@@ -4782,7 +4787,6 @@ func scanManagedAgent(scanner interface{ Scan(...any) error }, _ any) (*ManagedA
 	result.LastErrorMessage = errorMessage.String
 	result.LastErrorAt = errorAt.String
 	result.StartedAt = started.String
-	result.Runtime = "rpc"
 	return &result, nil
 }
 
@@ -5178,7 +5182,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if ctx == nil {
 		return ManagedAgentsSnapshot{}, errors.New("context is required")
 	}
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return ManagedAgentsSnapshot{}, err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return ManagedAgentsSnapshot{}, errors.New("store is closed")
@@ -5222,6 +5228,15 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	}
 	if err := loadManagedUrgencyTx(ctx, s.db, agents); err != nil {
 		return rollback(err)
+	}
+	historyIncarnations := make(map[string]string)
+	for _, agent := range agents {
+		var incarnation string
+		err := s.db.QueryRowContext(ctx, `SELECT incarnation_id FROM managed_history_boundaries WHERE agent_id=?`, agent.AgentID).Scan(&incarnation)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return rollback(err)
+		}
+		historyIncarnations[agent.AgentID] = incarnation
 	}
 	goalPolicies := make(map[string]*ManagedGoalPolicy)
 	for _, agent := range agents {
@@ -5294,7 +5309,7 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 			if _, commitErr := s.db.ExecContext(ctx, "COMMIT"); commitErr != nil {
 				return ManagedAgentsSnapshot{}, commitErr
 			}
-			return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, GoalPolicies: goalPolicies, Archives: archives, ReadinessSources: sources}, nil
+			return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, GoalPolicies: goalPolicies, Archives: archives, HistoryIncarnations: historyIncarnations, ReadinessSources: sources}, nil
 		}
 		return rollback(err)
 	}
@@ -5321,7 +5336,7 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {
 		return ManagedAgentsSnapshot{}, err
 	}
-	return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, GoalPolicies: goalPolicies, Archives: archives, ReadinessSources: sources}, nil
+	return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, GoalPolicies: goalPolicies, Archives: archives, HistoryIncarnations: historyIncarnations, ReadinessSources: sources}, nil
 }
 
 func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (ManagedAgentSnapshot, error) {

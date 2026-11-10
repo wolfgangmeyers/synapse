@@ -74,8 +74,10 @@ var ErrTmuxUnavailable = errors.New("tmux unavailable")
 // TmuxWindow is the router-owned representation consumed by worker lifecycle
 // clients. Target remains present because existing clients use it for display.
 type TmuxWindow struct {
-	Name   string `json:"name"`
-	Target string `json:"target"`
+	Name     string `json:"name"`
+	Target   string `json:"target"`
+	WindowID string `json:"window_id,omitempty"`
+	ServerID string `json:"server_id,omitempty"`
 }
 
 // TmuxAdapter keeps process control outside the HTTP boundary. The transport
@@ -669,7 +671,7 @@ func New(options Options) (*Router, error) {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
 		// handler. Wake UI-live only after that durable commit; the hub reads its
 		// own projection and never trusts a manager-supplied browser payload.
-		options.Managed.SetProjectionPublisher(func() { r.uiLive.publish(context.Background()) })
+		options.Managed.SetProjectionPublisherContext(r.uiLive.publishContext)
 		options.Managed.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) { r.uiLive.publishHistory("complete", managedHistoryFrame(entry)) })
 		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
 		options.Managed.SetEmbeddedReplyPublisher(r.persistEmbeddedReply)
@@ -1153,10 +1155,10 @@ func (s *session) lifecycleEnabledNow() bool {
 	return s.lifecycleEnabled
 }
 
-func (r *Router) nextID() (string, error) { return r.ids.Next() }
-func (r *Router) now() time.Time          { return r.clock.Now().UTC() }
+func (r *Router) nextID() (string, error)              { return r.ids.Next() }
+func (r *Router) now() time.Time                       { return r.clock.Now().UTC() }
 func (r *Router) TestClock() *deterministic.FixedClock { return r.testClock }
-func timestamp(value time.Time) string    { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
+func timestamp(value time.Time) string                 { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 func (r *Router) readiness() string {
 	r.mu.RLock()

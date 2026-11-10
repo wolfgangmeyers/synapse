@@ -189,7 +189,10 @@ func messageContentText(msg ai.Message) string {
 // - Immediately dispatches a wake turn to the agent with ContextResetWakePrompt.
 func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
 	lane := m.laneFor(binding.AgentID)
-	active, ok := lane.beginEmbeddedReset()
+	if err := m.validateResetBinding(ctx, binding); err != nil {
+		return err
+	}
+	active, ok := lane.beginEmbeddedReset(binding)
 	if !ok {
 		return &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
 	}
@@ -206,6 +209,9 @@ func (m *Manager) executePendingEmbeddedReset(ctx context.Context, binding store
 			lane.endEmbeddedReset()
 		}
 	}()
+	if err := m.validateResetBinding(ctx, binding); err != nil {
+		return err
+	}
 	if active != nil {
 		active.Interrupt()
 	}
@@ -218,7 +224,7 @@ func (m *Manager) executePendingEmbeddedReset(ctx context.Context, binding store
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+	if err := m.claudeCodeProcesses.stopBinding(binding); err != nil {
 		reoffer = false
 		return m.recordClaudeStopFailure(binding, err)
 	}
@@ -232,7 +238,7 @@ func (m *Manager) executePendingEmbeddedReset(ctx context.Context, binding store
 // Called with serial held, only after Run/Continue have joined callbacks.
 func (m *Manager) resetEmbeddedContextAfterDrain(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
 	lane := m.laneFor(binding.AgentID)
-	active, ok := lane.beginEmbeddedReset()
+	active, ok := lane.beginEmbeddedReset(binding)
 	if !ok {
 		return &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
 	}
@@ -244,6 +250,9 @@ func (m *Manager) resetEmbeddedContextAfterDrain(ctx context.Context, binding st
 			lane.endEmbeddedReset()
 		}
 	}()
+	if err := m.validateResetBinding(ctx, binding); err != nil {
+		return err
+	}
 	if active != nil {
 		active.Interrupt()
 		active.Close()
@@ -251,7 +260,7 @@ func (m *Manager) resetEmbeddedContextAfterDrain(ctx context.Context, binding st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+	if err := m.claudeCodeProcesses.stopBinding(binding); err != nil {
 		reoffer = false
 		return m.recordClaudeStopFailure(binding, err)
 	}
@@ -262,159 +271,242 @@ func (m *Manager) resetEmbeddedContextAfterDrain(ctx context.Context, binding st
 	return err
 }
 
+// validateResetBinding checks both the cached runtime owner and the store fence
+// before any agent-ID-scoped interrupt or process stop.
+func (m *Manager) validateResetBinding(ctx context.Context, binding store.EmbeddedBinding) error {
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[binding.AgentID]
+	m.mu.Unlock()
+	if ok && owner.binding != binding {
+		return errors.New("cached embedded owner binding mismatch")
+	}
+	if m.store == nil { // Synthetic coordinator tests have no store.
+		return nil
+	}
+	_, err := m.store.ReopenEmbedded(ctx, binding)
+	return err
+}
+
+// Hold launch admission across cleanup and the epoch transaction. Cleanup must
+// finish before committing: otherwise a committed epoch has no retryable owner.
+func (m *Manager) resetBackgroundBashOwner(binding store.EmbeddedBinding, reset func() error) error {
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[binding.AgentID]
+	m.mu.Unlock()
+	if ok && owner.binding != binding {
+		return errors.New("cached embedded owner binding mismatch")
+	}
+	if !ok {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if _, exists := m.embeddedOwners[binding.AgentID]; exists {
+			return errors.New("cached embedded owner changed during reset")
+		}
+		return reset()
+	}
+	capability := owner.backgroundBash
+	if capability != nil {
+		capability.mu.Lock()
+		defer capability.mu.Unlock()
+	}
+	m.mu.Lock()
+	current, exists := m.embeddedOwners[binding.AgentID]
+	jobs := m.backgroundBash
+	m.mu.Unlock()
+	if !exists || current != owner {
+		return errors.New("cached embedded owner changed during reset")
+	}
+	if jobs != nil {
+		if err := jobs.StopOwner(backgroundBashOwnerKey(owner)); err != nil {
+			if capability != nil {
+				capability.revoked = true
+			}
+			return err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, exists = m.embeddedOwners[binding.AgentID]; !exists || current != owner {
+		return errors.New("cached embedded owner changed during reset")
+	}
+	if err := reset(); err != nil {
+		if current, exists := m.embeddedOwners[binding.AgentID]; !exists || current != owner {
+			if capability != nil {
+				capability.revoked = true
+			}
+		}
+		return err
+	}
+	if capability != nil {
+		capability.revoked = true
+	}
+	return nil
+}
+
 // Requires serial and resetPending. Never snapshot before callback drain.
 func (m *Manager) executeContextResetOnLane(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
-	saved, err := m.store.ManagedAgent(ctx, binding.AgentID)
-	if err != nil {
-		return fmt.Errorf("managed agent: %w", err)
-	}
-
-	snap, err := m.store.ReopenEmbedded(ctx, binding)
-	if err != nil {
-		return fmt.Errorf("reopen embedded: %w", err)
-	}
-
-	var sessionMessages []agent.AgentMessage
-	var sessionEntries []store.EmbeddedEntry
-	for _, entry := range snap.Entries {
-		msg, err := ai.UnmarshalMessage(entry.Body)
+	{
+		saved, err := m.store.ManagedAgent(ctx, binding.AgentID)
 		if err != nil {
+			return fmt.Errorf("managed agent: %w", err)
+		}
+
+		snap, err := m.store.ReopenEmbedded(ctx, binding)
+		if err != nil {
+			return fmt.Errorf("reopen embedded: %w", err)
+		}
+
+		var sessionMessages []agent.AgentMessage
+		var sessionEntries []store.EmbeddedEntry
+		for _, entry := range snap.Entries {
+			msg, err := ai.UnmarshalMessage(entry.Body)
+			if err != nil {
+				continue
+			}
+			if msg.MessageRole() != ai.RoleSystem {
+				sessionMessages = append(sessionMessages, msg)
+				sessionEntries = append(sessionEntries, entry)
+			}
+		}
+
+		targetWindow := DefaultPreservedContextWindow
+		if len(window) > 0 && window[0] > 0 {
+			targetWindow = window[0]
+			if targetWindow > MaxPreservedContextWindow {
+				targetWindow = MaxPreservedContextWindow
+			}
+		}
+
+		// Port the last targetWindow messages (skipping an orphaned leading tool result).
+		var portedEntries []store.EmbeddedEntry
+		if len(sessionMessages) <= targetWindow {
+			portedEntries = sessionEntries
+		} else {
+			startIdx := len(sessionMessages) - targetWindow
+			// Ensure we don't start on an orphaned tool result
+			for startIdx < len(sessionMessages) && sessionMessages[startIdx].MessageRole() == ai.RoleToolResult {
+				startIdx++
+			}
+			if startIdx < len(sessionMessages) {
+				portedEntries = sessionEntries[startIdx:]
+			}
+		}
+
+		nextEpoch := binding.Epoch + 1
+		var nextSessionID string
+		if m.ids != nil {
+			nextSessionID, _ = m.ids.Next()
+		}
+		if nextSessionID == "" {
+			nextSessionID = fmt.Sprintf("%s-s%d", binding.AgentID, nextEpoch)
+		}
+		nextBinding := store.EmbeddedBinding{
+			AgentID:    binding.AgentID,
+			SessionID:  nextSessionID,
+			Epoch:      nextEpoch,
+			Generation: binding.Generation,
+		}
+
+		role, err := m.store.SavedEmbeddedSessionRole(ctx, binding)
+		if err != nil {
+			role = "worker"
+		}
+
+		identity, err := newEmbeddedOwnerIdentity()
+		if err != nil {
+			return fmt.Errorf("create reset owner identity: %w", err)
+		}
+		var preparedGenesis, preparedScratchpad []byte
+		// Append initial instruction if explicitly set on launch, otherwise do not synthesize a genesis prompt.
+		if saved.PendingInitialInstruction != "" {
+			genesisText := saved.PendingInitialInstruction
+			if role != "root" {
+				genesisText = formatGenesisPrompt(saved.AgentID, genesisText)
+			}
+			msg := ai.UserMessage{
+				Content: ai.ContentList{
+					ai.TextContent{Text: genesisText},
+				},
+			}
+			genesisBody, err := json.Marshal(msg)
+			if err != nil {
+				return fmt.Errorf("marshal genesis message: %w", err)
+			}
+			preparedGenesis = genesisBody
+		}
+
+		// Append scratchpad entries (if any)
+		scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 20)
+		if err != nil {
+			return fmt.Errorf("prepare scratchpad handoff: %w", err)
+		}
+		if len(scratchpadEntries) > 0 {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("### Persistent Scratchpad Memory (%d of %d entries shown):\n", len(scratchpadEntries), totalCount))
+			for _, e := range scratchpadEntries {
+				status := "Recent"
+				if e.Pinned {
+					status = "Pinned"
+				}
+				sb.WriteString(fmt.Sprintf("- [%s] %s\n", status, e.Content))
+			}
+			sb.WriteString("\nProceed with your work.")
+			msg := ai.UserMessage{
+				Content: ai.ContentList{
+					ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")},
+				},
+			}
+			scratchpadBody, err := json.Marshal(msg)
+			if err != nil {
+				return fmt.Errorf("marshal scratchpad handoff: %w", err)
+			}
+			preparedScratchpad = scratchpadBody
+		}
+
+		h := directResetSeed{Old: binding, Next: nextBinding, Identity: identity, Role: role, Reason: reason, GenesisBody: preparedGenesis, ScratchpadBody: preparedScratchpad, PortedEntries: portedEntries}
+		return m.installDirectReset(ctx, binding, h)
+	}
+}
+
+func (m *Manager) installDirectReset(ctx context.Context, binding store.EmbeddedBinding, h directResetSeed) error {
+	var nextBinding store.EmbeddedBinding
+	claim := func() error {
+		claimed, err := m.store.ResetEmbeddedSessionEpochClaimWithSeed(ctx, h.Old, h.Next, h.Role, h.Identity, [][]byte{h.GenesisBody, h.ScratchpadBody}, h.PortedEntries)
+		if claimed.OwnerToken > 0 {
+			nextBinding = claimed
+			if m.embeddedOwners == nil {
+				m.embeddedOwners = make(map[string]embeddedOwner)
+			}
+			m.embeddedOwners[claimed.AgentID] = embeddedOwner{binding: claimed, identity: h.Identity, backgroundBash: &backgroundBashOwnerCapability{}}
+		} else if err != nil && !errors.Is(err, store.ErrEmbeddedResetRolledBack) {
+			// Unknown authority must not leave a potentially retired owner cached.
+			delete(m.embeddedOwners, binding.AgentID)
+		}
+		return err
+	}
+	if err := m.resetBackgroundBashOwner(binding, claim); err != nil {
+		return fmt.Errorf("reset embedded session epoch and cleanup: %w", err)
+	}
+	var resetMessages []agent.AgentMessage
+	for _, body := range [][]byte{h.GenesisBody, h.ScratchpadBody} {
+		if len(body) == 0 {
 			continue
 		}
-		if msg.MessageRole() != ai.RoleSystem {
-			sessionMessages = append(sessionMessages, msg)
-			sessionEntries = append(sessionEntries, entry)
-		}
-	}
-
-	targetWindow := DefaultPreservedContextWindow
-	if len(window) > 0 && window[0] > 0 {
-		targetWindow = window[0]
-		if targetWindow > MaxPreservedContextWindow {
-			targetWindow = MaxPreservedContextWindow
-		}
-	}
-
-	// Port the last targetWindow messages (skipping an orphaned leading tool result).
-	var portedMessages []agent.AgentMessage
-	var portedEntries []store.EmbeddedEntry
-	if len(sessionMessages) <= targetWindow {
-		portedMessages = sessionMessages
-		portedEntries = sessionEntries
-	} else {
-		startIdx := len(sessionMessages) - targetWindow
-		// Ensure we don't start on an orphaned tool result
-		for startIdx < len(sessionMessages) && sessionMessages[startIdx].MessageRole() == ai.RoleToolResult {
-			startIdx++
-		}
-		if startIdx < len(sessionMessages) {
-			portedMessages = sessionMessages[startIdx:]
-			portedEntries = sessionEntries[startIdx:]
-		}
-	}
-
-	nextEpoch := binding.Epoch + 1
-	var nextSessionID string
-	if m.ids != nil {
-		nextSessionID, _ = m.ids.Next()
-	}
-	if nextSessionID == "" {
-		nextSessionID = fmt.Sprintf("%s-s%d", binding.AgentID, nextEpoch)
-	}
-	nextBinding := store.EmbeddedBinding{
-		AgentID:    binding.AgentID,
-		SessionID:  nextSessionID,
-		Epoch:      nextEpoch,
-		Generation: binding.Generation,
-	}
-
-	role, err := m.store.SavedEmbeddedSessionRole(ctx, binding)
-	if err != nil {
-		role = "worker"
-	}
-
-	if err := m.store.ResetEmbeddedSessionEpoch(ctx, binding, nextBinding, role); err != nil {
-		return fmt.Errorf("reset embedded session epoch: %w", err)
-	}
-
-	identity, err := newEmbeddedOwnerIdentity()
-	if err != nil {
-		identity = "reset:" + nextBinding.AgentID
-	}
-	token, err := m.store.AcquireEmbeddedOwner(ctx, nextBinding, identity, embeddedOwnerTTL)
-	if err != nil {
-		return fmt.Errorf("acquire embedded owner for next binding: %w", err)
-	}
-	nextBinding.OwnerToken = token
-
-	m.mu.Lock()
-	if m.embeddedOwners == nil {
-		m.embeddedOwners = make(map[string]embeddedOwner)
-	}
-	m.embeddedOwners[nextBinding.AgentID] = embeddedOwner{
-		binding:  nextBinding,
-		identity: identity,
-	}
-	m.mu.Unlock()
-
-	// Append initial instruction if explicitly set on launch, otherwise do not synthesize a genesis prompt.
-	var genesisMsg *ai.UserMessage
-	if saved.PendingInitialInstruction != "" {
-		genesisText := saved.PendingInitialInstruction
-		role, _ := m.store.EmbeddedSessionRole(ctx, binding)
-		if role != "root" {
-			genesisText = formatGenesisPrompt(saved.AgentID, genesisText)
-		}
-		msg := ai.UserMessage{
-			Content: ai.ContentList{
-				ai.TextContent{Text: genesisText},
-			},
-		}
-		genesisBody, err := json.Marshal(msg)
+		msg, err := ai.UnmarshalMessage(body)
 		if err != nil {
-			return fmt.Errorf("marshal genesis message: %w", err)
+			return err
 		}
-		if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", genesisBody); err != nil {
-			return fmt.Errorf("append genesis prompt: %w", err)
-		}
-		genesisMsg = &msg
+		resetMessages = append(resetMessages, msg)
 	}
-
-	// Append scratchpad entries (if any)
-	var scratchpadMsg *ai.UserMessage
-	scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 20)
-	if err == nil && len(scratchpadEntries) > 0 {
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("### Persistent Scratchpad Memory (%d of %d entries shown):\n", len(scratchpadEntries), totalCount))
-		for _, e := range scratchpadEntries {
-			status := "Recent"
-			if e.Pinned {
-				status = "Pinned"
-			}
-			sb.WriteString(fmt.Sprintf("- [%s] %s\n", status, e.Content))
+	for _, entry := range h.PortedEntries {
+		msg, err := ai.UnmarshalMessage(entry.Body)
+		if err != nil {
+			return err
 		}
-		sb.WriteString("\nProceed with your work.")
-		msg := ai.UserMessage{
-			Content: ai.ContentList{
-				ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")},
-			},
-		}
-		scratchpadBody, err := json.Marshal(msg)
-		if err == nil {
-			if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", scratchpadBody); err != nil {
-				return fmt.Errorf("append scratchpad handoff: %w", err)
-			}
-			scratchpadMsg = &msg
-		}
+		resetMessages = append(resetMessages, msg)
 	}
-
-	// Import validated saved rows, not SDK JSON timestamps or remarshaled bodies.
-	for _, entry := range portedEntries {
-		if _, err := m.store.AppendImportedEmbeddedEntry(ctx, nextBinding, binding, entry.Sequence, entry.Digest); err != nil {
-			return fmt.Errorf("import ported message: %w", err)
-		}
-	}
-
+	nextEpoch := nextBinding.Epoch
+	reason := h.Reason
 	// Immediately dispatches a wake turn to the agent
 	updatedAgent, err := m.store.ManagedAgent(ctx, nextBinding.AgentID)
 	if err != nil {
@@ -422,14 +514,6 @@ func (m *Manager) executeContextResetOnLane(ctx context.Context, binding store.E
 	}
 
 	// Immediately update context usage for the reset agent so the UI immediately sees the reset tokens.
-	var resetMessages []agent.AgentMessage
-	if genesisMsg != nil {
-		resetMessages = append(resetMessages, *genesisMsg)
-	}
-	if scratchpadMsg != nil {
-		resetMessages = append(resetMessages, *scratchpadMsg)
-	}
-	resetMessages = append(resetMessages, portedMessages...)
 	resetTokens := embeddedProjectedTokens(resetMessages)
 	resetWindow := 0
 	if resolvedModel, err := ResolveModel(updatedAgent.SelectedModel); err == nil && resolvedModel != nil && resolvedModel.ContextWindow > 0 {
@@ -437,16 +521,13 @@ func (m *Manager) executeContextResetOnLane(ctx context.Context, binding store.E
 	}
 	m.updateAgentContextUsage(nextBinding.AgentID, &resetTokens, resetWindow)
 
-	owner := embeddedOwner{binding: nextBinding, identity: identity}
-	runCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
-
-	log.Printf("[embedded:%s] Context reset completed (%s). Dispatched wake turn to epoch %d", binding.AgentID, reason, nextEpoch)
+	log.Printf("[embedded:%s] Context reset prepared (%s), epoch %d", binding.AgentID, reason, nextEpoch)
 	lane := m.laneFor(binding.AgentID)
 	lane.warningEmitted = false
 	lane.warningEpoch = nextEpoch
 
 	// Record explicit context_reset entry in managed_complete_history so UI timeline renders the Epoch marker.
-	resetKey := fmt.Sprintf("context-reset:%s:%d:%s", binding.AgentID, nextEpoch, uuid.New().String()[:8])
+	resetKey := fmt.Sprintf("context-reset:%s:%d:%s", binding.AgentID, nextEpoch, h.Identity)
 	resetSummary := fmt.Sprintf("Context reset to epoch %d (%s)", nextEpoch, reason)
 	resetMsg := fmt.Sprintf("Context reset (Epoch %d)", nextEpoch)
 	pres := &store.ManagedHistoryPresentation{
@@ -475,10 +556,15 @@ func (m *Manager) executeContextResetOnLane(ctx context.Context, binding store.E
 	// The epoch committed and fresh seed is installed. Old correlation is now
 	// detached; fresh runtime registration and admissions may proceed.
 	lane.activeMu.Lock()
-	lane.activeSession = nil
-	lane.activePersistence = nil
+	if lane.activeBinding == binding {
+		lane.activeSession = nil
+		lane.activePersistence = nil
+		lane.activeBinding = store.EmbeddedBinding{}
+	}
 	lane.activeMu.Unlock()
 	lane.reopenEmbeddedResetAdmissionsForBinding(binding)
+	owner := embeddedOwner{binding: nextBinding, identity: h.Identity}
+	runCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
 	if err := m.runEmbeddedSessionPrompt(runCtx, *updatedAgent, ContextResetWakePrompt); err != nil {
 		return fmt.Errorf("dispatch context reset wake turn: %w", err)
 	}
@@ -711,7 +797,10 @@ func (m *Manager) finishCommittedToolReset(ctx context.Context, binding store.Em
 
 	// Ownership transferred atomically under admission above.
 	lane.activeMu.RLock()
-	active := lane.activeSession
+	var active embeddedRuntime
+	if lane.activeBinding == binding {
+		active = lane.activeSession
+	}
 	lane.activeMu.RUnlock()
 	lane.admission.Lock()
 	delete(lane.resetToolGates, req)
@@ -733,7 +822,7 @@ func (m *Manager) finishCommittedToolReset(ctx context.Context, binding store.Em
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+	if err := m.claudeCodeProcesses.stopBinding(binding); err != nil {
 		reoffer = false
 		log.Printf("[embedded:%s] context reset stop failed: %v", binding.AgentID, m.recordClaudeStopFailure(binding, err))
 		return

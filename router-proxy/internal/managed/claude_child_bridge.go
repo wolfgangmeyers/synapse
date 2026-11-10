@@ -52,6 +52,39 @@ func newClaudeChildBridge(db *store.Store, parent, child store.EmbeddedBinding, 
 	return b, cleanup, nil
 }
 
+func (b *claudeChildBridge) replaceTool(tool agent.AgentTool) error {
+	if _, ok := b.tools[tool.Name]; !ok {
+		return errors.New("unknown child tool")
+	}
+	schema, err := json.Marshal(tool.Parameters)
+	if err != nil {
+		return err
+	}
+	for i := range b.catalog {
+		if b.catalog[i].Name == tool.Name {
+			b.catalog[i] = ClaudeCodeMCPTool{Name: tool.Name, Description: tool.Description, InputSchema: schema}
+			b.tools[tool.Name] = tool
+			return nil
+		}
+	}
+	return errors.New("missing child tool catalog")
+}
+
+func (b *claudeChildBridge) addTools(tools []agent.AgentTool) error {
+	for _, tool := range tools {
+		if _, exists := b.tools[tool.Name]; exists {
+			return errors.New("duplicate child tool")
+		}
+		schema, err := json.Marshal(tool.Parameters)
+		if err != nil {
+			return err
+		}
+		b.tools[tool.Name] = tool
+		b.catalog = append(b.catalog, ClaudeCodeMCPTool{Name: tool.Name, Description: tool.Description, InputSchema: schema})
+	}
+	return nil
+}
+
 func (b *claudeChildBridge) check(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err

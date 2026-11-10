@@ -14,9 +14,17 @@ func waitClaudeCodeCommand(cmd *exec.Cmd, identity ProcessIdentity) error {
 }
 
 func waitClaudeCodeCommandConfirmed(cmd *exec.Cmd, identity ProcessIdentity, confirmed func()) error {
+	return waitClaudeCodeCommandWithReapHook(cmd, identity, confirmed, nil)
+}
+
+func waitClaudeCodeCommandWithReapHook(cmd *exec.Cmd, identity ProcessIdentity, confirmed func(), reap func(func() error) error) error {
 	// After reaping, only an absent group is conclusive. Never signal a group
 	// whose leader is no longer pinned: its identity could have been reused.
-	return waitClaudeCodeReapedCommand(cmd.Wait, func() ProcessProbeState {
+	wait := cmd.Wait
+	if reap != nil {
+		wait = func() error { return reap(cmd.Wait) }
+	}
+	return waitClaudeCodeReapedCommand(wait, func() ProcessProbeState {
 		return (defaultProcessGroupOps{}).Probe(identity).State
 	}, confirmed, 2*time.Second)
 }

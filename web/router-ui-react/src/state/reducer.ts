@@ -150,6 +150,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           existing.last_error !== incoming.last_error ||
           existing.allow_inline_tools !== incoming.allow_inline_tools ||
           (existing.urgent ?? false) !== (incoming.urgent ?? existing.urgent ?? false) ||
+          JSON.stringify(existing.background_bash_jobs) !== JSON.stringify(incoming.background_bash_jobs) ||
           JSON.stringify(existing.goal_state) !== JSON.stringify(goalState) ||
           JSON.stringify(existing.model) !== JSON.stringify(incoming.model);
 

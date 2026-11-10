@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -284,7 +285,9 @@ func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner
 	if owner == "" || len(owner) > 256 {
 		return errors.New("invalid embedded owner lease")
 	}
-	s.mu.Lock()
+	if err := s.lockContext(ctx); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	if s.closed {
 		return errors.New("store is closed")
@@ -732,16 +735,108 @@ func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBind
 // mail reservations, and advances both epoch records in one immediate transaction.
 // Callers must drain callbacks before snapshotting preserved context and resetting.
 func (s *Store) ResetEmbeddedSessionEpoch(ctx context.Context, old, next EmbeddedBinding, role string) error {
+	_, _, err := s.resetEmbeddedSessionEpoch(ctx, old, next, role, "", nil)
+	return err
+}
+
+// ErrEmbeddedResetRolledBack marks a conclusively uncommitted reset claim.
+// An unknown outcome must never be treated as a rollback.
+var ErrEmbeddedResetRolledBack = errors.New("embedded reset claim rolled back")
+
+// ResetEmbeddedSessionEpochAndClaim atomically rotates the epoch and installs
+// identity as its first owner. Reuse the same identity and bindings on retry.
+// A retry succeeds only while that exact claim remains authoritative.
+func (s *Store) ResetEmbeddedSessionEpochAndClaim(ctx context.Context, old, next EmbeddedBinding, role, identity string) (EmbeddedBinding, error) {
+	if old.OwnerToken <= 0 || next.OwnerToken != 0 || identity == "" || len(identity) > 256 {
+		return EmbeddedBinding{}, errors.New("invalid embedded reset claim")
+	}
+	return s.resetEmbeddedSessionEpochAndClaim(ctx, old, next, role, identity, nil)
+}
+
+// ResetEmbeddedSessionEpochClaimWithSeed commits the replacement owner and its context together.
+func (s *Store) ResetEmbeddedSessionEpochClaimWithSeed(ctx context.Context, old, next EmbeddedBinding, role, identity string, bodies [][]byte, imports []EmbeddedEntry) (EmbeddedBinding, error) {
+	return s.resetEmbeddedSessionEpochAndClaim(ctx, old, next, role, identity, func(target EmbeddedBinding) error {
+		return s.installEmbeddedResetSeedTx(ctx, target, old, identity, bodies, imports)
+	})
+}
+
+func (s *Store) resetEmbeddedSessionEpochAndClaim(ctx context.Context, old, next EmbeddedBinding, role, identity string, seed func(EmbeddedBinding) error) (EmbeddedBinding, error) {
+	if old.OwnerToken <= 0 || next.OwnerToken != 0 || identity == "" || len(identity) > 256 {
+		return EmbeddedBinding{}, errors.New("invalid embedded reset claim")
+	}
+	committed, conclusive, err := s.resetEmbeddedSessionEpoch(ctx, old, next, role, identity, seed)
+	if err != nil {
+		if committed {
+			if seed == nil {
+				return EmbeddedBinding{}, err
+			}
+			next.OwnerToken = 1
+			return next, err
+		}
+		if conclusive {
+			return EmbeddedBinding{}, errors.Join(ErrEmbeddedResetRolledBack, err)
+		}
+		// Resolve only an unknown transaction outcome. A post-commit error remains an error.
+		resolveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resolved, resolveErr := s.ResolveEmbeddedResetClaim(resolveCtx, old, next, role, identity)
+		if resolveErr != nil {
+			return EmbeddedBinding{}, errors.Join(err, fmt.Errorf("resolve reset claim: %w", resolveErr))
+		}
+		if seed == nil {
+			return resolved, nil
+		}
+		return resolved, err
+	}
+	next.OwnerToken = 1
+	return next, nil
+}
+
+// ResolveEmbeddedResetClaim only observes a previously committed operation; it
+// never starts a reset. A replaced claim is not authority for publication.
+func (s *Store) ResolveEmbeddedResetClaim(ctx context.Context, old, next EmbeddedBinding, role, identity string) (EmbeddedBinding, error) {
+	if old.OwnerToken <= 0 || next.OwnerToken != 0 || old.AgentID != next.AgentID || identity == "" || len(identity) > 256 {
+		return EmbeddedBinding{}, errors.New("invalid embedded reset claim")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return EmbeddedBinding{}, errors.New("store is closed")
+	}
+	// Never resolve through the writer pool: a failed rollback can leave its
+	// single connection inside the transaction whose outcome we are checking.
+	dsn := (&url.URL{Scheme: "file", Path: s.path, RawQuery: "mode=ro"}).String()
+	reader, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return EmbeddedBinding{}, err
+	}
+	defer reader.Close()
+	var count int
+	err = reader.QueryRowContext(ctx, `SELECT count(*) FROM embedded_sessions old JOIN embedded_sessions next ON next.agent_id=old.agent_id JOIN managed_agents m ON m.agent_id=next.agent_id
+WHERE old.agent_id=? AND old.session_id=? AND old.epoch=? AND old.generation=? AND old.role=? AND old.current=0 AND old.owner_token=?
+AND next.session_id=? AND next.epoch=? AND next.generation=? AND next.role=? AND next.current=1 AND next.owner_id=? AND next.owner_token=1
+AND m.pi_session_id=next.session_id AND m.session_epoch=next.epoch AND m.runtime_generation=next.generation`, old.AgentID, old.SessionID, old.Epoch, old.Generation, role, old.OwnerToken, next.SessionID, next.Epoch, next.Generation, role, identity).Scan(&count)
+	if err != nil {
+		return EmbeddedBinding{}, err
+	}
+	if count != 1 {
+		return EmbeddedBinding{}, fmt.Errorf("%w: reset claim not authoritative", ErrStaleEmbeddedFence)
+	}
+	next.OwnerToken = 1
+	return next, nil
+}
+
+func (s *Store) resetEmbeddedSessionEpoch(ctx context.Context, old, next EmbeddedBinding, role, identity string, seed func(EmbeddedBinding) error) (bool, bool, error) {
 	if err := validateEmbedded(old); err != nil {
-		return err
+		return false, true, err
 	}
 	if err := validateEmbedded(next); err != nil {
-		return err
+		return false, true, err
 	}
 	if old.AgentID != next.AgentID || next.Epoch <= old.Epoch || !validEmbeddedRole(role) {
-		return errors.New("invalid embedded reset")
+		return false, true, errors.New("invalid embedded reset")
 	}
-	return s.runImmediate(ctx, func() error {
+	return s.runImmediateWithCommitOutcome(ctx, func() error {
 		var session, generation, savedRole string
 		var epoch int64
 		err := s.db.QueryRowContext(ctx, `SELECT session_id,epoch,generation,role FROM embedded_sessions WHERE agent_id=? AND current=1`, old.AgentID).Scan(&session, &epoch, &generation, &savedRole)
@@ -760,7 +855,24 @@ AND (?<=0 OR owner_token=?)`, old.AgentID, old.SessionID, old.Epoch, old.Generat
 			if prior != 1 {
 				return errors.New("stale embedded reset owner")
 			}
-			return s.embeddedFence(ctx, next)
+			if identity != "" {
+				var owner sql.NullString
+				var token int64
+				if err := s.db.QueryRowContext(ctx, `SELECT owner_id,owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, next.AgentID, next.SessionID, next.Epoch, next.Generation).Scan(&owner, &token); err != nil {
+					return err
+				}
+				if !owner.Valid || owner.String != identity || token != 1 {
+					return fmt.Errorf("%w: reset claim replaced", ErrStaleEmbeddedFence)
+				}
+			}
+			if err := s.embeddedFence(ctx, next); err != nil {
+				return err
+			}
+			if seed != nil {
+				next.OwnerToken = 1
+				return seed(next)
+			}
+			return nil
 		}
 		if err := s.embeddedFence(ctx, old); err != nil {
 			return err
@@ -768,6 +880,7 @@ AND (?<=0 OR owner_token=?)`, old.AgentID, old.SessionID, old.Epoch, old.Generat
 		if session != old.SessionID || epoch != old.Epoch || generation != old.Generation || savedRole != role {
 			return errors.New("stale embedded reset")
 		}
+
 		// Acceptance is not consumption. Keep ACKed attempts and checked user
 		// appends even if their ACK is absent. Correlate by the reserved append
 		// key, never by equal message text. No accepted message fields change.
@@ -794,8 +907,20 @@ AND NOT EXISTS (
 		if _, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET current=0 WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, old.AgentID, old.SessionID, old.Epoch, old.Generation); err != nil {
 			return err
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, next.AgentID, next.SessionID, next.Epoch, next.Generation, role)
-		return err
+		if identity != "" {
+			expires := formatTimestamp(s.clock.Now().Add(100 * 365 * 24 * time.Hour))
+			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current,owner_id,owner_token,owner_expires_at) VALUES(?,?,?,?,?,1,?,1,?)`, next.AgentID, next.SessionID, next.Epoch, next.Generation, role, identity, expires)
+		} else {
+			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, next.AgentID, next.SessionID, next.Epoch, next.Generation, role)
+		}
+		if err != nil {
+			return err
+		}
+		if seed != nil {
+			next.OwnerToken = 1
+			return seed(next)
+		}
+		return nil
 	})
 }
 

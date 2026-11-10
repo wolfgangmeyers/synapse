@@ -276,6 +276,17 @@ func (pool *claudeCodeProcessPool) stop(agentID string) error {
 	return pool.stopEntry(agentID, entry)
 }
 
+// stopBinding snapshots only the exact owner; stopEntry rechecks identity before closing.
+func (pool *claudeCodeProcessPool) stopBinding(binding store.EmbeddedBinding) error {
+	pool.mu.Lock()
+	entry := pool.entries[binding.AgentID]
+	if entry != nil && entry.binding != binding {
+		entry = nil
+	}
+	pool.mu.Unlock()
+	return pool.stopEntry(binding.AgentID, entry)
+}
+
 // Mark stopping while holding the pool lock; every caller joins the same close.
 func (pool *claudeCodeProcessPool) stopEntry(agentID string, entry *claudeCodeProcessEntry) error {
 	pool.mu.Lock()
@@ -993,7 +1004,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 						text += block.Text
 					}
 				}
-				if err := r.p.appendInExecutionNotice(ctx, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: text}}, Timestamp: time.Now().UnixMilli()}); err != nil {
+				if err := r.appendCheckedNotice(ctx, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: text}}, Timestamp: time.Now().UnixMilli()}); err != nil {
 					return r.stop(err)
 				}
 				continue
@@ -1316,6 +1327,17 @@ func (r *claudeCodeRuntime) appendChecked(ctx context.Context, message agent.Age
 	}
 	return r.p.AppendCheckedMessage(ctx, message)
 }
+func (r *claudeCodeRuntime) appendCheckedNotice(ctx context.Context, message ai.UserMessage) error {
+	if r.bridge != nil {
+		r.bridge.serial.Lock()
+		defer r.bridge.serial.Unlock()
+		if err := r.bridge.err(); err != nil {
+			return err
+		}
+	}
+	return r.p.appendInExecutionNotice(ctx, message)
+}
+
 func (r *claudeCodeRuntime) rawToolName(id string) string { return r.rawTools[id] }
 func (r *claudeCodeRuntime) checkedEcho(ctx context.Context) error {
 	if r.bridge != nil {
@@ -1433,17 +1455,24 @@ func (r *claudeCodeRuntime) toolResults(event ClaudeCodeEvent) ([]ai.ToolResultM
 		}
 		var text string
 		if json.Unmarshal(block.Content, &text) != nil {
-			var content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}
+			var content []json.RawMessage
 			if json.Unmarshal(block.Content, &content) != nil {
 				return nil, errors.New("malformed Claude tool result content")
 			}
-			for _, b := range content {
-				if b.Type == "image" {
+			for _, rawContent := range content {
+				var b struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(rawContent, &b) != nil {
+					return nil, errors.New("malformed Claude tool result content")
+				}
+				switch b.Type {
+				case "image":
 					text += "[image]"
-				} else {
+				case "tool_reference":
+					text += string(rawContent)
+				default:
 					text += b.Text
 				}
 			}

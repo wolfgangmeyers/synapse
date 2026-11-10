@@ -184,6 +184,10 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 	if admission.Replayed {
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, admissionErr
 	}
+	var backgroundStopErr error
+	if agent.Runtime == "embedded" {
+		backgroundStopErr = m.retireBackgroundBashAgent(ctx, request.AgentID)
+	}
 	if claude {
 		// Publish the committed terminating state before interrupting or draining.
 		m.publishProjection()
@@ -238,7 +242,7 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 	started := m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
-		if claudeStopErr != nil {
+		if errors.Join(claudeStopErr, backgroundStopErr) != nil {
 			// Cleanup failures are recorded at the reap stage, not the initial abort stage.
 			if err := m.store.AdvanceManagedTermination(context.Background(), admission.Action.ActionID, "terminating", "abort", "terminating", "terminate_reap", sourcePtr); err != nil {
 				log.Printf("managed termination: action %s: advance: %v", admission.Action.ActionID, err)

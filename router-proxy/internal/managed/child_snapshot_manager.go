@@ -11,22 +11,30 @@ import (
 // construction. It is a notification only: the browser still reads the durable
 // projection, and the manager never imports or controls the HTTP boundary.
 func (m *Manager) SetProjectionPublisher(publish func()) {
+	if publish == nil {
+		m.SetProjectionPublisherContext(nil)
+		return
+	}
+	m.SetProjectionPublisherContext(func(context.Context) error { publish(); return nil })
+}
+
+func (m *Manager) SetProjectionPublisherContext(publish func(context.Context) error) {
 	m.mu.Lock()
 	m.projectionPublisher = publish
 	m.mu.Unlock()
 }
 
-func (m *Manager) publishProjection() {
+func (m *Manager) publishProjectionContext(ctx context.Context) error {
 	m.mu.Lock()
 	publish := m.projectionPublisher
 	m.mu.Unlock()
 	if publish != nil {
-		// The durable delta transaction has already committed. Invoke the
-		// notifier in source order so a fast compaction start/end pair cannot be
-		// reordered or dropped by independently scheduled publisher goroutines.
-		publish()
+		return publish(ctx)
 	}
+	return nil
 }
+
+func (m *Manager) publishProjection() { _ = m.publishProjectionContext(context.Background()) }
 
 // PublishProjection exports publishProjection for transport notification.
 func (m *Manager) PublishProjection() {

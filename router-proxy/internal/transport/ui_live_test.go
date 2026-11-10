@@ -349,3 +349,13 @@ func TestRouterServesContainedStaticUIWithoutAuthorityState(t *testing.T) {
 	require.Contains(t, csp, "img-src 'self' data:")
 	require.NotContains(t, csp, "robohash.org")
 }
+
+func TestUILiveProjectsRootAndWorkerIndependently(t *testing.T) {
+	stored := store.ManagedAgentsSnapshot{Agents: []*store.ManagedAgentRecord{
+		{AgentID: "root"}, {AgentID: "worker"}, {AgentID: "subagent", ParentAgentID: "root"},
+	}}
+	projection := uiLiveProjectionFromStored(stored, 0, "", nil)
+	require.Contains(t, projection.agents, "root")
+	require.Contains(t, projection.agents, "worker")
+	require.NotContains(t, projection.agents, "subagent")
+}

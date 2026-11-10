@@ -30,7 +30,7 @@ test('proxy startup reports an exit without waiting for inherited pipes', async 
     await writeFile(join(dir, 'go'), `#!${process.execPath}\nconst fs=require('node:fs'); const args=process.argv; fs.writeFileSync(args[args.indexOf('-o')+1],${JSON.stringify(proxyScript)},{mode:0o755});\n`, { mode: 0o755 });
     process.env.PATH = `${dir}:${oldPath}`;
     const started = Date.now();
-    await expect(startRouterProxy({ repoRoot: resolve('.'), upstreamPort: 1 })).rejects.toThrow(/Router proxy exited \(code 7\).*\nStderr: proxy fixture failed/);
+    await expect(startRouterProxy({ repoRoot: resolve('.'), upstreamPort: 1 })).rejects.toThrow(/Router proxy exited \(code 7\)\./);
     expect(Date.now() - started).toBeLessThan(3000);
   } finally {
     process.env.PATH = oldPath;

@@ -98,6 +98,10 @@ try {
         if (!value || typeof value !== 'object' || typeof value.type !== 'string') throw Error('emit needs event type');
       } else if (key === 'tool') {
         if (!value || typeof value.id !== 'string' || typeof value.name !== 'string') throw Error('tool needs id/name');
+      } else if (key === 'mcp_parallel') {
+        if (!Array.isArray(value) || value.length < 1 || value.length > 16) throw Error('invalid mcp_parallel');
+        validateSteps(value.map(tool => ({ mcp_call: tool })));
+        if (new Set(value.map(tool => tool.id)).size !== value.length) throw Error('duplicate mcp_parallel id');
       } else if (key === 'mcp_join') {
         if (value !== true) throw Error('mcp_join must be true');
       } else if (key === 'mcp_call' || key === 'mcp_start') {
@@ -186,6 +190,7 @@ try {
     }
     function mcpRequest(server, method, params, state, notification = false) {
       return new Promise((resolve, reject) => {
+        if (state.cancelled || ending) { reject(Error('interrupted')); return; }
         const rpcId = `mcp-${id()}`;
         const body = JSON.stringify({ jsonrpc: '2.0', ...(notification ? {} : { id: rpcId }), method, params });
         let timer;
@@ -217,6 +222,7 @@ try {
         timer = setTimeout(() => req.destroy(Error('deadline exceeded')), method === 'tools/call' ? 40000 : 5000);
         req.on('error', () => reject(Error('MCP HTTP request failed')));
         req.on('close', () => clearTimeout(timer));
+        if (method === 'tools/call') record({ kind: 'mcp_call_started', name: params.name, tool_id: params._meta?.['claudecode/toolUseId'] });
         req.end(body);
       });
     }
@@ -312,6 +318,7 @@ try {
       if (config.replay_control === 'hold' || (config.replay_hold_contains && input.includes(config.replay_hold_contains))) barrier('replay', next.value.uuid, proceed); else proceed();
     }
     let backgroundMcp;
+    let lastJobID;
     function runSteps(state) {
       while (!ending && state.index < state.steps.length) {
         const step = state.steps[state.index++];
@@ -321,6 +328,24 @@ try {
         }
         else if ('thinking' in step) assistant([{ type: 'thinking', thinking: step.thinking, signature: 'fake' }]);
         else if ('emit' in step) emit(step.emit);
+        else if ('mcp_parallel' in step) {
+          blocked = true;
+          const tools = step.mcp_parallel;
+          const server = mcpConfig();
+          assistant(tools.map(tool => ({ type: 'tool_use', id: tool.id, name: `mcp__mecha__${tool.name}`, input: tool.input ?? {} })));
+          const calls = tools.map(() => ({ get cancelled() { return state.cancelled; } }));
+          state.abort = () => calls.forEach(call => call.abort?.());
+          new Promise(resolve => process.stdout.write('', resolve))
+            .then(() => Promise.all(tools.map((tool, i) => callMcp(server, tool, calls[i]))))
+            .then(responses => {
+              if (ending || state.cancelled) return;
+              emit({ type: 'user', session_id: session, uuid: id(), parent_tool_use_id: null,
+                message: { role: 'user', content: responses.map((response, i) => ({ type: 'tool_result', tool_use_id: tools[i].id,
+                  content: response.content, is_error: response.isError ?? false })) } });
+              state.abort = undefined; blocked = false; runSteps(state);
+            }).catch(error => { if (!ending && !state.cancelled) fail(error.message); });
+          return;
+        }
         else if ('mcp_start' in step) {
           if (backgroundMcp) throw Error('only one background MCP call permitted');
           const tool = step.mcp_start;
@@ -348,7 +373,11 @@ try {
           let work;
           try {
             if ('mcp_call' in step) {
-              const tool = step.mcp_call;
+              const tool = structuredClone(step.mcp_call);
+              if (tool.input?.job_id === '$LAST_JOB_ID') {
+                if (!lastJobID) throw Error('no prior background job ID');
+                tool.input.job_id = lastJobID;
+              }
               const server = mcpConfig();
               assistant([{ type: 'tool_use', id: tool.id, name: `mcp__mecha__${tool.name}`, input: tool.input ?? {} }]);
               // Flush the actual producer before opening the HTTP request.
@@ -356,6 +385,10 @@ try {
                 .then(() => ending || state.cancelled ? null : callMcp(server, tool, state))
                 .then(response => {
                   if (ending || state.cancelled || config.skip_mcp_result) return;
+                  try {
+                    const payload = JSON.parse(response.content?.[0]?.text ?? 'null');
+                    if (typeof payload?.job_id === 'string') lastJobID = payload.job_id;
+                  } catch { /* Non-job tool results are normal. */ }
                   emit({ type: 'user', session_id: session, uuid: id(), parent_tool_use_id: null,
                     message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool.id,
                       content: response.content, is_error: response.isError ?? false }] } });

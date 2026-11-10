@@ -83,6 +83,9 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentT
 			if err = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
 				return agent.AgentToolResult{}, err
 			}
+			if backgroundBashPlatformSupport() == nil {
+				return m.executePromotableBash(ctx, owner, cwd, spec)
+			}
 
 			runCtx, cancel := context.WithTimeout(ctx, spec.timeout)
 			defer cancel()

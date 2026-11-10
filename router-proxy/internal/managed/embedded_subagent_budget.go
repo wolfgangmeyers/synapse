@@ -33,20 +33,7 @@ const (
 // replenishSubagentReadPool refills the subagent read credit pool up to capacity based on elapsed time.
 // Must be called with l.activeMu locked.
 func (l *managedAgentLane) replenishSubagentReadPool(now time.Time) {
-	if l.subagentReadPoolUpdatedAt.IsZero() {
-		l.subagentReadPoolRemainingMs = SubagentReadPoolMaxMs
-		l.subagentReadPoolUpdatedAt = now
-		return
-	}
-	elapsedMs := now.Sub(l.subagentReadPoolUpdatedAt).Milliseconds()
-	if elapsedMs < 0 {
-		elapsedMs = 0
-	}
-	l.subagentReadPoolRemainingMs += elapsedMs
-	if l.subagentReadPoolRemainingMs > SubagentReadPoolMaxMs {
-		l.subagentReadPoolRemainingMs = SubagentReadPoolMaxMs
-	}
-	l.subagentReadPoolUpdatedAt = now
+	refillReadPool(&l.subagentReadPoolRemainingMs, &l.subagentReadPoolUpdatedAt, now, false)
 }
 
 // consumeSubagentReadCredit attempts to deduct 1 credit from the lane's subagent read pool.
