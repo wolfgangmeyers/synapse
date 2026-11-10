@@ -34,6 +34,8 @@ type Migration struct {
 // Options controls Store initialization. Nil Clock and IDSource values use the
 // production wall clock and a cryptographically random UUID source.
 type Options struct {
+	// RejectLegacyRPC fences router startup before any SQLite mutation.
+	RejectLegacyRPC   bool
 	Clock             deterministic.Clock
 	IDSource          deterministic.IDSource
 	BusyTimeout       time.Duration
@@ -172,6 +174,11 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	}
 	if busyTimeout < 0 {
 		return nil, errors.New("busy timeout must not be negative")
+	}
+	if options.RejectLegacyRPC {
+		if err := checkLegacyRPCBeforeOpen(ctx, databasePath); err != nil {
+			return nil, err
+		}
 	}
 	if err := ensureDatabaseParent(databasePath); err != nil {
 		return nil, err

@@ -55,7 +55,7 @@ await new Promise(()=>{});
 
 func TestEmbeddedMixedActualTmuxSidecarG2(t *testing.T) {
 	ctx := context.Background()
-	root, err := os.MkdirTemp(filepath.Dir(os.TempDir()), "g2tmux-")
+	root, err := os.MkdirTemp(os.TempDir(), "g2tmux-")
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(root, 0700))
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
@@ -110,7 +110,9 @@ func TestEmbeddedMixedActualTmuxSidecarG2(t *testing.T) {
 	nodeCtx, cancel := context.WithTimeout(ctx, 18*time.Second)
 	t.Cleanup(cancel)
 	child := exec.CommandContext(nodeCtx, "node", "--input-type=module", "-e", actualTmuxSidecar)
-	child.Env = append(os.Environ(), "SIDECAR=/home/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/claude_sidecar.mjs", "MAILBOX_CLIENT=/home/wolfgang/code/mecha-developer/pi-extensions/mecha-messaging/mailbox-client.js", "TMUX_SOCKET="+socket, "TMUX_SESSION="+session, "LEGACY_ID="+legacyID, "ROUTER_URL="+base, "EVENTS="+events, "HOME="+root)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	child.Env = append(os.Environ(), "SIDECAR="+filepath.Join(repoRoot, "tools/tmux-worker/claude_sidecar.mjs"), "MAILBOX_CLIENT="+filepath.Join(repoRoot, "tools/tmux-worker/mailbox-client.js"), "TMUX_SOCKET="+socket, "TMUX_SESSION="+session, "LEGACY_ID="+legacyID, "ROUTER_URL="+base, "EVENTS="+events, "HOME="+root)
 	// No body-bearing child stderr can reach test output or a shared log.
 	child.Stdout = io.Discard
 	child.Stderr = io.Discard

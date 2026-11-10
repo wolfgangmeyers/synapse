@@ -104,7 +104,8 @@ export async function providerFixture(signedOutGoogle = false) {
     await writeFile(join(root, "private/codex.json"), JSON.stringify({ access_token: `fake.${claims}.agr-secret`, refresh_token: "agr-refresh", account_id: "agr-account", expires_at: "2099-01-01T00:00:00Z" }), { mode: 0o600 });
     await writeFile(join(work, "note.txt"), "AGR real tool evidence");
     await writeFile(join(root, "manifest.json"), await readFile(join(repo, "router/contract/managed-tools-v1.json")));
-    await writeFile(join(root, "mecha-rpc.ts"), await readFile(join(repo, "pi-extensions/mecha-rpc/index.ts")));
+    // Embedded provider tests do not load the retired Pi RPC extension.
+    await writeFile(join(root, "mecha-rpc.ts"), "export default function () {}\n");
     // Go resolves the credential consumer beside AuthHelperPath. Exercise the
     // actual private stdin/ModelRuntime projection, not a fixture substitute.
     await writeFile(join(root, "codex-consumer.mjs"), await readFile(join(repo, "auth-helper/codex-consumer.mjs")));

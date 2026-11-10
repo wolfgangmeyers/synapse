@@ -722,12 +722,7 @@ export async function runRequested(arguments_ = process.argv.slice(2)) {
     return runManagedRpcRelease();
   }
   if (arguments_.length === 3 && arguments_[0] === "--managed-recovery" && arguments_[1] === "--trials") {
-    const [{ parseManagedRecoveryArguments }, { runManagedRecovery }] = await Promise.all([
-      import("./managed-recovery-harness.mjs"),
-      import("./bcb-managed-recovery-runner.mjs"),
-    ]);
-    const options = parseManagedRecoveryArguments(arguments_);
-    return runManagedRecovery({ trials: options.trials });
+    throw new Error("Managed recovery acceptance retired: it depended on the removed Pi RPC runtime; no embedded browser recovery proof replaces it yet. See tests/acceptance/bcb-acceptance.md.");
   }
   throw new Error("Usage: test:acceptance:bcb [--sidebar-recency | --managed-rpc --release | --managed-recovery --trials 5]");
 }

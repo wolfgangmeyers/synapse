@@ -317,7 +317,6 @@ export async function startIsolatedRouter(options: {
       "--managed-pi-agent-dir", piAgentDir,
       "--managed-session-root", sessionRoot,
       "--managed-manifest", join(options.repoRoot, "router", "contract", "managed-tools-v1.json"),
-      "--managed-mecha-rpc", join(options.repoRoot, "pi-extensions", "mecha-rpc", "index.ts"),
       "--managed-pi-subagents", join(resolve(options.repoRoot, ".."), "pi-packages", "packages", "pi-subagents", "src", "index.ts"),
       "--managed-auth-helper", authPath,
       "--managed-runtime-root", options.repoRoot,
@@ -374,13 +373,10 @@ export async function startIsolatedRouter(options: {
       await symlink(dependencies, join(fixtureAuth, "node_modules"), "dir");
       const helperIndex = args.indexOf("--managed-auth-helper");
       args[helperIndex + 1] = join(fixtureAuth, "index.mjs");
-      // Match providerFixture's disposable runtime root without relaxing path
-      // validation. Copy only the two required entrypoints into that root.
+      // Keep the manifest within the disposable fixture runtime root.
       await copyFile(join(options.repoRoot, "router/contract/managed-tools-v1.json"), join(root, "manifest.json"));
-      await copyFile(join(options.repoRoot, "pi-extensions/mecha-rpc/index.ts"), join(root, "mecha-rpc.ts"));
       args[args.indexOf("--managed-runtime-root") + 1] = root;
       args[args.indexOf("--managed-manifest") + 1] = join(root, "manifest.json");
-      args[args.indexOf("--managed-mecha-rpc") + 1] = join(root, "mecha-rpc.ts");
     }
     args.push("--codex-credential-path", join(privateDir, "codex.json"));
     await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify(options.embedded.omitGoogle ? {} : { google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });

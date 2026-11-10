@@ -1,4 +1,5 @@
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -78,7 +79,13 @@ function taskResources(number) {
   };
 }
 
-test("managed recovery preflight does not require managed-release provenance lock environment", async () => {
+test("retired recovery command exits nonzero before starting acceptance", () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./bcb-runner.mjs", import.meta.url)), "--managed-recovery", "--trials", "5"], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Managed recovery acceptance retired:.*no embedded browser recovery proof replaces it yet/);
+});
+
+test("legacy managed recovery preflight fails closed when the retired RPC extension is unavailable", async () => {
   const root = await mkdtemp(join(tmpdir(), "managed-recovery-preflight-"));
   try {
     const piBin = join(root, "pi");
@@ -95,21 +102,13 @@ test("managed recovery preflight does not require managed-release provenance loc
       writeFile(join(bcbRoot, "server", "bridge_server.py"), "# fixture\n"),
       writeFile(join(bcbRoot, "extension", "background.js"), "// fixture\n"),
     ]);
-    const prerequisites = await recoveryPreflight({
+    await assert.rejects(recoveryPreflight({
       PATH: process.env.PATH,
       MECHA_PI_BIN: piBin,
       MECHA_PI_SUBAGENTS_EXTENSION: subagents,
       MECHA_BCB_ROOT: bcbRoot,
       MECHA_BCB_PYTHON: python,
-    });
-    assert.deepEqual(prerequisites, {
-      nodeBin: await import("node:fs/promises").then(({ realpath }) => realpath(process.execPath)),
-      piBin,
-      subagents,
-      subagentsGitSHA: null,
-      subagentsVersion: null,
-      python,
-    });
+    }), /mecha-rpc extension is unavailable/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -149,9 +148,8 @@ test("managed recovery completion poll keeps its one second internal timeout and
   ]]);
 });
 
-test("managed recovery runner reads extension-owned completion evidence after router startup", async () => {
+test("managed recovery runner reads router-persisted completion evidence after router startup", async () => {
   const runner = await readFile(fileURLToPath(new URL("./bcb-managed-recovery-runner.mjs", import.meta.url)), "utf8");
-  const probe = await readFile(fileURLToPath(new URL("../../../../pi-extensions/mecha-rpc/tests/fixtures/managed-rpc-release-probe.mjs", import.meta.url)), "utf8");
   const routerStart = runner.indexOf("router = await startManagedRouter(");
   const completionGet = runner.indexOf("const completionURL = `${router.httpUrl}/v1/acceptance/managed-recovery?kind=completion&trial_id=");
   assert.ok(routerStart >= 0);
@@ -160,7 +158,6 @@ test("managed recovery runner reads extension-owned completion evidence after ro
   assert.doesNotMatch(runner, /persistRouterRecoveryEvidence\(router\.httpUrl, "completion"/u);
   assert.match(runner, /startManagedRouter\(root, prerequisites, provider, staticUIRoot, "", \{/u);
   assert.doesNotMatch(runner, /startManagedRouter\(root, prerequisites, provider, staticUIRoot, "managed-recovery"/u);
-  assert.doesNotMatch(probe, /persistManagedRecoveryCompletion|pi\.on\(["']agent_end["']|\/v1\/acceptance\/managed-recovery/u);
 });
 
 test("GET completion evidence validates as the router-persisted receipt", () => {

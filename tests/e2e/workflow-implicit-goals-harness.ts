@@ -109,6 +109,9 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
         res.writeHead(400).end(); return;
       }
       const queue = interleaved ? interleavedReplies : replies;
+      if (inspection && "reply" in inspection && queue.length) {
+        violations.push(`request ${requests.length}: unsolicited reply with ${queue.length} scripted replies pending`); res.writeHead(400).end(); return;
+      }
       const reply = inspection && "reply" in inspection ? inspection.reply : queue[0];
       if (reply?.ownsRequest && !reply.ownsRequest(parsed)) {
         violations.push(`unowned provider request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);

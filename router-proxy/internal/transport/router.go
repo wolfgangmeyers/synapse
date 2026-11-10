@@ -246,9 +246,6 @@ type Options struct {
 	// DefaultEmbeddedRoot selects embedded for bare managed launch requests on
 	// this router only. The zero value preserves the RPC launch contract.
 	DefaultEmbeddedRoot bool
-	// ManagedBridge is the authenticated loopback bridge handler. The command
-	// binary constructs it so route ownership is explicit and closeable.
-	ManagedBridge *ManagedBridgeHandler
 	// ProviderAuth shares the managed Pi auth context and emits non-secret
 	// status/prompt frames through the existing direct UI-live channel.
 	ProviderAuth *managed.ProviderAuthCoordinator
@@ -394,7 +391,6 @@ type Router struct {
 	lifecycleAvailable       bool
 	managed                  *managed.Manager
 	defaultEmbeddedRoot      bool
-	managedBridge            *ManagedBridgeHandler
 	providerAuth             *managed.ProviderAuthCoordinator
 	managedPathCanonicalizer func(*http.Request) string
 	staticUI                 *staticUI
@@ -643,10 +639,6 @@ func New(options Options) (*Router, error) {
 	if logger == nil {
 		logger = func(Event) {}
 	}
-	managedBridge := options.ManagedBridge
-	if managedBridge == nil {
-		managedBridge = NewManagedBridgeHandler(options.Store)
-	}
 	lifecycle := options.LifecycleAvailable
 	if !options.LifecycleAvailable {
 		lifecycle = contains(options.Store.MigrationIDs(), "017_subagent_lifecycle")
@@ -657,7 +649,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, testClock: testClock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
+	r := &Router{store: options.Store, clock: clock, testClock: testClock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
 	r.startupWork = r.runStartup
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
@@ -906,6 +898,15 @@ func (r *Router) runStartup(ctx context.Context) error {
 		if err := r.managed.SetRouterURL(routerURL); err != nil {
 			return err
 		}
+		// The removed RPC runtime cannot safely settle its retained operations or
+		// process identities. Stop before any recovery pass mutates legacy data.
+		legacyID, err := r.store.LegacyRPCAgent(ctx)
+		if err != nil {
+			return err
+		}
+		if legacyID != "" {
+			return fmt.Errorf("unsupported legacy RPC agent %s: recovery requires a compatible router", legacyID)
+		}
 		log.Printf("STARTUP: RecoverManagedRootColdStarts")
 		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
 			return err
@@ -985,13 +986,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.testOnlyHTTPHandler != nil && strings.HasPrefix(req.URL.Path, "/v1/acceptance/") {
 		r.testOnlyHTTPHandler.ServeHTTP(w, req)
-		return
-	}
-	if req.URL.Path == "/v1/managed-bridge" {
-		r.mu.RLock()
-		handler := r.managedBridge
-		r.mu.RUnlock()
-		handler.ServeHTTP(w, req)
 		return
 	}
 	if req.URL.Path == "/v1/ui-live" {
@@ -1075,11 +1069,6 @@ func (r *Router) Close(ctx context.Context) error {
 	}
 	if r.providerAuth != nil {
 		r.providerAuth.Close()
-	}
-	if r.managedBridge != nil {
-		if bridgeErr := r.managedBridge.Close(ctx); bridgeErr != nil && err == nil {
-			err = bridgeErr
-		}
 	}
 	if r.managed != nil {
 		if managedErr := r.managed.Close(ctx); managedErr != nil {

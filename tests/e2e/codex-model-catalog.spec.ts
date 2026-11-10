@@ -76,7 +76,6 @@ async function environment(signedIn: boolean) {
     "--managed-pi-agent-dir", paths.agent, "--managed-session-root", paths.sessions,
     "--managed-cwd-roots", paths.project, "--managed-runtime-root", repo,
     "--managed-manifest", join(repo, "router/contract/managed-tools-v1.json"),
-    "--managed-mecha-rpc", join(repo, "pi-extensions/mecha-rpc/index.ts"),
     "--managed-pi-subagents", resolve(repo, "../pi-packages/packages/pi-subagents/src/index.ts"),
     "--managed-auth-helper", join(repo, "auth-helper/index.mjs"), "--codex-credential-path", paths.credential,
   ], { cwd: repo, env: {

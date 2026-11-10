@@ -857,7 +857,46 @@ func (r *Router) handleTmuxAction(w http.ResponseWriter, req *http.Request, sess
 			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
 			return
 		}
-		err = r.tmux.SendKeys(req.Context(), session, name, keys, "")
+		windowID, idErr := rawString(payload, "window_id", false)
+		if idErr != nil {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+			return
+		}
+		serverID, serverErr := rawString(payload, "server_id", false)
+		if serverErr != nil || (windowID == "") != (serverID == "") {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+			return
+		}
+		if windowID != "" {
+			// Match the named window first; the final send uses the immutable ID, so
+			// replacement between the check and send cannot redirect the keystrokes.
+			windows, listErr := r.tmux.Windows(req.Context(), session)
+			if listErr != nil {
+				r.writeTmuxError(w, listErr)
+				return
+			}
+			found := false
+			for _, window := range windows {
+				if window.Name == name && window.WindowID == windowID && window.ServerID == serverID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				r.writeError(w, &httpError{status: http.StatusConflict, code: "tmux_window_replaced"})
+				return
+			}
+			target, ok := r.tmux.(interface {
+				SendKeysToWindowID(context.Context, string, string, string) error
+			})
+			if !ok {
+				r.writeError(w, &httpError{status: http.StatusServiceUnavailable, code: "tmux_unavailable"})
+				return
+			}
+			err = target.SendKeysToWindowID(req.Context(), windowID, serverID, keys)
+		} else {
+			err = r.tmux.SendKeys(req.Context(), session, name, keys, "")
+		}
 	case "start":
 		if sessionID == "" {
 			sessionID, err = rawString(payload, "session_id", false)

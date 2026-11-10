@@ -2,7 +2,6 @@ import { test, expect } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { workflowHarness, model, lastToolOutput, type Reply } from "./workflow-implicit-goals-harness";
-import { createOperationalToolDefinitions } from "../../pi-extensions/mecha-messaging/operational-tools";
 
 // RNT-006: external provider only is mocked. Browser/WS, proxy, SDK and SQLite are real.
 test("removes worker tool and preserves mailbox and admin lifecycle", async ({ page }) => {
@@ -60,7 +59,6 @@ test("removes worker tool and preserves mailbox and admin lifecycle", async ({ p
     expect(f.rows("SELECT agent_id FROM managed_agents WHERE agent_id=?", "forbidden-child")).toEqual([]);
     expect(f.rows("SELECT effect_id FROM embedded_effects WHERE agent_id=?", caller)).toEqual([]);
     expect(f.rows("SELECT request_id FROM managed_http_operations WHERE ? IS NOT NULL ORDER BY request_id", caller)).toEqual(operationsBefore);
-    expect(createOperationalToolDefinitions().some(t => t.name === "mecha_worker")).toBe(false);
     const mailboxRequest = await turn({ tool: "mecha_mailbox_send", args: { recipient: "user", body: "Preserved durable mailbox" } }, "Mailbox preserved");
     const history = mailboxRequest.input as { type: string; output?: string }[];
     expect(history.filter(i => i.type === "function_call_output")).toHaveLength(0);

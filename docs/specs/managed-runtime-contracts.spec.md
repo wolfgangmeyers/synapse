@@ -3,7 +3,7 @@
 - **ID**: `SPEC-MANAGED-RUNTIME-001`
 - **Status**: `Draft`
 - **Domain**: `AgentManagement`
-- **Target E2E Suite**: No single qualifying Playwright suite yet. Existing composed Go and installed-Pi evidence is mapped below; browser acceptance remains incomplete.
+- **Target E2E Suite**: No single qualifying Playwright suite yet. Existing evidence and retired evidence are distinguished below; browser acceptance remains incomplete.
 
 ## 1. Intent & User Outcome
 
@@ -15,33 +15,33 @@ Current explanatory sources: [architecture](../router-architecture/architecture.
 
 ### Contract classification
 
-This remains **Draft**. “Current contract” below means an observable contract supported by inspected implementation/evidence, not comprehensive E2E acceptance. “Historical unresolved” preserves requirements with missing acceptance or current mismatches; it does not promote them to verified current behavior. “Optional implemented seam” describes existing bridge code, not default enablement. Migration and audit proposals remain proposals, outside active guarantees.
+This remains **Draft**. “Current contract” below means an observable contract supported by inspected implementation/evidence, not comprehensive E2E acceptance. “Historical unresolved” preserves requirements with missing acceptance or current mismatches; it does not promote them to verified current behavior. The managed Pi RPC bridge and its extension have been deleted; their implementation and deleted tests are historical, not an optional seam or evidence for embedded behavior. The applicability and disposition of their historical requirements remain unresolved unless separately approved. Migration and audit proposals remain proposals, outside active guarantees.
 
 | Scenario | Classification |
 |---|---|
 | MR-001 | Current launch/replay/readiness contract; joined browser acceptance incomplete |
 | MR-002 | Current lifecycle contract; historical termination/recovery-policy acceptance differences unresolved |
-| MR-003 | Current extension validation contract; historical full parity, exclusions and production generation matrix unresolved |
-| MR-004 | Current control/admission/result contract; historical complete external-effect proof unresolved |
+| MR-003 | Historical Pi manifest-installation requirements; disposition unresolved, no replacement coverage claimed |
+| MR-004 | Historical Pi bridge control contract; embedded equivalence and external-effect proof unresolved |
 | MR-005 | Current mixed-mail contract; historical router-never-launches-tmux restriction unresolved |
 | MR-006 | Current eligibility/retention implementation; historical complete-cap/startup-gate requirements unresolved |
 | MR-007 | Current structured snapshot/delta contract; historical only-source-distinction and full child recovery/compaction acceptance unresolved |
 | MR-008 | Historical goal contract with selected current slices; exact race acceptance unresolved |
 | MR-009 | Historical provider contract; embedded/Pi boundary and full provider parity unresolved |
 | MR-010 | Current browser transport contract; joined unrelated-origin browser evidence incomplete |
-| MR-011 | Optional implemented bridge seam, not a universal managed-runtime guarantee |
+| MR-011 | Historical Pi bridge reconnect and replay requirements; disposition unresolved, no replacement coverage claimed |
 
 ## 2. Core Invariants
 
 1. Agent name, Pi session, process incarnation, session epoch, runtime generation, and manifest identity are distinct. Runtime-bound actions must reject stale identities, not merely match a name.
 2. Managed launch acceptance, process start, runtime readiness, host action completion, and Pi transcript receipt are separate observable milestones. A queued tool response proves none of the later milestones.
 3. Current lifecycle contract: ordinary restart preserves the saved session. Deliberate context reset changes session identity without changing the worker's identity. Recovery must honor desired state and bounded crash policy, not endlessly resurrect stopped workers.
-4. Current extension contract: router-backed tool definitions and operations are router-owned. A manifest is validated before readiness and before a model turn. Existing registered names cannot change meaning in place. Local coding tools are separate from manifest tools.
-5. Sender identity comes from the registered runtime, never a tool-supplied `from`. Control traffic cannot fall through into ordinary mailbox handling. Malformed, unknown, conflicting, or stale requests cannot authorize effects.
-6. A thin tool's immediate queued/asynchronous result is final for that invocation. A later correlated control result is a separate delivery. Replay must not repeat the admitted operation. A transcript receipt proves append, not the external action's success.
+4. Router-backed tools remain router-owned in the embedded runtime. The former Pi extension manifest implementation was removed; disposition of its historical validation requirements remains unresolved. This spec does not claim equivalent embedded coverage.
+5. Sender authority is derived from the runtime owner, not a tool-supplied `from`; malformed, conflicting, or stale requests cannot authorize effects. The former bridge control-traffic routing rules are historical, not an embedded protocol claim.
+6. Replay must not repeat an admitted operation; an append receipt proves transcript append, not an external action's success. The former Pi thin-tool implementation, including its final queued result and separate correlated control delivery, was removed; disposition of its historical requirements remains unresolved. Do not assume embedded tools use that protocol.
 7. Quiet eligibility is determined when a managed send authorization is consumed for the configured canonical recipient. Complete activity cannot evict quiet messages through the complete-history cap. Historical 200-entry complete retention is not the current 5,000-entry implementation: this mismatch remains explicit.
 8. Structured parent and child state comes from fenced events and snapshots, never terminal text. Missing evidence cannot fabricate completion. Snapshot repair and old-run rejection are required across reconnect and replacement.
-9. Managed HTTP browser compatibility is non-credentialed and origin-independent. No session, cookie, CSRF, or browser credential gate is introduced. The private loopback managed-bridge socket has a separate mutual-proof protocol; its Origin rejection is not browser API authorization.
+9. Managed HTTP browser compatibility is non-credentialed and origin-independent. No session, cookie, CSRF, or browser credential gate is introduced. The former private managed-bridge socket and its authentication protocol are retired.
 10. Provider credentials and model availability have runtime-specific owners. The historical Pi-store-only boundary must not be asserted for embedded router credential paths. Neither credentials nor authentication payloads belong in UI status or histories.
 11. Tmux remains a separate compatible worker path. Historical §01 also forbids router-launched tmux agents; the current host-launch path is a **historical unresolved conflict**, not an approved exception. Managed Restart All must not restart tmux processes. The worker name `supervisor` grants no lifecycle privilege.
 12. Histories and recovery ledgers remain bounded. Existing limits and pruning owners are described below; no new accumulating store is introduced by this spec.
@@ -53,6 +53,7 @@ This remains **Draft**. “Current contract” below means an observable contrac
 - **Given**: A valid name, working directory, selected/default model, optional initial instruction, and request identity.
 - **When**: The caller launches an agent and repeats the same request.
 - **Then**: The saved acceptance is replayed without starting another agent. Process and session binding must succeed before readiness and initial work. Conflicting reuse or invalid input fails without a second launch. HTTP acceptance alone does not claim readiness.
+- **Retired RPC extension**: The default embedded launch accepts an empty retired RPC extension and persists a valid launch recipe on new and upgraded databases. A supplied non-empty value remains subject to existing value validation and recipe hashing; other required fields and legacy non-empty recipes retain their existing validation and recovery behavior. Upgrade preserves existing recipe fields, hashes, timestamps, the project-owned recipe hash index, foreign-key enforcement and unrelated data; it does not rewrite legacy recipes or weaken other project-owned constraints.
 
 ### Scenario: [MR-002] Restart, reset, crash, and termination
 - **User Goal**: Recover work without confusing old and new runs.
@@ -60,15 +61,19 @@ This remains **Draft**. “Current contract” below means an observable contrac
 - **When**: The user restarts, resets context, terminates, or the process/router crashes.
 - **Then**: Restart resumes the saved session; reset creates the replacement session while preserving worker identity and retained history. Eligible desired-running roots recover with bounded retries. Stopped/terminated work is not blindly relaunched. Old process actions cannot affect the replacement. Historical termination said “clears router state”; current archive/closed-read behavior is a recorded difference, not proof of that original criterion.
 
-Historical unresolved applicability: managed Pi must use neither `mecha-messaging` nor `mecha-goal`; tmux retains those extensions. Current launch-profile compliance is not proved here.
+The historical managed Pi profile excluded `mecha-messaging` and `mecha-goal`, while the historical tmux profile retained them. Their applicability and disposition remain unresolved. The repository’s `mecha-messaging` extension has been deleted; current Pi worker launches preserve normal extension configuration, and launcher-managed Claude workers use a Mailbox sidecar for terminal delivery. This does not establish parity for all tmux runtimes.
 
-### Scenario: [MR-003] Manifest installation and child inheritance
+### Scenario: [MR-003] Manifest installation and child inheritance (historical Pi bridge)
+
+This historical scenario describes the deleted Pi extension, not the embedded runtime. Its requirements remain unresolved pending disposition; no replacement acceptance is claimed.
 - **User Goal**: Get exactly the approved tools before work begins.
 - **Given**: A new runtime generation and router-owned canonical manifest.
 - **When**: Startup installs definitions or a child starts.
 - **Then**: The full manifest validates before registration/readiness. Malformed, oversized, coercive, unbounded, unsupported, colliding, hash-mismatched, or stale input rejects without partial exposure. Child setup is trusted and parent-bound, not model-selected. Changed definitions require unique hash names and the accepted same-session restart path. Add-only updates require their own accepted protocol; an isolated registration proof does not establish production dispatch parity. Coding-tool availability and root credit guards remain separate.
 
-### Scenario: [MR-004] Control requests and sender authority
+### Scenario: [MR-004] Control requests and sender authority (historical Pi bridge)
+
+The thin-tool and bridge implementation below was removed. Disposition of its historical requirements remains unresolved; this scenario is not evidence of embedded protocol equivalence.
 - **User Goal**: Request an action once and see its actual outcome.
 - **Given**: A ready managed runtime.
 - **When**: A thin tool emits a request or retries it after interruption.
@@ -78,7 +83,7 @@ Historical unresolved applicability: managed Pi must use neither `mecha-messagin
 - **User Goal**: Exchange mail across worker sources without loss of ownership.
 - **Given**: Managed and legacy workers share a router.
 - **When**: Either sends mail or reconnects during delivery.
-- **Then**: The router persists mail and its chosen source target. Managed delivery uses a fenced direct prompt and append receipt; tmux delivery uses its current WebSocket lease and acknowledgement. Stale leases/fences cannot acknowledge another incarnation. A timeout is not proof that Pi never appended the message. Restart All selects managed agents only.
+- **Then**: The router persists mail and its chosen source target. Embedded managed delivery atomically appends the accepted message to the session, records its append key and acknowledgement, and acknowledges the queued message under the runtime fence; retries cannot create a second append for the same accepted delivery. Tmux delivery uses its current WebSocket lease and acknowledgement. Stale leases or runtime fences cannot acknowledge another incarnation. The former Pi bridge direct-prompt receipt is historical; a timeout alone was not proof of non-append. Restart All selects managed agents only.
 
 ### Scenario: [MR-006] Independent histories and retention
 - **User Goal**: Read quiet messages without losing them to internal activity.
@@ -116,13 +121,15 @@ Historical unresolved restriction: the source indicator must be the only user-vi
 - **User Goal**: Use the router from any reachable frontend without browser identity gates.
 - **Given**: Valid managed HTTP requests from unrelated HTTP(S) origins and a non-browser caller with no Origin.
 - **When**: They preflight, launch, inspect state, or request lifecycle actions.
-- **Then**: Permissive non-credentialed CORS transports the browser calls, including request/correlation headers. Origin is not identity or authorization; clients omit credentials. Invalid requests still fail normal validation. This does not change network exposure or waive the separate private bridge authentication protocol.
+- **Then**: Permissive non-credentialed CORS transports the browser calls, including request/correlation headers. Origin is not identity or authorization; clients omit credentials. Invalid requests still fail normal validation. This does not change network exposure.
 
-### Scenario: [MR-011] Bridge reconnect and bounded replay
+### Scenario: [MR-011] Bridge reconnect and bounded replay (historical)
+
+The managed Pi bridge, socket, and bridge store have been deleted. Their implementation-specific limits no longer describe a current store. The applicability and disposition of the historical replay, fencing, authentication and bounded-retention obligations remain unresolved; no replacement replay coverage is claimed.
 - **User Goal**: Reconnect a bridge without repeating uncertain commands.
 - **Given**: A reserved bridge identity, mutual proof, current runtime fence, and durable cursors.
 - **When**: The WebSocket disconnects, commands/events replay, or retained replay data is missing.
-- **Then**: Only current authenticated identities progress. Durable admission precedes acknowledgement; conflicting duplicates/stale frames reject. A replay gap enters reconstruction rather than pretending success. Bridge buffers/cursors and store ledgers remain bounded. This is an implemented optional transport seam, not a claim that all managed launches use it.
+- **Then**: Only current authenticated identities progress. Durable admission precedes acknowledgement; conflicting duplicates/stale frames reject. A replay gap enters reconstruction rather than pretending success. Bridge buffers/cursors and store ledgers remain bounded.
 
 ## 4. Automated E2E Verification Matrix
 
@@ -131,20 +138,25 @@ No tests were added or run for this docs-only backfill. These are existing evide
 | Scenario | Existing evidence | Scope / remaining acceptance |
 |---|---|---|
 | MR-001 | `router-proxy/internal/transport/managed_launch_behavioral_functional_test.go`; `managed_launch_validation_behavioral_test.go` in the same directory | HTTP/store/controlled child process, not full browser/stock-Pi launch |
-| MR-002 | `router-proxy/internal/managed/crash_recovery_behavioral_functional_test.go`; `router-proxy/internal/transport/managed_reset_native_test.go`; `managed_termination_native_test.go` | Controlled recovery and selected installed-Pi lifecycle paths, not joined browser crash matrix |
-| MR-003 | `tests/mecha_rpc_manifest.test.ts`; `tests/mecha_rpc_native_pi_e2e.test.ts`; `pi-extensions/mecha-rpc/VALIDATION.md` | Extension/native proof boundaries; full router executor/add-only/child parity not implied |
-| MR-004 | `router-proxy/internal/transport/domain1_behavioral_functional_test.go`; `managed_root_control_native_test.go` | Fake process/host seams and selected native goal status, not root tool to real tmux launch |
-| MR-005 | `router-proxy/internal/transport/mixed_managed_legacy_behavioral_test.go`; `router-proxy/internal/managed/managed_delivery_append_ack_native_test.go` | Mixed transport and receipt recovery; no universal exactly-once external-effect proof |
+| MR-002 | `router-proxy/internal/managed/crash_recovery_behavioral_functional_test.go`; `router-proxy/internal/transport/managed_reset_native_test.go`; `managed_termination_native_test.go` | Controlled recovery and historical installed-Pi lifecycle paths, where still present, not joined browser crash matrix |
+| MR-003 | Retired: Pi extension and its tests deleted | No replacement manifest-installation acceptance claimed |
+| MR-004 | `router-proxy/internal/transport/domain1_behavioral_functional_test.go`; `managed_root_control_native_test.go` | Fake process/host seams and historical native goal status, where still present, not root tool to real tmux launch |
+| MR-005 | `router-proxy/internal/transport/mixed_managed_legacy_behavioral_test.go`; `router-proxy/internal/store/embedded_mail_g2_test.go`: `TestEmbeddedMailStoreReservationAndAtomicACK`; `router-proxy/internal/store/embedded_router_sdk_integration_test.go`: `TestEmbeddedCombinedFenceMailAcceptanceAndRollback` | Mixed transport and embedded store atomic ACK/fence slices; The deleted `managed_delivery_append_ack_native_test.go` was historical Pi RPC evidence, not embedded delivery. No joined browser acceptance or universal exactly-once external-effect proof |
 | MR-006 | `router-proxy/internal/store/managed_history_test.go`: `TestManagedHistoryKeepsQuietEligibilityAtWriteAndCapsComplete`; `router-proxy/internal/transport/managed_history_retention_behavioral_test.go` | Store/HTTP retention, historical 200 vs current 5,000 mismatch remains |
 | MR-007 | `router-proxy/internal/managed/child_snapshot_manager_test.go`: `TestChildDeltaReceiverAppliesArrivalOrderFromOneBindingFIFO`; `router-proxy/internal/store/managed_projection_snapshot_test.go`; `router-proxy/internal/transport/managed_children_test.go` | Structured snapshot/delta evidence, not all child-compaction/replacement browser cases |
-| MR-008 | `router-proxy/internal/transport/managed_goal_evaluator_native_test.go`: `TestManagedGoalEvaluatorInstalledPiCoreFunctionalSlice`; `router-proxy/internal/store/managed_goal_evaluator_test.go`: `TestManagedGoalRestartRejectsLateOldCorrelatedEvaluatorResult` | Selected native/store slices. Exact NOT_DONE replacement race gate remains unverified here |
-| MR-009 | `router-proxy/internal/managed/auth_test.go`: `TestProviderAuthCoordinatorConsumesPromptOnceAndCommitsOnlySuccess`; `tests/mecha_rpc_auth_e2e.test.ts` | Coordinator/extension evidence, not all providers and embedded/Pi credential-owner parity |
-| MR-010 | `router-proxy/internal/transport/managed_http_test.go`; `router-proxy/internal/transport/http_test.go` | HTTP header/route evidence; two actual cross-origin browser launch paths not established here |
-| MR-011 | `router-proxy/internal/transport/managed_bridge_server_functional_test.go`: `TestManagedBridgeServerPhase2BEventAdmissionDropReplaysExactlyOnce`; `router-proxy/internal/store/managed_bridge_test.go`; `router-proxy/internal/managedbridge/phase3b_test.go` | Composed bridge/store and process lifecycle fixtures, not all-runtime launch acceptance |
+| MR-008 | retired `router-proxy/internal/transport/managed_goal_evaluator_native_test.go` (deleted); `router-proxy/internal/store/managed_goal_evaluator_test.go`: `TestManagedGoalRestartRejectsLateOldCorrelatedEvaluatorResult` | Surviving store slice only; deleted native test is historical evidence. Exact NOT_DONE replacement race gate remains unverified here |
+| MR-009 | `router-proxy/internal/managed/auth_test.go`: `TestProviderAuthCoordinatorConsumesPromptOnceAndCommitsOnlySuccess`; retired `tests/mecha_rpc_auth_e2e.test.ts` (deleted) | Surviving coordinator slice only; deleted extension test is historical evidence. Not all providers or embedded/Pi credential-owner parity |
+| MR-010 | `router-proxy/internal/transport/managed_http_test.go`; `router-proxy/internal/transport/transport_test.go` | HTTP header/route evidence; two actual cross-origin browser launch paths not established here |
+| MR-011 | Retired: bridge implementation and tests deleted | No replacement replay acceptance claimed |
 
-Retention owners: `router-proxy/internal/store/store.go` owns conversation sweeps; `managed_history.go` prunes complete history at write; `managed_bridge.go` bounds its ledger by 24 hours, 50,000 rows, and 64 MiB (live capacity can reject rather than erase needed replay); `managed_control_delivery_receipts_retention_test.go` covers terminal receipt pruning. Bridge defaults keep 128 event/cursor entries and bounded stderr. These limits are separate, not interchangeable guarantees for all histories.
+Retention owners: `router-proxy/internal/store/store.go` owns conversation sweeps; `managed_history.go` prunes complete history at write; `managed_control_delivery_receipts_retention_test.go` covers terminal receipt pruning. The former bridge ledger and buffer implementation limits no longer describe a current store; the historical bounded-retention obligation remains unresolved pending disposition. These limits are separate, not interchangeable guarantees for all histories.
 
 ### Subagent admission during shutdown
 
 - When a child is admitted normally, its caller receives its actual queued or running admission status.
 - If router shutdown closes task admission after the child enters running state but before execution starts, the spawn caller receives an error rather than a running response. The child eventually has a durable stopped outcome; this does not promise settlement before Close returns. Claude child admission follows the same behavior and releases its reservation when execution never starts.
+
+### Scenario: Delayed lifecycle history after termination
+- **Given**: A managed agent has unpublished lifecycle activity.
+- **When**: Termination cleanup removes its private history before that activity is persisted, including when the same agent ID is relaunched.
+- **Then**: The delayed activity does not recreate the removed history or appear in the replacement agent's history. Activity for other live agents remains eligible for publication, and retries of live activity remain idempotent.

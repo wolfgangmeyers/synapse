@@ -212,7 +212,7 @@ func TestResetStopFailureNeverReoffersMail(t *testing.T) {
 			proc := &ClaudeCodeProcess{stdin: poolTestStdin{}, done: done, exited: done, closeDone: make(chan struct{}), waitErr: errClaudeCodeGroupUnconfirmed}
 			pool := &f.m.claudeCodeProcesses
 			pool.mu.Lock()
-			pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {process: proc}}
+			pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {binding: owner.binding, process: proc}}
 			pool.mu.Unlock()
 			t.Cleanup(func() { pool.mu.Lock(); delete(pool.entries, owner.binding.AgentID); pool.mu.Unlock() })
 			_, err := f.raw.Exec(`CREATE TRIGGER reject_reset_failure BEFORE UPDATE ON managed_agents BEGIN SELECT RAISE(ABORT, 'failure recording rejected'); END`)

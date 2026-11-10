@@ -56,7 +56,6 @@ export async function startManagedGoRouter({ repositoryRoot = REPOSITORY_ROOT, t
       "--database", databasePath, "--log", logPath, "--host", "127.0.0.1", "--port", String(port), "--managed=true",
       "--managed-pi", piPath, "--managed-home", home, "--managed-pi-agent-dir", piAgentDir,
       "--managed-session-root", sessionRoot, "--managed-manifest", join(repositoryRoot, "router", "contract", "managed-tools-v1.json"),
-      "--managed-mecha-rpc", join(repositoryRoot, "pi-extensions", "mecha-rpc", "index.ts"),
       "--managed-pi-subagents", join(resolve(repositoryRoot, ".."), "pi-packages", "packages", "pi-subagents", "src", "index.ts"),
       "--managed-auth-helper", authPath, "--managed-runtime-root", repositoryRoot,
       "--managed-cwd-roots", root, "--managed-quiet-recipient", "functional-supervisor",

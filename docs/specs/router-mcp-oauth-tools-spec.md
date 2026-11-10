@@ -1,12 +1,14 @@
 # Router-Level Remote MCP Server Configuration with OAuth & Worker Tool Distribution
 
 **Specification ID:** SPEC-ROUTER-MCP-001  
-**Status:** DRAFT (Dev-Loop Phase 1)  
+**Status:** DRAFT (Dev-Loop Phase 1; Pi RPC integration retired)
 **Authors:** Wolfgang Meyers, Mecha Core Team  
 **Date:** October 2024  
 **Target Delivery:** Router Go Backend (`router-proxy`), Web UI (`web/router-ui-react`), Embedded & Managed Worker Tool Runtimes  
 
 ---
+
+**Retirement and scope:** The managed Pi RPC bridge, `mecha-rpc` extension, manifest injection, and bridge test gate described by the original design have been deleted. They are not an active integration or an optional transport. Embedded MCP startup/discovery and Claude discovery scenarios below are retained; their listed tests are scoped evidence, not replacement coverage for the retired Pi bridge. Other design and verification gates remain draft proposals, not proof of current implementation or acceptance.
 
 ## 1. Executive Summary & Objective
 
@@ -15,9 +17,9 @@ Modern agentic systems require access to external capabilities hosted across dis
 This specification details the architecture for **router-level Remote MCP Server management** in `router-proxy`. The router serves as the centralized MCP client and authorization coordinator:
 1. **Centralized Configuration & Remote Discovery**: Operators register remote MCP servers via base URL (e.g., `https://podclave.com/mcp`). The router performs automated OAuth 2.0 / 2.1 discovery (`.well-known/oauth-protected-resource/mcp` and `.well-known/oauth-authorization-server`), dynamic client registration (RFC 7591), and manages OAuth PKCE authorization code grants.
 2. **Streamable HTTP JSON-RPC Transport**: Router establishes and maintains stateful Streamable HTTP (`POST /mcp`) connections to MCP servers, handles `initialize`, protocol negotiation, and queries `tools/list`.
-3. **Transparent Worker Tool Distribution**: Tools discovered from remote MCP servers are injected directly into worker toolsets across both runtime modes:
+3. **Transparent Worker Tool Distribution**: Tools discovered from remote MCP servers are injected directly into worker toolsets in the retained embedded runtime and Claude discovery path:
    - **Embedded Go Mode** (`embedded_session.go` / `agent.AgentTool`).
-   - **Managed Pi RPC Mode** (`mecha-rpc` / `mecha-install-tools-v1` manifest injection).
+   - **Claude workers** discover configured active tools through the router. The former managed Pi RPC mode is retired.
 4. **Zero Worker Awareness**: **"The tools should look no different to the workers than any other tools."** Tool names, JSON parameter schemas, execution flows, and error contracts appear identical to native built-in tools (e.g., `read`, `bash`, `scratchpad`). Workers invoke them via standard structured tool calls without CLI syntax, manual token handling, or separate subprocess plumbing.
 
 ---
@@ -245,12 +247,8 @@ Workers must not be required to know that a tool is serviced via MCP, nor should
   - `Parameters`: Translated JSON Schema (`ai.Schema`) passed directly to LLM provider
   - `Execute`: Go function executing the RPC call through router's centralized transport.
 
-#### 2.4.3 Managed Pi RPC Mode (`process.go` & `mecha-rpc`)
-- For stock Pi processes running with `pi-extensions/mecha-rpc`:
-  - Router compiles the active MCP tools into the desired manifest sent via `mecha-bootstrap-v1` and `mecha-install-tools-v1`.
-  - Manifest tool entries map capability IDs to remote tool handlers.
-  - When Pi's LLM calls the tool, `tool-registry.ts` dispatches `mecha-tool-call` back across the RPC bridge to Go router.
-  - The router routes the execution through the MCP client and returns standard tool outputs.
+#### 2.4.3 Managed Pi RPC Mode (retired)
+The former `mecha-rpc` manifest injection and `mecha-tool-call` dispatch through the Pi bridge have been deleted. No replacement bridge or equivalent test coverage is claimed.
 
 #### 2.4.4 Execution Flow, Formatting & Timeouts
 1. **Model Generates Tool Call**: LLM emits structured tool call:
@@ -366,44 +364,11 @@ The router broadcasts live deltas on `/v1/agents` WebSocket for UI synchronizati
 
 ## 3. High-Level Design & Component Architecture
 
+The following is the original draft design, not an implementation inventory. Any Pi RPC lane shown in historical design material is retired.
+
 ### 3.1 System Boundaries
 
-```
-+-------------------------------------------------------------------------------------------------------------------------+
-|                                                      ROUTER PROCESS                                                     |
-|                                                                                                                         |
-|  +--------------------+        +-----------------------------+        +----------------------------------------------+  |
-|  |     Transport      |        |          Storage            |        |                  MCP Manager                 |  |
-|  |  (managed_http.go, |        |     (SQLite Store / DB)     |        |              (internal/mcp/)                 |  |
-|  |   managed_ws.go)   |        |                             |        |                                              |  |
-|  +---------+----------+        |  - managed_mcp_servers      |        |  - OAuth Discovery & PKCE Coordinator        |  |
-|            |                   |  - managed_mcp_tokens (enc) |        |  - Streamable HTTP Client Pool               |  |
-|            | REST / WS         |  - managed_mcp_tools        |        |  - Dynamic Schema Validator & Registry       |  |
-|            v                   +--------------+--------------+        +----------------------+-----------------------+  |
-|  +--------------------+                       ^                                              |                          |
-|  |     Web UI         |                       | Read/Write                                   | Inject Tools             |
-|  | (Settings Dialog)  |                       +----------------------------------------------+                          |
-|  +--------------------+                                                                      |                          |
-|                                                                                              |                          |
-|                        +---------------------------------------------------------------------+                          |
-|                        |                                             |                                                  |
-|                        v                                             v                                                  |
-|         +-----------------------------+               +-------------------------------+                                 |
-|         |     Embedded Worker Lane    |               |       Managed Pi Worker       |                                 |
-|         |    (embedded_session.go)    |               |     (mecha-rpc / manifest)    |                                 |
-|         |                             |               |                               |                                 |
-|         | Directly invokes Go wrapper |               | Tool manifest synced via RPC; |                                 |
-|         | `agent.AgentTool.Execute`   |               | Dispatches `mecha-tool-call`  |                                 |
-|         +-----------------------------+               +-------------------------------+                                 |
-+-------------------------------------------------------------------------------------------------------------------------+
-                                         |
-                                         | Streamable HTTP POST /mcp (Bearer Token / OAuth)
-                                         v
-                      +-------------------------------------+
-                      |       Remote MCP Servers            |
-                      | (e.g. https://podclave.com/mcp)     |
-                      +-------------------------------------+
-```
+The router MCP manager owns remote configuration, authorization and tool access. Embedded sessions use router-provided tools; Claude discovery is covered separately by MCP-START-004. The former Pi manifest/bridge lane is retired.
 
 ### 3.2 Database Schema (`router-proxy/internal/store/migrations/105_mcp_servers.sql`)
 
@@ -475,7 +440,7 @@ CREATE INDEX idx_managed_mcp_tools_server ON managed_mcp_tools(server_id);
    - Implements OAuth redirect callback receiver (`/v1/mcp/oauth/callback`).
 5. **Worker Integration Bridges**:
    - `internal/managed/embedded_session.go`: Dynamically pulls `m.mcpManager.ActiveAgentTools()` and appends them to session tool allowlist.
-   - `internal/managed/supervisor.go`: Dynamically merges MCP tool definitions into the active Pi manifest during bootstrap.
+   - The former Pi manifest bootstrap integration is retired.
 6. **Web UI (`MCPServersDialog.tsx`)**:
    - Provides interface in the Router UI sidebar menu (alongside "Provider settings" and "System 1 Config").
    - Displays registered servers, real-time connectivity status, tool counts, and action buttons ("Authorize", "Sync Now", "Edit", "Remove").
@@ -500,9 +465,9 @@ CREATE INDEX idx_managed_mcp_tools_server ON managed_mcp_tools(server_id);
   3. **Architectural Inconsistency**: Mecha's core architecture centralizes infrastructure-level capabilities (Model Providers, System 1 Clef, Git Worktrees, SQLite Store) inside the Go router. Dispersing MCP into per-session Node.js processes breaks this clean model.
 
 ### 4.3 Alternative C (Chosen): Router-Level Centralized MCP Manager in Go
-- **Concept**: Centralized Go-native MCP client residing within `router-proxy`. Implements Streamable HTTP JSON-RPC 2.0, manages persistent SQLite token encryption and OAuth PKCE flows, maintains a consolidated tool cache, and injects tools directly into Go and Pi RPC worker runtimes.
+- **Concept**: Centralized Go-native MCP client residing within `router-proxy`. Implements Streamable HTTP JSON-RPC 2.0, manages persistent SQLite token encryption and OAuth PKCE flows, maintains a consolidated tool cache, and provides tools to embedded workers; the proposed Pi RPC integration is retired.
 - **Why Chosen**:
-  1. **Perfect Worker Parity**: Remote tools look 100% indistinguishable from built-in Go tools (`agent.AgentTool`) and manifest tools. The LLM receives standard JSON schemas and returns structured arguments.
+  1. **Perfect Worker Parity**: Remote tools look 100% indistinguishable from built-in Go tools (`agent.AgentTool`) ; no Pi manifest parity is claimed. The LLM receives standard JSON schemas and returns structured arguments.
   2. **Single Secure Auth Boundary**: All OAuth grants, refresh tokens, and encryption happen centrally inside the router. Revocation or token expiration affects the router once, not $N$ separate agents.
   3. **Performance & Lightweight Operations**: Go's native HTTP connection pooling communicates with remote servers with sub-millisecond overhead. No subprocesses or Node runtimes required.
   4. **Seamless UI Integration**: Sits naturally alongside existing provider settings, System 1 config, and default model settings in the Router Web UI.
@@ -526,7 +491,8 @@ The implementation will be verified through comprehensive dev-loop test gates:
 
 ### Gate 3: Worker Tool Execution & Parity Proof
 - **Embedded Go Session Test**: Spin up an embedded worker session; assert that remote MCP tools appear in `session.Tools`, invoke the tool via mock LLM tool call, and verify clean result return.
-- **Pi RPC Bridge Test**: Verify tools are included in `mecha.bootstrap/v1` manifest; simulate `mecha-tool-call` and verify execution.
+- **Claude Worker Parity Test**: Verify configured active tools expose the expected name and input schema, execute structured calls with the expected result, and return structured errors on remote failure without crashing the worker or router. `tests/e2e/claude-configured-mcp-discovery.spec.ts` covers startup discovery, a successful call and result, and inactive-tool exclusion; it does not establish the full schema and failure parity gate.
+- **Retired Pi RPC Bridge Test**: The bridge and its tests were deleted. Embedded and Claude tests do not replace this gate or establish Pi bridge parity.
 - **Failure Resilience**: Simulate 502/503/timeout on remote MCP server; prove that neither the router nor the worker crashes, and that a structured error is returned to the model.
 
 ### Gate 4: Web UI & REST Endpoints

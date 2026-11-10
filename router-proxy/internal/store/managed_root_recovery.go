@@ -80,13 +80,16 @@ func ManagedLaunchRecipeDigest(recipe ManagedLaunchRecipe) (ManagedLaunchRecipe,
 }
 
 func ValidateManagedLaunchRecipe(recipe ManagedLaunchRecipe) error {
-	if recipe.PiExecutable == "" || recipe.SessionRoot == "" || recipe.Cwd == "" || recipe.Provider == "" || recipe.ModelID == "" || recipe.MechaRPCExtension == "" || recipe.PiSubagentsExtension == "" {
+	if recipe.PiExecutable == "" || recipe.SessionRoot == "" || recipe.Cwd == "" || recipe.Provider == "" || recipe.ModelID == "" || recipe.PiSubagentsExtension == "" {
 		return errors.New("managed launch recipe is incomplete")
 	}
-	for _, value := range []string{recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.MechaRPCExtension, recipe.PiSubagentsExtension} {
+	for _, value := range []string{recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.PiSubagentsExtension} {
 		if !validRecipeValue(value, 4096) {
 			return errors.New("managed launch recipe contains an invalid value")
 		}
+	}
+	if recipe.MechaRPCExtension != "" && !validRecipeValue(recipe.MechaRPCExtension, 4096) {
+		return errors.New("managed launch recipe contains an invalid value")
 	}
 	if recipe.CursorExtension != "" && !validRecipeValue(recipe.CursorExtension, 4096) {
 		return errors.New("managed launch recipe contains an invalid value")
