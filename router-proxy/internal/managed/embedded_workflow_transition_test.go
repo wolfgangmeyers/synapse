@@ -166,7 +166,7 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 		"target_state": "Done", // Direct skip to Done not permitted from Plan
 	}, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "not permitted")
+	require.EqualError(t, err, `transition to "Done" is not permitted from state "Plan" (allowed targets: Implement)`)
 
 	// 5. Successful transition from Plan to Implement (case-insensitive name match: "implement")
 	res, err := tool.Execute(ctx, "call-3", map[string]any{
@@ -201,6 +201,9 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	require.Contains(t, resAlias.Content[0].(ai.TextContent).Text, "Successfully transitioned to workflow state: Done")
+
+	_, err = tool.Execute(ctx, "dead-end", map[string]any{"action": "transition", "target_state": "Plan"}, nil)
+	require.EqualError(t, err, `workflow state "Done" has no outgoing transitions`)
 
 	// Verify active state in store is now Done
 	currState, err = db.GetManagedAgentActiveWorkflowState(ctx, agentID)

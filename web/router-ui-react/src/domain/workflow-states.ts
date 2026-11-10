@@ -43,6 +43,7 @@ export interface WorkflowState {
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;
+  allow_implicit_return?: boolean;
   ui_pos_x?: number;
   ui_pos_y?: number;
   created_at: string;
@@ -111,6 +112,7 @@ export interface WorkflowStateExport {
   goal?: string;
   is_entry_state: boolean;
   allow_exit: boolean;
+  allow_implicit_return?: boolean;
   allowed_tools: string[];
   reminders: WorkflowReminderConfig[];
   monitors?: WorkflowMonitorConfig[];
@@ -144,6 +146,7 @@ export interface WorkflowStateInput {
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;
+  allow_implicit_return?: boolean;
   ui_pos_x?: number;
   ui_pos_y?: number;
 }
