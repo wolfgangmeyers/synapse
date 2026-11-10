@@ -36,6 +36,15 @@ export async function closeWorkflowProxyChild(proxy: IsolatedProxy | undefined) 
   }
 }
 
+// Keep startup failures visible even when teardown also fails.
+export async function closeAfterWorkflowStartupFailure(error: unknown, close: () => Promise<void>): Promise<never> {
+  try { await close(); }
+  catch (cleanupError) {
+    throw new AggregateError([error, cleanupError], "workflow fixture startup and shutdown failed", { cause: error });
+  }
+  throw error;
+}
+
 // Only the provider boundary is mocked. Every response must be explicitly queued;
 // unexpected evaluator/autonomous requests fail closed and remain observable.
 export type WorkflowHarnessOptions = {
@@ -327,8 +336,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
     try {
       if (checkingModels) await captureReadiness();
     } catch { /* Keep original failure and always remove the disposable DB. */ }
-    finally { await close(); }
-    throw error;
+    return closeAfterWorkflowStartupFailure(error, close);
   }
 }
 export type WorkflowHarness = Awaited<ReturnType<typeof workflowHarness>>;

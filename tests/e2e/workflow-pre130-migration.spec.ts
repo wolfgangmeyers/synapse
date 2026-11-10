@@ -61,6 +61,8 @@ test("IR-001: pre-129 states retain their configuration and default return off",
   const f = await setupE2EHarness({ useProxy: true });
   const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
   let before: Record<string, unknown>[] = [];
+  let publicationsBefore: Record<string, unknown>[] = [];
+  let evaluationsBefore: Record<string, unknown>[] = [];
   try {
     await f.router.restart(async path => {
       for (const suffix of ["", "-wal", "-shm"]) await rm(path + suffix, { force: true });
@@ -80,6 +82,23 @@ test("IR-001: pre-129 states retain their configuration and default return off",
           VALUES('pre129-agent','pre129-agent',?,'google','fixture-model','terminated','terminated','idle','embedded','session',1,'generation',1,?,?,?,'wf',?)`).run(repo, "a".repeat(64), now, now, ids[1]);
         db.prepare(`INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json,tool_input_json)
           VALUES('pre129-agent','managed_message','info','Workflow state transitioned',?,'workflow-transition:pre129:first:second:old',?,?)`).run(now, JSON.stringify({kind:'state',outcome:'success',from:'First',to:'Second'}), JSON.stringify({action:'transition',target_state:'Second'}));
+        // Seed an evaluation and publication after migration 128, before 129/130.
+        expect(db.prepare("SELECT id FROM schema_migrations WHERE id='128_goal_activity_publication'").all()).toHaveLength(1);
+        db.prepare(`INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current,owner_token)
+          VALUES('pre129-agent','session',1,'generation','root',0,1)`).run();
+        const entry = db.prepare(`INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest,retention_admitted_at_ms)
+          VALUES('pre129-agent','session',1,'generation',?,?,?,?,?,?)`);
+        const admitted = Date.now();
+        entry.run(1, 'genesis', 'user', 'goal input', 'user-digest', admitted);
+        entry.run(2, 'user-digest', 'assistant', 'goal output', 'final-digest', admitted);
+        db.prepare(`INSERT INTO embedded_goal_evaluations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,reason,claimed_at,completed_at)
+          VALUES('pre129-agent','session',1,'generation',1,'user-digest',1,1,2,'final-digest','DONE','goal achieved',?,?)`).run(now, now);
+        db.prepare(`INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason)
+          VALUES('pre129-agent','session',1,1,'user-digest',1,'goal-evaluation:pre129-agent:1:2:COMPLETED','goal achieved')`).run();
+        publicationsBefore = db.prepare("SELECT * FROM embedded_goal_activity_publications").all();
+        evaluationsBefore = db.prepare("SELECT * FROM embedded_goal_evaluations").all();
+        expect(publicationsBefore).toHaveLength(1);
+        expect(evaluationsBefore).toHaveLength(1);
         expect(db.prepare("PRAGMA table_info(managed_agents)").all().some(c => c.name === "workflow_predecessor_state_id")).toBe(false);
         before = db.prepare("SELECT * FROM workflow_states ORDER BY id").all();
         expect(before).toHaveLength(2);
@@ -93,6 +112,8 @@ test("IR-001: pre-129 states retain their configuration and default return off",
         expect(db.prepare("SELECT id FROM schema_migrations WHERE id=?").all(migration)).toHaveLength(1);
         expect(db.prepare("SELECT active_workflow_id,active_workflow_state_id,workflow_predecessor_state_id,workflow_binding_generation FROM managed_agents WHERE agent_id='pre129-agent'").get()).toMatchObject({active_workflow_id:'wf',active_workflow_state_id:ids[1],workflow_predecessor_state_id:null,workflow_binding_generation:0});
         expect(db.prepare("SELECT message FROM managed_complete_history WHERE event_key='workflow-transition:pre129:first:second:old'").get()).toMatchObject({message:'Workflow state transitioned'});
+        expect(db.prepare("SELECT * FROM embedded_goal_activity_publications").all()).toEqual(publicationsBefore);
+        expect(db.prepare("SELECT * FROM embedded_goal_evaluations").all()).toEqual(evaluationsBefore);
         const rows = db.prepare("SELECT * FROM workflow_states ORDER BY id").all();
         expect(rows.map(({ allow_implicit_return, ...rest }) => ({ ...rest }))).toEqual(before.map(row => ({ ...row })));
         expect(rows.map(row => row.allow_implicit_return)).toEqual([0, 0]);

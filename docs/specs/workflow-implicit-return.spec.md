@@ -61,8 +61,8 @@ A workflow author can allow an agent to return from a state to the state it just
 ### Scenario: [IR-007] Guidance and target resolution
 - **User Goal**: See and select only currently available targets.
 - **Given**: A binding has a valid predecessor and the current state enables return, or it has no eligible predecessor, or the target is also an explicit edge.
-- **When**: Agent transition, background, assignment or HTTP guidance is generated and an authorized agent uses either transition tool alias with an ID or case-insensitive name.
-- **Then**: Guidance includes an eligible return target once, never implies the toggle alone creates a target, and preserves normal explicit targets. Both aliases and existing ID/name resolution work. Explicit edges are checked first in configured order, so an explicit target name collision takes precedence over the implicit predecessor, including when the input is the predecessor ID matching an explicit target name. The canvas does not draw a phantom edge; dead-end messaging describes the conditional return accurately.
+- **When**: Agent transition, background, assignment or HTTP guidance is generated and an authorized agent uses the exposed `mecha_workflow_transition` tool with an ID or case-insensitive name.
+- **Then**: Guidance includes an eligible return target once, never implies the toggle alone creates a target, and preserves normal explicit targets. Existing ID/name resolution works. The transition tool factory also supports the direct `workflow_transition` alias with the same return behavior; this does not require exposing that alias in the managed tool catalog. Explicit edges are checked first in configured order, so an explicit target name collision takes precedence over the implicit predecessor, including when the input is the predecessor ID matching an explicit target name. The canvas does not draw a phantom edge; dead-end messaging describes the conditional return accurately.
 
 ### Scenario: [IR-008] Rejection and stale predecessors
 - **User Goal**: Prevent unauthorized or invalid transitions without disrupting valid edges.
@@ -106,7 +106,7 @@ The mappings below identify existing candidate coverage, not a claim of complete
 | IR-004 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-return-late-enable-effects.spec.ts` | Immediate predecessor and late enable. |
 | IR-005 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-return-edge-acceptance.spec.ts` | Repeated returns and disabled predecessor with explicit edge. |
 | IR-006 | `tests/e2e/workflow-return-edge-acceptance.spec.ts` | Legacy self and cross-workflow explicit edges. |
-| IR-007 | `tests/e2e/workflow-return-target-collision-review.spec.ts`; `tests/e2e/workflow-return-missing-lifecycle.spec.ts` | Target collision and deduplicated explicit reverse guidance. |
+| IR-007 | `tests/e2e/workflow-return-target-collision-review.spec.ts`; `tests/e2e/workflow-return-missing-lifecycle.spec.ts`; `router-proxy/internal/managed/embedded_workflow_implicit_return_test.go` (`TestWorkflowImplicitReturnTool`) | Target collision, deduplicated explicit reverse guidance, and direct factory alias return. |
 | IR-008 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-return-edge-acceptance.spec.ts` | Invalid and deleted predecessor rejection. |
 | IR-009 | `tests/e2e/workflow-return-entry-contract.spec.ts` | Return entry effects compared with an explicit transition. |
 | IR-010 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-return-missing-lifecycle.spec.ts` | Restart, exit and fresh activation. |
