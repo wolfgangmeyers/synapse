@@ -70,6 +70,7 @@ test.describe("Claude mid-turn steering acceptance", () => {
     await expect.poll(async () => (await f!.inputs()).length, { timeout: 10_000 }).toBe(2);
     await expect.poll(async () => (await f!.records()).some(row => row.kind === "steer_echo"), { timeout: 10_000 }).toBe(true);
     const steered = (await f.inputs())[1];
+    expect(JSON.stringify(steered.message)).toContain("[Direct message from steer-fixture]: same text");
     const echo = (await f.records()).find(row => row.kind === "steer_echo")!;
     expect(echo.input_id).toBe(steered.uuid);
 

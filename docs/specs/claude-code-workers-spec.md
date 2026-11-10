@@ -81,9 +81,22 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 
 ### 3.4 Messages that arrive during a turn
 - **Mail and direct prompts are steered mid-turn.** Mail and direct HTTP prompts that arrive while a foreground execution is running are written to that process's stdin as user messages, so the running turn picks them up without waiting for the turn to end. No second process is started. One live observation on `claude` 2.1.316 shows a mid-tool steer folded into the running turn (§6). The exact stream-json point and echo shape are not guaranteed by that single observation (§6 *Still to verify*).
-- **Fallback.** Input that cannot be steered stays durably eligible and runs in a later foreground execution with its own answer. This covers a process still starting or recovering, a write rejected before stdin, and a turn that ends before the echo.
+- **Fallback.** Input that cannot be steered stays durably eligible and runs in a later foreground execution with its own answer. This covers a process still starting or recovering and a write rejected before stdin. A started write without a checked echo remains held.
 - Each steered input is durably reserved before its write. A reservation or a write is not consumption; only the checked echo consumes the input.
 - A message is ACKed only after its exact correlated echo is durably checked. Definitely unsubmitted messages remain eligible after interrupt or reset. If a write started but consumption cannot be checked, hold that input unacknowledged from automatic redelivery, including across restart/reset, until existing expiry; never guess that it was unconsumed.
+- **Concurrent tool and mail persistence.** Given a router tool is recording its checked work while a reserved mail steer receives its exact echo, when both complete, the checked conversation retains both in order and the mail is acknowledged exactly once. If the checked tool work fails, the system must not acknowledge the mail as though the turn remained healthy. The echo must wait for the in-flight MCP tool check; a failed checked result leaves the mail unacknowledged and does not publish its user entry.
+
+### Scenario: Late steering echo after a terminal result
+- **Given**: A steered input write started but its checked echo has not arrived when the current result arrives.
+- **When**: The result succeeds, the runtime waits up to 30 seconds for the next exact echo. The deadline applies even to already-buffered events and is suspended during the ensuing response; after its result, a fresh deadline applies if another input remains unresolved. Invalid echoes or persistence failures fail closed.
+- **Then**: Only an exact durably checked echo consumes and ACKs the input. On timeout, error, cancellation, or invalid output, retire the owning process and keep any unchecked input held, not automatically redelivered. A failed or cancelled first result must not leave the process available for another execution.
+- **Evidence**: Focused Go regression tests in `claude_code_runtime_result_before_echo_test.go`; browser E2E acceptance remains pending.
+
+### Scenario: Restart wake final followed by a late steer
+- **Given**: A claimed restart wake is running and a steer has been written but not echoed.
+- **When**: The wake answer is checked first, followed by the exact steer echo and its own answer in the same process.
+- **Then**: Both answers remain in the conversation, the steer is consumed exactly once, and only the first answer owns the wake completion. A second final without a later checked user input fails closed. Cleanup and the existing one-shot wake and owner fences still apply.
+- **Evidence**: Focused real-SQLite lifecycle regression; browser E2E acceptance remains pending.
 
 ### 3.5 Tools
 - **Claude Code's own tools.** All managed Claude roles, including roots, ordinary workers and subagents, enable exactly `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `ToolSearch` as built-ins via `--tools` using these exact CLI names. This applies to every foreground process, including resumed sessions. Native tools run under the process OS authority with `--permission-mode bypassPermissions`, not router tool policy. The separate noninteractive internal evaluator remains tool-free; this foreground-worker tool list does not apply to it. Existing role-specific MCP restrictions remain unchanged; built-in calls do not acquire router tool authority.
@@ -508,7 +521,8 @@ Fresh Claude sessions seed even when checked history is empty. A fresh session c
 - **Given**: A running Claude foreground turn and two equal-text messages, one arriving as mail and one as a direct prompt, with deterministic echo and result barriers.
 - **When**: The second message arrives while the first is in the turn.
 - **Then**: The second message is durably reserved, written to the same process (same PID), and ACKed only on its exact checked echo. Its answer appears in this execution or in its own later turn. Equal text keeps distinct identities. No second process starts.
-- **Negative cases**: (a) Write rejected before stdin: the message stays eligible. (b) Write started and echo not checked before interrupt, reset or restart: held, not redelivered, not ACKed. (c) Process still starting or recovering, or turn ends before the echo: the message stays durably queued for a later execution.
+- **Sender attribution**: Mail delivered during a turn identifies its reserved sender and preserves its body, just as idle mail does. Message text cannot substitute a different sender. Direct prompts remain direct prompts. This applies to both Claude and embedded workers.
+- **Negative cases**: (a) Write rejected before stdin: the message stays eligible. (b) Write started and echo not checked before interrupt, reset or restart: held, not redelivered, not ACKed. (c) Process still starting or recovering: unsubmitted input stays eligible. A turn ending before the echo leaves a started write held until its exact checked echo or expiry.
 - **E2E**: `tests/e2e/claude-steering-mid-turn.spec.ts` (`CC-019 steers mid-turn mail into the active turn with checked echo ACK`; `CC-019 steers a direct user send into the active turn`). Present in the working tree, uncommitted. Not accepted.
 
 ## 11. Automated E2E Verification Matrix

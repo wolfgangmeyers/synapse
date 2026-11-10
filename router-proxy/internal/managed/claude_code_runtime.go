@@ -858,6 +858,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 	admitted := false
 	var limit *claudeCodeUsageLimitError
 	var cancelDrain context.CancelFunc
+	var lateDeadline time.Time
 	defer func() {
 		if cancelDrain != nil {
 			cancelDrain()
@@ -916,7 +917,15 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			r.Interrupt()
 			ctx, cancelDrain = context.WithTimeout(context.Background(), 5*time.Second)
 		}
-		event, err := r.process.Next(ctx)
+		nextCtx := ctx
+		var cancelNext context.CancelFunc
+		if !lateDeadline.IsZero() {
+			nextCtx, cancelNext = context.WithDeadline(ctx, lateDeadline)
+		}
+		event, err := claudeNextBeforeDeadline(r.process, nextCtx, lateDeadline)
+		if cancelNext != nil {
+			cancelNext()
+		}
 		if err != nil {
 			if ctx.Err() != nil && cancelDrain == nil {
 				r.Interrupt()
@@ -994,6 +1003,8 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 					if err := r.commitSteerEcho(ctx, steer); err != nil {
 						return r.stop(err)
 					}
+					// The echoed steer now has an ordinary, unbounded response.
+					lateDeadline = time.Time{}
 					continue
 				}
 				original, ok := pending[event.UUID]
@@ -1118,13 +1129,6 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			// Unacknowledged steers stay reserved: a result without their echo is not
 			// an error here, so the held answer and original turn still settle.
 			answered, uncertain := r.settleSteersAtResult()
-			if uncertain > 0 {
-				if err := r.pool.stop(r.p.binding.AgentID); err != nil {
-					r.mu.Lock()
-					r.probeCleanupErr = errors.Join(r.probeCleanupErr, err)
-					r.mu.Unlock()
-				}
-			}
 			if limit != nil && (len(answered) > 0 || uncertain > 0) {
 				return r.stop(errors.New("Claude usage limit with steered input in flight"))
 			}
@@ -1237,20 +1241,32 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 					return r.stop(err)
 				}
 			}
-			if discard {
-				return &embeddedOutcome{StopReason: ai.StopStop}, nil
-			}
-			if interrupted {
-				return &embeddedOutcome{StopReason: stop}, context.Canceled
-			}
-			if stop == ai.StopError {
-				return &embeddedOutcome{StopReason: stop}, errors.New(errorText)
+			if discard || interrupted || stop == ai.StopError {
+				var resultErr error
+				if interrupted {
+					resultErr = context.Canceled
+				} else if stop == ai.StopError {
+					resultErr = errors.New(errorText)
+				}
+				if uncertain > 0 {
+					_, resultErr = r.stop(resultErr)
+				}
+				if discard {
+					return &embeddedOutcome{StopReason: ai.StopStop}, resultErr
+				}
+				return &embeddedOutcome{StopReason: stop}, resultErr
 			}
 			if err := r.completeSteeredPrompts(ctx, answered); err != nil {
 				return r.stop(err)
 			}
 			if len(pending) != 0 {
 				return r.stop(errors.New("Claude result without all input echoes"))
+			}
+			if uncertain > 0 {
+				if lateDeadline.IsZero() {
+					lateDeadline = time.Now().Add(30 * time.Second)
+				}
+				continue
 			}
 			return &embeddedOutcome{StopReason: stop}, nil
 		}
@@ -1259,6 +1275,18 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 		return r.stop(errors.New("Claude result without all input echoes"))
 	}
 	return &embeddedOutcome{StopReason: ai.StopStop}, nil
+}
+
+// Buffered events must not extend the late-echo drain deadline.
+func claudeNextBeforeDeadline(p *ClaudeCodeProcess, ctx context.Context, deadline time.Time) (ClaudeCodeEvent, error) {
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return ClaudeCodeEvent{}, context.DeadlineExceeded
+	}
+	event, err := p.Next(ctx)
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return ClaudeCodeEvent{}, context.DeadlineExceeded
+	}
+	return event, err
 }
 
 var errClaudeTerminalOutput = errors.New("assistant output after checked terminating result")
