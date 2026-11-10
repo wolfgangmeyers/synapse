@@ -62,10 +62,14 @@ test.describe("legacy RPC preservation fence", () => {
             db.exec("DELETE FROM schema_migrations WHERE id='127_conversation_receipt_cap_ceiling'; UPDATE conversation_send_receipt_capacity SET max_bytes=314572800 WHERE singleton=1");
           } finally { db.close(); }
           before = snapshot(path);
-        })).rejects.toThrow(new RegExp(`unsupported legacy RPC agent legacy-${scenario === "mixed-child" ? "child" : "terminal"}`));
+        })).rejects.toThrow(/Isolated router exited prematurely/);
+        expect(f.router.stderrLineContains(`unsupported legacy RPC agent legacy-${scenario === "mixed-child" ? "child" : "terminal"}`)).toBe(true);
         expect(snapshot(f.router.databasePath)).toEqual(before!);
         expect(await readFile(sessionPath, "utf8")).toBe(session);
-        await expect(f.router.restart()).rejects.toThrow(/unsupported legacy RPC agent legacy-/);
+        const diagnostic = `unsupported legacy RPC agent legacy-${scenario === "mixed-child" ? "child" : "terminal"}`;
+        const count = f.router.countStderr(diagnostic);
+        await expect(f.router.restart()).rejects.toThrow(/Isolated router exited prematurely/);
+        expect(f.router.countStderr(diagnostic)).toBeGreaterThan(count);
         expect(snapshot(f.router.databasePath)).toEqual(before!);
         expect(await readFile(sessionPath, "utf8")).toBe(session);
       } finally { await f.close(); }
@@ -103,9 +107,12 @@ test.describe("legacy RPC preservation fence", () => {
         } finally { db.close(); }
         before = snapshot(path);
         expect(before.data.sqlite_sequence).toEqual([JSON.stringify({ name: "messages", seq: 1 })]);
-      })).rejects.toThrow(/unsupported legacy RPC agent old-legacy/);
+      })).rejects.toThrow(/Isolated router exited prematurely/);
+      expect(f.router.stderrLineContains("unsupported legacy RPC agent old-legacy")).toBe(true);
       expect(snapshot(f.router.databasePath)).toEqual(before!);
-      await expect(f.router.restart()).rejects.toThrow(/unsupported legacy RPC agent old-legacy/);
+      const count = f.router.countStderr("unsupported legacy RPC agent old-legacy");
+      await expect(f.router.restart()).rejects.toThrow(/Isolated router exited prematurely/);
+      expect(f.router.countStderr("unsupported legacy RPC agent old-legacy")).toBeGreaterThan(count);
       expect(snapshot(f.router.databasePath)).toEqual(before!);
     } finally { await f.close(); }
   });
@@ -119,9 +126,13 @@ test.describe("legacy RPC preservation fence", () => {
         await rm(`${path}-wal`, { force: true });
         await rm(`${path}-shm`, { force: true });
         await writeFile(path, malformed);
-      })).rejects.toThrow(/legacy RPC preflight.*(not a database|malformed)/i);
+      })).rejects.toThrow(/Isolated router exited prematurely/);
+      expect(f.router.stderrLineContains("legacy RPC preflight", "not a database")).toBe(true);
       expect(await readFile(f.router.databasePath)).toEqual(malformed);
-      await expect(f.router.restart()).rejects.toThrow(/legacy RPC preflight.*(not a database|malformed)/i);
+      const diagnostic = "legacy RPC preflight: file is not a database";
+      const count = f.router.countStderr(diagnostic);
+      await expect(f.router.restart()).rejects.toThrow(/Isolated router exited prematurely/);
+      expect(f.router.countStderr(diagnostic)).toBeGreaterThan(count);
       expect(await readFile(f.router.databasePath)).toEqual(malformed);
     } finally { await f.close(); }
   });
