@@ -64,9 +64,10 @@ try {
     config = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, 'utf8'));
   }
   if (!config || Array.isArray(config) || typeof config !== 'object') throw Error('script must be object');
-  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output', 'skip_mcp_result', 'steer_mid_turn'];
+  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_hold_contains', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output', 'skip_mcp_result', 'steer_mid_turn'];
   for (const key of Object.keys(config)) if (!allowed.includes(key)) throw Error(`unknown script key: ${key}`);
   if (config.replay_control !== undefined && !['skip', 'hold'].includes(config.replay_control)) throw Error('invalid replay_control');
+  if (config.replay_hold_contains !== undefined && (typeof config.replay_hold_contains !== 'string' || !config.replay_hold_contains)) throw Error('invalid replay_hold_contains');
   if (config.steer_mid_turn !== undefined && typeof config.steer_mid_turn !== 'boolean') throw Error('steer_mid_turn must be boolean');
   if (config.interrupt_output !== undefined && (!Array.isArray(config.interrupt_output) || config.interrupt_output.length !== 2 || config.interrupt_output.some(x => typeof x !== 'string' || !x || x.length > 1024))) throw Error('interrupt_output requires two bounded strings');
   if (config.ignore_sighup !== undefined && typeof config.ignore_sighup !== 'boolean') throw Error('ignore_sighup must be boolean');
@@ -308,7 +309,7 @@ try {
         }
         runSteps(active);
       };
-      if (config.replay_control === 'hold') barrier('replay', next.value.uuid, proceed); else proceed();
+      if (config.replay_control === 'hold' || (config.replay_hold_contains && input.includes(config.replay_hold_contains))) barrier('replay', next.value.uuid, proceed); else proceed();
     }
     let backgroundMcp;
     function runSteps(state) {

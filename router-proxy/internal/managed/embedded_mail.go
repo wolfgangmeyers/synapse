@@ -354,7 +354,7 @@ func (m *Manager) trySteerActiveSession(agentID string, active embeddedRuntime) 
 }
 
 func buildSteerUserMessage(msg *store.EmbeddedMailAttempt, nowMilli int64) ai.UserMessage {
-	text := unwrapEmbeddedMailText(msg.Body)
+	text := fmt.Sprintf("[Direct message from %s]: %s", msg.Sender, msg.Body)
 	var content ai.ContentList
 	var attachmentRefs []string
 	var imageBlocks []ai.ImageContent

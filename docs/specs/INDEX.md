@@ -35,6 +35,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-AGENT-CLAUDE-LATE-STEER` | Claude late steering echo | `AgentManagement` | [`claude-late-steer.spec.md`](./claude-late-steer.spec.md) | `tests/e2e/claude-late-echo.spec.ts` | `Draft` |
 | `SPEC-CLAUDE-CHILD-CAPACITY-001` | Claude child resource capacity and cancellation | `AgentManagement` | [`claude-child-capacity.spec.md`](./claude-child-capacity.spec.md) | `tests/e2e/claude-child-reservations.spec.ts` and `tests/e2e/claude-child-capacity-fixture.spec.ts` (partial); Go admission regressions | `Draft` |
 | `SPEC-CLAUDE-CHILD-ANSWER-001` | Claude child answer settlement | `AgentManagement` | [`claude-child-answer.spec.md`](./claude-child-answer.spec.md) | `tests/e2e/claude-child-answer-settlement-supplement.spec.ts` (eight settlement cases; Draft) | `Draft` |
 | `SPEC-CLAUDE-CHILD-RESUME-001` | Claude child single attempt | `AgentManagement` | [`claude-child-effect-resume.spec.md`](./claude-child-effect-resume.spec.md) | `tests/e2e/claude-child-effect-resume.spec.ts` (partial) | `Draft` |

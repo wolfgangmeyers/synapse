@@ -156,6 +156,13 @@ func (r *claudeCodeRuntime) takeEchoedSteer(id string) *claudeSteer {
 // ACKed in one store transaction; a direct prompt is a checked user entry.
 func (r *claudeCodeRuntime) commitSteerEcho(ctx context.Context, st *claudeSteer) error {
 	if st.attempt != nil {
+		if r.bridge != nil {
+			r.bridge.serial.Lock()
+			defer r.bridge.serial.Unlock()
+			if err := r.bridge.err(); err != nil {
+				return err
+			}
+		}
 		return r.p.appendClaudeSteerMail(ctx, st.attempt, st.message)
 	}
 	return r.appendChecked(ctx, st.message)

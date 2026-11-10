@@ -172,6 +172,7 @@ type embeddedPersistence struct {
 	wake                     *embeddedClaimedWakeScope
 	wakeUsed                 bool
 	wakeFinal                *store.EmbeddedEntry
+	wakeLaterFinalTurn       int64
 	reminderResult           func(context.Context, ai.ToolResultMessage, bool) error
 	goalResult               func(context.Context, ai.ToolResultMessage, bool) error
 	goalInvocation           func(string) *store.EmbeddedGoalInvocation
@@ -638,15 +639,23 @@ func (p *embeddedPersistence) appendMessage(ctx context.Context, message agent.A
 		}
 		if final {
 			if p.wakeFinal != nil {
-				return errors.New("claimed wake final already appended")
+				if p.turnSeq <= p.wakeFinal.Sequence || p.turnSeq <= p.wakeLaterFinalTurn {
+					return errors.New("claimed wake final already appended")
+				}
+				defer func() {
+					if retErr == nil {
+						p.wakeLaterFinalTurn = p.turnSeq
+					}
+				}()
+			} else {
+				key := fmt.Sprintf("root:%s:%s:%d:%s:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.seq+1)
+				entry, err := p.db.AppendEmbeddedRestartWakeFinalAt(ctx, p.binding, p.wake.processGeneration, p.wake.id, p.seq, p.digest, key, body)
+				if err != nil {
+					return err
+				}
+				p.wakeFinal = &entry
+				checkedWakeFinal = &entry
 			}
-			key := fmt.Sprintf("root:%s:%s:%d:%s:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.seq+1)
-			entry, err := p.db.AppendEmbeddedRestartWakeFinalAt(ctx, p.binding, p.wake.processGeneration, p.wake.id, p.seq, p.digest, key, body)
-			if err != nil {
-				return err
-			}
-			p.wakeFinal = &entry
-			checkedWakeFinal = &entry
 		}
 	}
 	if p.mailAttempt != "" {

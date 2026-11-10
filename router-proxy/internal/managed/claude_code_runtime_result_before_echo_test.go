@@ -46,14 +46,11 @@ func fakeUserWrites(t *testing.T, dir string) int {
 	return strings.Count(string(b), `\"type\":\"user\"`)
 }
 
-// A started steered write whose checked echo arrives after the turn's result
-// (the fake queues it until the result, like a late echo from the CLI). The
-// turn's own answer must still succeed. The steered input stays held: no ACK,
-// no release, no second stdin write, and the process that owns it is closed so
-// the late echo can never be consumed by a later execution.
-func TestClaudeRuntimeResultBeforeSteeredEchoHoldsAndClosesProcess(t *testing.T) {
+// A steer echoed after the first result is checked and answered by the next
+// result on the same process; it must not remain held or be sent twice.
+func TestClaudeRuntimeResultBeforeSteeredEchoConsumesMail(t *testing.T) {
 	ctx := context.Background()
-	r, p, pool, cfg := claudeRuntimeFixture(t, `{"turns_by_input":[{"contains":"steer-window-first","steps":[{"text":"partial"},{"barrier":"steer-window"},{"text":"final answer"}]}]}`)
+	r, p, pool, cfg := claudeRuntimeFixture(t, `{"turns_by_input":[{"contains":"steer-window-first","steps":[{"text":"partial"},{"barrier":"steer-window"},{"text":"final answer"}]},{"contains":"late echo","steps":[{"text":"steer answer"}]}]}`)
 	require.NoError(t, p.db.ReconcileManagedRecipientSources(ctx))
 	_, err := p.db.Enqueue(ctx, protocol.Envelope{ID: "late-echo", From: "sender", To: p.binding.AgentID, Body: "late echo", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
 	require.NoError(t, err)
@@ -105,51 +102,28 @@ func TestClaudeRuntimeResultBeforeSteeredEchoHoldsAndClosesProcess(t *testing.T)
 	require.NoError(t, first.err, "a result before the steered echo must not fail the turn")
 	require.NotNil(t, first.outcome)
 	require.Equal(t, ai.StopStop, first.outcome.StopReason)
-	require.Contains(t, r.Snapshot().LastAssistantText, "final answer")
+	require.Equal(t, "steer answer", r.Snapshot().LastAssistantText)
 
-	// Held, not ACKed and not released.
 	held, err := p.db.ClaudeMailHeld(ctx, attempt.MessageID)
 	require.NoError(t, err)
-	require.True(t, held, "a write-started steer without checked echo must stay held")
-	id, err := p.db.NextEmbeddedSteerMail(ctx, p.binding.AgentID)
+	require.False(t, held, "checked late echo must consume the reservation")
+	msg, err := p.db.MessageFor(ctx, attempt.MessageID)
 	require.NoError(t, err)
-	require.Empty(t, id, "held steer must not be offered for redelivery")
-	id, err = p.db.NextEmbeddedMail(ctx, p.binding.AgentID)
+	require.Equal(t, "acknowledged", string(msg.State))
+	id, err := p.db.NextEmbeddedMail(ctx, p.binding.AgentID)
 	require.NoError(t, err)
 	require.Empty(t, id)
-	_, err = p.db.ReserveEmbeddedMail(ctx, p.binding, attempt.MessageID)
-	require.Error(t, err, "held steer must not be re-reserved")
-
-	// The owning process is closed, and nothing else is written for it.
+	require.Equal(t, 2, fakeUserWrites(t, cfg.Cwd), "steer must not be resent")
 	select {
 	case <-proc.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("process that owned the unechoed steer was not closed")
+		t.Fatal("successful late echo must retain its process")
+	default:
 	}
-	require.Error(t, proc.Err())
 	pool.mu.Lock()
 	_, live := pool.entries[p.binding.AgentID]
 	pool.mu.Unlock()
-	require.False(t, live, "closed process must leave the pool")
+	require.True(t, live)
 
-	// A later execution gets a fresh process: the late echo is not read there and
-	// the held input is not written again.
-	nextDone := make(chan error, 1)
-	go func() {
-		_, e := r.Run(ctx, "next")
-		nextDone <- e
-	}()
-	select {
-	case err := <-nextDone:
-		require.NoError(t, err)
-	case <-time.After(15 * time.Second):
-		t.Fatal("later execution did not finish")
-	}
-	require.Equal(t, "fake answer", r.Snapshot().LastAssistantText)
-	require.Equal(t, 3, fakeUserWrites(t, cfg.Cwd), "held steer must not be written again: first, steer, next")
-	held, err = p.db.ClaudeMailHeld(ctx, attempt.MessageID)
-	require.NoError(t, err)
-	require.True(t, held)
 }
 
 // A usage limit reported while a steered write is unechoed must not start the
@@ -202,4 +176,76 @@ func TestClaudeRuntimeUsageLimitWithUnechoedSteerDoesNotRetry(t *testing.T) {
 	_, live := pool.entries[p.binding.AgentID]
 	pool.mu.Unlock()
 	require.False(t, live)
+}
+
+// These cases hold the fake at an explicit boundary until the steer is written.
+func TestClaudeLateSteerFailureRetiresProcess(t *testing.T) {
+	for _, tc := range []struct {
+		name, steps string
+		interrupt   bool
+	}{
+		{"error", `[{"barrier":"failure-window"},{"emit":{"type":"result","subtype":"error_during_execution","result":"failed"}},{"hang":true}]`, false},
+		{"invalid_echo", `[{"barrier":"failure-window"},{"emit":{"type":"result","subtype":"success"}},{"emit":{"type":"user","isReplay":true,"uuid":"wrong-id","message":{"role":"user","content":"wrong"}}},{"hang":true}]`, false},
+		{"cancel", `[{"barrier":"failure-window"},{"wait":"interrupt"}]`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, p, pool, cfg := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns_by_input":[{"contains":"first","steps":%s}]}`, tc.steps))
+			require.NoError(t, p.db.ReconcileManagedRecipientSources(ctx))
+			_, err := p.db.Enqueue(ctx, protocol.Envelope{ID: "pending", From: "sender", To: p.binding.AgentID, Body: "mail", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+			require.NoError(t, err)
+			_, err = p.db.ResolveMessageTarget(ctx, "pending")
+			require.NoError(t, err)
+			attempt, err := p.db.ReserveEmbeddedMail(ctx, p.binding, "pending")
+			require.NoError(t, err)
+			done := make(chan error, 1)
+			go func() { _, e := r.Run(ctx, "first"); done <- e }()
+			invocation := fakeBarrierInvocation(t, cfg.Cwd, "failure-window")
+			require.Eventually(t, r.canSteer, 5*time.Second, time.Millisecond)
+			r.mu.Lock()
+			proc := r.process
+			r.mu.Unlock()
+			outcome, err := r.steerInput(ctx, buildSteerUserMessage(attempt, time.Now().UnixMilli()), attempt, "")
+			require.NoError(t, err)
+			require.Equal(t, claudeSteerAccepted, outcome)
+			require.Eventually(t, func() bool { return fakeUserWrites(t, cfg.Cwd) == 2 }, 5*time.Second, 10*time.Millisecond)
+			require.NoError(t, os.WriteFile(filepath.Join(cfg.Cwd, "barrier-"+invocation), nil, 0600))
+			if tc.interrupt {
+				r.Interrupt()
+			}
+			select {
+			case err = <-done:
+				require.Error(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("turn did not finish")
+			}
+			select {
+			case <-proc.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("process not retired")
+			}
+			held, err := p.db.ClaudeMailHeld(ctx, attempt.MessageID)
+			require.NoError(t, err)
+			require.True(t, held)
+			msg, err := p.db.MessageFor(ctx, attempt.MessageID)
+			require.NoError(t, err)
+			require.NotEqual(t, "acknowledged", string(msg.State))
+			pool.mu.Lock()
+			_, live := pool.entries[p.binding.AgentID]
+			pool.mu.Unlock()
+			require.False(t, live)
+		})
+	}
+}
+
+func TestClaudeLateDeadlineRejectsBufferedEvents(t *testing.T) {
+	p := &ClaudeCodeProcess{events: []ClaudeCodeEvent{{Type: "result"}}}
+	_, err := claudeNextBeforeDeadline(p, context.Background(), time.Now().Add(-time.Second))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Len(t, p.events, 1, "expired deadline must not consume buffered output")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	p = &ClaudeCodeProcess{notify: make(chan struct{}), done: make(chan struct{})}
+	_, err = claudeNextBeforeDeadline(p, ctx, time.Now().Add(20*time.Millisecond))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
