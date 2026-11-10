@@ -1,3 +1,4 @@
+import { test } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -139,9 +140,89 @@ export async function startMockLLMServer(): Promise<MockLLMServer> {
   };
 }
 
+// Builds can be cold on CI. The Playwright budget must include setup as well
+// as the test body; each build adds its own deadline to the active test.
+const DEFAULT_BUILD_TIMEOUT_MS = 300_000;
+const buildBudgets = new WeakMap<object, number>();
+async function buildGo(args: string[], cwd: string, label: string, timeoutMs: number): Promise<void> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("buildTimeoutMs must be positive and finite");
+  try {
+    const info = test.info();
+    const budget = Math.max(info.timeout, buildBudgets.get(info) ?? 0) + timeoutMs + 5_000;
+    buildBudgets.set(info, budget);
+    info.setTimeout(budget);
+  } catch {
+    // The harness is also used outside a Playwright test.
+  }
+  await new Promise<void>((resolve, reject) => {
+    const posix = process.platform !== "win32";
+    const build = spawn("go", args, { cwd, detached: posix, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    let settled = false;
+    build.stderr.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-16384); });
+    // Best effort while the direct child is alive. SIGKILL of the worker, a
+    // signal without an exit event, or descendants leaving the group cannot be
+    // handled here; Windows only terminates the direct child.
+    const terminate = () => {
+      if (!build.pid || build.exitCode !== null || build.signalCode !== null) return;
+      try { if (posix) process.kill(-build.pid, "SIGKILL"); else build.kill("SIGKILL"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") console.error(`${label} build termination failed:`, error); }
+    };
+    process.on("exit", terminate);
+    const cleanup = () => {
+      clearTimeout(timer);
+      process.removeListener("exit", terminate);
+    };
+    const timer = setTimeout(() => {
+      settled = true;
+      terminate();
+      // A descendant outside the group may still hold stderr, and an exited
+      // leader's process group cannot safely be signalled. Never await close.
+      build.stderr.destroy();
+      cleanup();
+      reject(new Error(`${label} build timed out after ${timeoutMs}ms${stderr ? `: ${stderr}` : ""}`));
+    }, timeoutMs);
+    build.once("error", error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`${label} build failed to start: ${error.message}`));
+    });
+    build.once("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (code === 0) resolve();
+      else reject(new Error(`${label} build failed (${code ?? signal}): ${stderr}`));
+    });
+  });
+}
+
+// Join the executable, not its stdio: descendants may inherit the pipes.
+async function stopRouterChild(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    child.stdout?.destroy(); child.stderr?.destroy();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const finish = (error?: Error) => {
+      clearTimeout(escalation); clearTimeout(deadline);
+      child.removeListener("exit", onExit);
+      child.stdout?.destroy(); child.stderr?.destroy();
+      error ? reject(error) : resolve();
+    };
+    const onExit = () => finish();
+    child.once("exit", onExit);
+    const escalation = setTimeout(() => child.kill("SIGKILL"), 2000);
+    const deadline = setTimeout(() => finish(new Error("Isolated router did not exit after SIGKILL")), 5000);
+    child.kill(signal);
+  });
+}
+
 export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
+  buildTimeoutMs?: number;
   testClock?: boolean;
   embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string; omitGoogle?: boolean };
   codexCredentialPath?: string;
@@ -167,19 +248,8 @@ export async function startIsolatedRouter(options: {
   const routerProxyDir = join(options.repoRoot, "router-proxy");
   const binaryPath = join(root, "mailbox-router");
 
-  // Compile router binary into the temporary directory for isolation
-  await new Promise<void>((res, rej) => {
-    const cp = spawn("go", ["build", ...(options.embedded ? [`-tags=embedded_restart_test_only${options.capacityFixture ? ",claude_capacity_test_only" : ""}${options.mcpQueueFixture ? ",claude_mcp_queue_test_only" : ""}`] : []), "-o", binaryPath, "./cmd/mailbox-router"], {
-      cwd: routerProxyDir,
-      stdio: "pipe",
-    });
-    let buildStderr = "";
-    cp.stderr.on("data", chunk => { buildStderr = (buildStderr + String(chunk)).slice(-16384); });
-    cp.on("close", (code) => {
-      if (code === 0) res();
-      else rej(new Error(`Failed to compile mailbox-router, code ${code}: ${buildStderr}`));
-    });
-  });
+  // Compile router binary into the temporary directory for isolation.
+  await buildGo(["build", ...(options.embedded ? [`-tags=embedded_restart_test_only${options.capacityFixture ? ",claude_capacity_test_only" : ""}${options.mcpQueueFixture ? ",claude_mcp_queue_test_only" : ""}`] : []), "-o", binaryPath, "./cmd/mailbox-router"], routerProxyDir, "mailbox-router", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
 
   const isManaged = options.managed ?? false;
   const args = [
@@ -321,16 +391,8 @@ export async function startIsolatedRouter(options: {
       MECHA_MANAGED_ROOT_CONTROL_HOME: join(root, "managed-home"), MECHA_TEST_ROOT_CONTROL: root,
       MECHA_TEST_ROOT_MANIFEST: join(options.repoRoot, "router/contract/managed-tools-v1.json") };
   }
-  // Stop the executable itself, not a launcher, and join its close event before
-  // reopening SQLite or removing the fixture. Escalation is bounded and joined.
-  const stop = async () => {
-    const child = ownedChild;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
-    child.kill("SIGTERM");
-    const escalation = setTimeout(() => child.kill("SIGKILL"), 2000);
-    try { await closed; } finally { clearTimeout(escalation); }
-  };
+  // Join the executable before reopening SQLite or removing its fixture.
+  const stop = async () => { if (ownedChild) await stopRouterChild(ownedChild); };
   let readinessStderr = "";
   let capturedStderr = "";
   const launch = async () => {
@@ -350,10 +412,8 @@ export async function startIsolatedRouter(options: {
       const timeout = setTimeout(() => {
         if (!settled) {
           settled = true;
-          // A Go stack dump makes a blocked startup actionable; close still
-          // joins the actual executable before deleting its disposable root.
           child.kill("SIGQUIT");
-          child.once("close", () => rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`)));
+          rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
         }
       }, options.embedded ? 45_000 : 15_000);
 
@@ -380,7 +440,10 @@ export async function startIsolatedRouter(options: {
         }
       });
 
-      child.once("close", (code) => {
+      child.once("error", error => {
+        if (!settled) { settled = true; clearTimeout(timeout); rej(error); }
+      });
+      child.once("exit", (code) => {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
@@ -424,24 +487,26 @@ export async function startIsolatedRouter(options: {
       await stop();
       // Upgrade fixtures may replace SQLite only after its owning process exits.
       if (prepareDatabase) await prepareDatabase(databasePath);
-      try { await launch(); } catch (error) { await stop(); throw error; }
+      try { await launch(); } catch (error) { await cleanupAll([stop], [error]); throw error; }
     },
     advanceClock,
     close: () => {
       closing ??= (async () => {
-        await stop();
-        await rm(root, { recursive: true, force: true });
+        await cleanupAll([async () => {
+          const errors: unknown[] = [];
+          try { await stop(); } catch (error) { errors.push(error); }
+          await cleanupAll([() => rm(root, { recursive: true, force: true })], errors);
+        }]);
       })();
       return closing;
     },
   };
   } catch (error) {
-    if (ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null) {
-      const closed = new Promise<void>(resolve => ownedChild!.once("close", () => resolve()));
-      ownedChild.kill("SIGKILL");
-      await closed;
-    }
-    await rm(root, { recursive: true, force: true });
+    const errors: unknown[] = [error];
+    try {
+      if (ownedChild) await stopRouterChild(ownedChild, "SIGKILL");
+    } catch (cleanupError) { errors.push(cleanupError); }
+    await cleanupAll([() => rm(root, { recursive: true, force: true })], errors);
     throw error;
   }
 }
@@ -449,33 +514,23 @@ export async function startIsolatedRouter(options: {
 export async function startRouterProxy(options: {
   repoRoot: string;
   upstreamPort: number;
+  buildTimeoutMs?: number;
   onSpawn?: (child: ChildProcess) => void;
 }): Promise<IsolatedProxy> {
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-proxy-"));
   let child: ChildProcess | undefined;
-  let closed: Promise<void> | undefined;
-  const stop = async () => {
-    if (!child || !closed) return;
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      const timer = setTimeout(() => child?.kill("SIGKILL"), 2000);
-      try { await closed; } finally { clearTimeout(timer); }
-    } else await closed;
+  const stop = async () => { if (child) await stopRouterChild(child); };
+  const cleanup = async () => {
+    const errors: unknown[] = [];
+    try { await stop(); } catch (error) { errors.push(error); }
+    await cleanupAll([() => rm(root, { recursive: true, force: true })], errors);
   };
-  const cleanup = async () => { await stop(); await rm(root, { recursive: true, force: true }); };
   try {
     const binary = join(root, "router-proxy");
-    await new Promise<void>((res, rej) => {
-      const build = spawn("go", ["build", "-o", binary, "./"], { cwd: join(options.repoRoot, "router-proxy"), stdio: ["ignore", "ignore", "pipe"] });
-      let stderr = "";
-      build.stderr.on("data", chunk => { stderr += String(chunk); });
-      build.once("error", rej);
-      build.once("close", code => code === 0 ? res() : rej(new Error(`Proxy build failed (${code}): ${stderr}`)));
-    });
+    await buildGo(["build", "-o", binary, "./"], join(options.repoRoot, "router-proxy"), "Proxy", options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS);
     const port = await allocatePort();
     child = spawn(binary, ["--upstream-host", "127.0.0.1", "--upstream-port", String(options.upstreamPort), "--listen-port", String(port), "--listen-host", "127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"] });
     const processChild = child;
-    closed = new Promise(resolve => processChild.once("close", () => resolve()));
     await new Promise<void>((res, rej) => {
       let stdout = "", stderr = "", settled = false;
       const finish = (error?: Error) => {
@@ -488,13 +543,13 @@ export async function startRouterProxy(options: {
       processChild.stdout!.on("data", chunk => { stdout += String(chunk); if (stdout.includes("MECHA_ROUTER_PROXY_READY")) finish(); });
       processChild.stderr!.on("data", chunk => { stderr += String(chunk); });
       processChild.once("error", error => finish(error));
-      processChild.once("close", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
+      processChild.once("exit", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
       options.onSpawn?.(processChild);
     });
     let closing: Promise<void> | undefined;
     return { port, url: `http://127.0.0.1:${port}`, process: processChild, close: () => closing ??= cleanup() };
   } catch (error) {
-    await cleanup();
+    await cleanupAll([cleanup], [error]);
     throw error;
   }
 }
@@ -555,6 +610,14 @@ export async function serveFrontendDist(distDir: string): Promise<IsolatedFronte
   };
 }
 
+// Run every cleanup even if another throws synchronously or rejects.
+async function cleanupAll(actions: Array<() => Promise<void>>, primaryErrors: unknown[] = []): Promise<void> {
+  const results = await Promise.allSettled(actions.map(action => Promise.resolve().then(action)));
+  const errors = [...primaryErrors, ...results.flatMap(result => result.status === "rejected" ? [result.reason] : [])];
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Harness setup or cleanup failed");
+}
+
 export async function setupE2EHarness(options?: {
   useProxy?: boolean;
   managed?: boolean;
@@ -571,33 +634,45 @@ export async function setupE2EHarness(options?: {
     throw new Error("Frontend dist/index.html not found. Run 'npm --prefix web/router-ui-react run build' first.");
   }
 
-  const [mockLLM, router, frontend] = await Promise.all([
+  const started = await Promise.allSettled([
     startMockLLMServer(),
     startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock, codexCredentialPath: options?.codexCredentialPath, backgroundExpiryInterval: options?.backgroundExpiryInterval }),
     serveFrontendDist(distDir),
-  ]);
-
-  let proxy: IsolatedProxy | undefined;
-  if (options?.useProxy) {
-    proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
+  ] as const);
+  const [mockResult, routerResult, frontendResult] = started;
+  if (mockResult.status === "rejected" || routerResult.status === "rejected" || frontendResult.status === "rejected") {
+    await cleanupAll(
+      started.flatMap(result => result.status === "fulfilled" ? [() => result.value.close()] : []),
+      started.flatMap(result => result.status === "rejected" ? [result.reason] : []),
+    );
+    throw new Error("Harness setup failed");
   }
+  const mockLLM = mockResult.value;
+  const router = routerResult.value;
+  const frontend = frontendResult.value;
+  let proxy: IsolatedProxy | undefined;
+  try {
+    if (options?.useProxy) {
+      proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
+    }
 
-  return {
-    root: router.root,
-    router,
-    proxy,
-    mockLLM,
-    frontend,
-    advanceClock: (deltaMs: number) => router.advanceClock(deltaMs),
-    close: async () => {
-      await Promise.allSettled([
-        proxy ? proxy.close() : Promise.resolve(),
-        router.close(),
-        mockLLM.close(),
-        frontend.close(),
-      ]);
-    },
-  };
+    return {
+      root: router.root,
+      router,
+      proxy,
+      mockLLM,
+      frontend,
+      advanceClock: (deltaMs: number) => router.advanceClock(deltaMs),
+      close: async () => {
+        await cleanupAll([
+          ...(proxy ? [() => proxy!.close()] : []), () => router.close(), () => mockLLM.close(), () => frontend.close(),
+        ]);
+      },
+    };
+  } catch (error) {
+    await cleanupAll([() => router.close(), () => mockLLM.close(), () => frontend.close()], [error]);
+    throw error;
+  }
 }
 
 // Real embedded provider boundary shared by the session/goal regression slices.

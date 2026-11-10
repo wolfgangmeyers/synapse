@@ -342,6 +342,7 @@ Portable JSON bundle format used for export, import, git-sync, and programmatic 
       "entry_text": "string (max 65536 chars, instructions injected on state entry)",
       "is_entry_state": false,
       "allow_exit": false,
+      "allow_implicit_return": false,
       "allowed_tools": ["string"],
       "reminders": [
         {
@@ -382,6 +383,8 @@ Portable JSON bundle format used for export, import, git-sync, and programmatic 
   ]
 }
 ```
+
+`allow_implicit_return` is an optional per-state boolean; if omitted, it defaults to `false`. When enabled, the agent may return to its immediately previous state without an explicit reverse edge, provided that state exists, differs from the current state, and belongs to the active workflow. The runtime predecessor is not part of the bundle. Older consumers may not understand or preserve this field; forward compatibility is not guaranteed.
 
 ### Text Interpolation Rules
 

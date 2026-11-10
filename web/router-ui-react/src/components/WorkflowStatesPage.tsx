@@ -43,6 +43,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [formAllowedTools, setFormAllowedTools] = useState<string[]>([]);
   const [formTransitions, setFormTransitions] = useState<WorkflowTransitionConfig[]>([]);
   const [formAllowExit, setFormAllowExit] = useState(true);
+  const [formAllowImplicitReturn, setFormAllowImplicitReturn] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | undefined>(undefined);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | undefined>(undefined);
@@ -81,6 +82,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormAllowedTools([]);
     setFormTransitions([]);
     setFormAllowExit(true);
+    setFormAllowImplicitReturn(false);
     setFormError(undefined);
     setIsCreating(true);
   };
@@ -96,6 +98,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormAllowedTools(hasRestrictions ? [...(state.allowed_tools ?? [])] : []);
     setFormTransitions(state.transitions ? state.transitions.map((t) => ({ ...t })) : []);
     setFormAllowExit(state.allow_exit !== false);
+    setFormAllowImplicitReturn(state.allow_implicit_return === true);
     setFormError(undefined);
     setIsCreating(false);
   };
@@ -253,6 +256,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       allowed_tools: formAllToolsAllowed ? [] : formAllowedTools,
       transitions: validTransitions,
       allow_exit: formAllowExit,
+      allow_implicit_return: formAllowImplicitReturn,
       ...(editingState?.monitors ? { monitors: editingState.monitors } : {}),
       reminders: formReminders.map((r) => ({
         id: r.id,
@@ -711,6 +715,20 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                 <span className="goal-toggle-thumb">
                   <span className="goal-toggle-state">{formAllowExit ? "ON" : "OFF"}</span>
                 </span>
+              </span>
+            </button>
+          </div>
+
+          <div className="workflow-exit-section">
+            <button type="button" className="goal-toggle workflow-tool-master-toggle"
+              aria-label="Allow implicit return" aria-pressed={formAllowImplicitReturn}
+              onClick={() => setFormAllowImplicitReturn(!formAllowImplicitReturn)}>
+              <div className="workflow-master-toggle-text">
+                <span className="goal-toggle-label">Allow implicit return</span>
+                <span className="workflow-toggle-subtext">Allows return to the immediately previous state only if it still exists, is different from this state, and belongs to the active workflow.</span>
+              </div>
+              <span className="goal-toggle-track" aria-hidden="true">
+                <span className="goal-toggle-thumb"><span className="goal-toggle-state">{formAllowImplicitReturn ? "ON" : "OFF"}</span></span>
               </span>
             </button>
           </div>

@@ -755,6 +755,7 @@ func embeddedWorkflowStateSaveSchema() *ai.Schema {
 		ai.Opt("monitors", ai.ArrayOf(&ai.Schema{Type: "object", Description: "State monitor config object."}, "State monitor configs.")),
 		ai.Opt("allowed_tools", ai.ArrayOf(ai.String(), "Allowed tool names list.")),
 		ai.Opt("transitions", ai.ArrayOf(&ai.Schema{Type: "object", Description: "State transition config object."}, "Transition configs list.")),
+		ai.Opt("allow_implicit_return", ai.Boolean("Allow returning to the immediately previous state when available.")),
 		ai.Opt("allow_exit", ai.Boolean("Whether exiting workflow is allowed from this state.")),
 		ai.Opt("ui_pos_x", ai.Number("UI X position.")),
 		ai.Opt("ui_pos_y", ai.Number("UI Y position.")),
@@ -838,6 +839,10 @@ func (m *Manager) embeddedWorkflowStateSaveTool(owner embeddedOwner) agent.Agent
 			if entry, ok := args["entry_text"].(string); ok {
 				req.EntryText = entry
 			}
+			if value, ok := args["allow_implicit_return"].(bool); ok {
+				req.AllowImplicitReturn = &value
+			}
+
 			if allowExit, ok := args["allow_exit"].(bool); ok {
 				req.AllowExit = &allowExit
 			}
