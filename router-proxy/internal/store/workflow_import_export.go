@@ -17,18 +17,19 @@ type WorkflowTransitionExport struct {
 
 // WorkflowStateExport models an exported workflow state.
 type WorkflowStateExport struct {
-	Key          string                     `json:"key"`
-	Name         string                     `json:"name"`
-	Description  string                     `json:"description"`
-	EntryText    string                     `json:"entry_text"`
-	IsEntryState bool                       `json:"is_entry_state"`
-	AllowExit    bool                       `json:"allow_exit"`
-	AllowedTools []string                   `json:"allowed_tools"`
-	Reminders    []WorkflowReminderConfig   `json:"reminders"`
-	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
-	UIPosX       float64                    `json:"ui_pos_x"`
-	UIPosY       float64                    `json:"ui_pos_y"`
-	Transitions  []WorkflowTransitionExport `json:"transitions"`
+	Key                 string                     `json:"key"`
+	Name                string                     `json:"name"`
+	Description         string                     `json:"description"`
+	EntryText           string                     `json:"entry_text"`
+	IsEntryState        bool                       `json:"is_entry_state"`
+	AllowExit           bool                       `json:"allow_exit"`
+	AllowImplicitReturn bool                       `json:"allow_implicit_return"`
+	AllowedTools        []string                   `json:"allowed_tools"`
+	Reminders           []WorkflowReminderConfig   `json:"reminders"`
+	Monitors            []WorkflowMonitorConfig    `json:"monitors"`
+	UIPosX              float64                    `json:"ui_pos_x"`
+	UIPosY              float64                    `json:"ui_pos_y"`
+	Transitions         []WorkflowTransitionExport `json:"transitions"`
 }
 
 // WorkflowInfoExport models workflow metadata.
@@ -217,8 +218,8 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 					allowExitInt = 0
 				}
 
-				_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+				_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, allow_implicit_return, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.AllowImplicitReturn, st.UIPosX, st.UIPosY, now, now)
 				if err != nil {
 					return fmt.Errorf("insert workflow state %s: %w", st.Name, err)
 				}
@@ -298,18 +299,19 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 		}
 
 		exportedStates = append(exportedStates, WorkflowStateExport{
-			Key:          key,
-			Name:         st.Name,
-			Description:  st.Description,
-			EntryText:    st.EntryText,
-			IsEntryState: isEntry,
-			AllowExit:    st.AllowExit,
-			AllowedTools: allowedTools,
-			Reminders:    reminders,
-			Monitors:     monitors,
-			UIPosX:       st.UIPosX,
-			UIPosY:       st.UIPosY,
-			Transitions:  exportedTransitions,
+			Key:                 key,
+			Name:                st.Name,
+			Description:         st.Description,
+			EntryText:           st.EntryText,
+			IsEntryState:        isEntry,
+			AllowExit:           st.AllowExit,
+			AllowImplicitReturn: st.AllowImplicitReturn,
+			AllowedTools:        allowedTools,
+			Reminders:           reminders,
+			Monitors:            monitors,
+			UIPosX:              st.UIPosX,
+			UIPosY:              st.UIPosY,
+			Transitions:         exportedTransitions,
 		})
 	}
 
@@ -703,27 +705,28 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				allowExitInt = 0
 			}
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, allow_implicit_return, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.AllowImplicitReturn, st.UIPosX, st.UIPosY, now, now)
 			if err != nil {
 				return err
 			}
 
 			createdStates = append(createdStates, WorkflowState{
-				ID:           newStateID,
-				WorkflowID:   &newWfID,
-				Name:         st.Name,
-				Description:  st.Description,
-				EntryText:    st.EntryText,
-				Reminders:    st.Reminders,
-				Monitors:     monitorsCopy,
-				AllowedTools: sanitizedTools,
-				Transitions:  remappedTransitions,
-				AllowExit:    st.AllowExit,
-				UIPosX:       st.UIPosX,
-				UIPosY:       st.UIPosY,
-				CreatedAt:    now,
-				UpdatedAt:    now,
+				ID:                  newStateID,
+				WorkflowID:          &newWfID,
+				Name:                st.Name,
+				Description:         st.Description,
+				EntryText:           st.EntryText,
+				Reminders:           st.Reminders,
+				Monitors:            monitorsCopy,
+				AllowedTools:        sanitizedTools,
+				Transitions:         remappedTransitions,
+				AllowExit:           st.AllowExit,
+				AllowImplicitReturn: st.AllowImplicitReturn,
+				UIPosX:              st.UIPosX,
+				UIPosY:              st.UIPosY,
+				CreatedAt:           now,
+				UpdatedAt:           now,
 			})
 		}
 

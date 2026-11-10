@@ -264,10 +264,18 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       return !hasOutgoing && !canExit;
     });
 
-    if (deadEnds.length > 0) {
+    const definiteDeadEnds = deadEnds.filter((s) => !s.allow_implicit_return);
+    const conditionalDeadEnds = deadEnds.filter((s) => s.allow_implicit_return);
+    if (definiteDeadEnds.length > 0) {
       issues.push({
         type: "danger",
-        message: `Dead-end state(s) without exit permission: ${deadEnds.map((s) => s.name).join(", ")}. Agents will get trapped here.`,
+        message: `Dead-end state(s) without exit permission: ${definiteDeadEnds.map((s) => s.name).join(", ")}. Agents will get trapped here.`,
+      });
+    }
+    if (conditionalDeadEnds.length > 0) {
+      issues.push({
+        type: "danger",
+        message: `State(s) without outgoing edges or exit permission: ${conditionalDeadEnds.map((s) => s.name).join(", ")}. Implicit return to the previous state is available only when a valid previous state exists; agents may get trapped.`,
       });
     }
 
@@ -505,6 +513,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       monitors: updatedState.monitors,
       allowed_tools: updatedState.allowed_tools,
       allow_exit: updatedState.allow_exit,
+      allow_implicit_return: updatedState.allow_implicit_return,
       transitions: updatedState.transitions,
     });
 

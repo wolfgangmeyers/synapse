@@ -102,18 +102,30 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
 			}
 
+			action, _ := args["action"].(string)
+			reasonStr, _ := args["reason"].(string)
+
 			// Reject subagent callers
 			agentRec, agentErr := m.store.ManagedAgent(ctx, owner.binding.AgentID)
 			if agentErr == nil && agentRec != nil && agentRec.ParentAgentID != "" {
 				return agent.AgentToolResult{}, errors.New("subagents cannot invoke workflow state transitions")
 			}
 
-			action, _ := args["action"].(string)
 			if action != "transition" && action != "exit" {
 				return agent.AgentToolResult{}, errors.New("invalid action: must be 'transition' or 'exit'")
 			}
 
-			currentState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID)
+			snapshot, err := m.store.WorkflowBindingVersion(ctx, owner.binding.AgentID)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			if m.workflowTransitionCapturedTestHook != nil {
+				m.workflowTransitionCapturedTestHook()
+			}
+			if snapshot.StateID == "" {
+				return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
+			}
+			currentState, err := m.store.GetWorkflowState(ctx, snapshot.StateID)
 			if err != nil || currentState == nil {
 				return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
 			}
@@ -123,8 +135,6 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				workflowVars = agentRec.WorkflowVariables
 			}
 
-			reasonStr, _ := args["reason"].(string)
-
 			switch action {
 			case "transition":
 				targetInput, _ := args["target_state"].(string)
@@ -133,55 +143,25 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					return agent.AgentToolResult{}, errors.New("target_state is required for 'transition' action")
 				}
 
-				if len(currentState.Transitions) == 0 {
-					return agent.AgentToolResult{}, fmt.Errorf("workflow state %q has no outgoing transitions", currentState.Name)
-				}
-
-				// Find matching transition by ID or Name (case-insensitive)
-				var matchedTargetID string
-				var allowedNames []string
-				for _, tr := range currentState.Transitions {
-					targetState, err := m.store.GetWorkflowState(ctx, tr.TargetStateID)
-					targetName := tr.TargetStateID
-					if err == nil && targetState != nil {
-						targetName = targetState.Name
+				targetState, err := m.store.AuthorizeWorkflowTransition(ctx, owner.binding.AgentID, snapshot.Generation, currentState.ID, targetInput)
+				if err != nil {
+					var rejection *store.WorkflowTransitionRejection
+					if errors.As(err, &rejection) {
+						return agent.AgentToolResult{}, err
 					}
-					allowedNames = append(allowedNames, targetName)
-
-					if tr.TargetStateID == targetInput || strings.EqualFold(targetName, targetInput) {
-						matchedTargetID = tr.TargetStateID
-						break
-					}
-				}
-
-				if matchedTargetID == "" {
-					return agent.AgentToolResult{}, fmt.Errorf("transition to %q is not permitted from state %q (allowed targets: %s)", targetInput, currentState.Name, strings.Join(allowedNames, ", "))
-				}
-
-				targetState, err := m.store.GetWorkflowState(ctx, matchedTargetID)
-				if err != nil || targetState == nil {
-					return agent.AgentToolResult{}, fmt.Errorf("target workflow state %q not found", matchedTargetID)
-				}
-
-				// Cleanup old reminders and monitors
-				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
-				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
-
-				// Transition to new state (preserving existing workflow ID and variables)
-				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, &targetState.ID); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
 				}
+
+				// Effects only run after the authorized durable transition succeeds.
+				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
+				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
 				m.retireEmbeddedGoalTimer(owner.binding.AgentID)
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
+				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState, workflowVars)
+				_ = m.SpawnWorkflowStateMonitors(ctx, owner.binding.AgentID, targetState, workflowVars)
 
 				// On state transition: do NOT wipe, rewrite, or deactivate the goal.
 				// The implicit workflow goal remains active and locked.
-
-				// Spawn new reminders
-				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState, workflowVars)
-
-				// Spawn new monitors
-				_ = m.SpawnWorkflowStateMonitors(ctx, owner.binding.AgentID, targetState, workflowVars)
 
 				// Record history presentation
 				eventKey := fmt.Sprintf("workflow-transition:%s:%s:%s:%s", owner.binding.AgentID, currentState.ID, targetState.ID, id)
@@ -213,7 +193,11 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				}
 
 				// Construct synchronous response with the new state's guidance
-				guidance := formatWorkflowStateGuidance(ctx, m.store, targetState, workflowVars)
+				guidanceState, guidanceErr := m.store.WorkflowStateForGuidance(ctx, owner.binding.AgentID, targetState)
+				if guidanceErr != nil {
+					guidanceState = targetState
+				}
+				guidance := formatWorkflowStateGuidance(ctx, m.store, guidanceState, workflowVars)
 				resultText := fmt.Sprintf("Successfully transitioned to workflow state: %s.\n\n%s", targetState.Name, guidance)
 				return agent.AgentToolResult{
 					Content: []ai.Content{ai.TextContent{Text: resultText}},
@@ -223,12 +207,8 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if !currentState.AllowExit {
 					return agent.AgentToolResult{}, fmt.Errorf("workflow exit is not permitted from state %q (locked state; must transition to an exit-eligible state first)", currentState.Name)
 				}
-
-				// Cleanup reminders and monitors
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
 				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
-
-				// Deactivate state and clear active workflow and variables
 				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}

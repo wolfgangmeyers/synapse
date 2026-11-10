@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { startIsolatedRouter, startRouterProxy, serveFrontendDist, type IsolatedRouter, type IsolatedProxy, type IsolatedFrontend } from "./harness";
 
-export type Reply = { tool: string; args: object } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { failure: 503; evaluation: true; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { hold: true };
+export type Reply = ({ tool: string; args: object } | { tools: { tool: string; args: object }[] } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { failure: 503; evaluation: true; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { hold: true }) & { ownsRequest?: (request: Record<string, unknown>) => boolean };
 export const model = { provider: "openai-codex", id: "gpt-6.1-terra" };
 
 // ResolveModel bypasses the worker resolver for Claude evaluations. Only this
@@ -29,11 +29,20 @@ export function assertLocalEvaluatorDefault(path: string, body?: object) {
 export async function closeWorkflowProxyChild(proxy: IsolatedProxy | undefined) {
   if (!proxy?.process.pid || proxy.process.exitCode !== null) return;
   let children = "";
-  try { children = execFileSync("ps", ["-o", "pid=", "--ppid", String(proxy.process.pid)], { encoding: "utf8" }).trim(); }
+  try { children = execFileSync("ps", ["-o", "pid=", "--ppid", String(proxy.process.pid)], { encoding: "utf8", timeout: 3000 }).trim(); }
   catch (e) { if (e.status !== 1) throw e; }
   for (const pid of children.split(/\s+/).filter(Boolean)) {
     try { process.kill(Number(pid), "SIGTERM"); } catch (e) { if (e.code !== "ESRCH") throw e; }
   }
+}
+
+// Keep startup failures visible even when teardown also fails.
+export async function closeAfterWorkflowStartupFailure(error: unknown, close: () => Promise<void>): Promise<never> {
+  try { await close(); }
+  catch (cleanupError) {
+    throw new AggregateError([error, cleanupError], "workflow fixture startup and shutdown failed", { cause: error });
+  }
+  throw error;
 }
 
 // Only the provider boundary is mocked. Every response must be explicitly queued;
@@ -58,16 +67,24 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   const requests: Record<string, unknown>[] = [];
   const violations: string[] = [];
   const replies: Reply[] = [...(options.initialReplies ?? [])];
+  // Optional, explicitly owned interleavings; unmatched requests still fail closed.
+  const interleavedReplies: Reply[] = [];
+  // Persistent reservations prevent exhausted optional scripts from consuming ordinary replies.
+  const interleavedOwners: ((request: Record<string, unknown>) => boolean)[] = [];
   const wsFrames: string[] = [];
   const held: ServerResponse[] = [];
   let fixture: { advance(ms: number): Promise<unknown> } | undefined;
+  const handlers = new Set<Promise<void>>();
+  let stopHandlers!: () => void;
+  const shutdown = new Promise<void>(resolve => { stopHandlers = resolve; });
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", chunk => {
       body += chunk;
       if (Buffer.byteLength(body) > 2 * 1024 * 1024) { violations.push("body limit"); req.destroy(); }
     });
-    req.on("end", async () => {
+    req.on("end", () => {
+      const handler = (async () => {
       if (req.method !== "POST" || req.url !== "/codex/responses" || requests.length >= 128) {
         violations.push(`unexpected route ${req.method} ${req.url}`); res.writeHead(400).end(); return;
       }
@@ -76,19 +93,31 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
       }
       const parsed = JSON.parse(body);
       requests.push(parsed);
-      const reply = replies.shift();
+      const requestNumber = requests.length;
+      const interleaved = interleavedReplies[0]?.ownsRequest?.(parsed) === true;
+      if (!interleaved && interleavedOwners.some(owns => owns(parsed))) {
+        violations.push(`unexpected owned provider request ${requests.length}: ${JSON.stringify(parsed)}`);
+        res.writeHead(400).end(); return;
+      }
+      const queue = interleaved ? interleavedReplies : replies;
+      const reply = queue[0];
+      if (reply?.ownsRequest && !reply.ownsRequest(parsed)) {
+        violations.push(`unowned provider request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
+        res.writeHead(400).end(); return;
+      }
+      if (reply) queue.shift();
       const isEvaluation = typeof parsed.instructions === "string" && parsed.instructions.toLowerCase().startsWith("goal:");
       if (reply && (("evaluation" in reply && reply.evaluation === true) !== isEvaluation)) {
         violations.push(`unexpected ${isEvaluation ? "evaluator" : "worker"} request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
         res.writeHead(400).end(); return;
       }
       if (!reply || parsed.model !== (options.expectedCodexModels?.[requests.length - 1] ?? options.expectedCodexModel ?? model.id)) {
-        violations.push(`unexpected provider request ${requests.length}: ${parsed.model}`); res.writeHead(400).end(); return;
+        violations.push(`unexpected provider request ${requests.length}: ${JSON.stringify(parsed)}`); res.writeHead(400).end(); return;
       }
       if ("hold" in reply) { held.push(res); return; }
       if (("answer" in reply || "failure" in reply) && reply.barrier) {
         held.push(res);
-        await reply.barrier;
+        await Promise.race([reply.barrier, shutdown]);
         reply.onRelease?.(res.destroyed);
         if (res.destroyed) return;
       }
@@ -98,11 +127,14 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
         return;
       }
       if ("answer" in reply && reply.advanceMS) await fixture!.advance(reply.advanceMS);
-      const id = `response_${requests.length}`;
+      const id = `response_${requestNumber}`;
       const events: object[] = [{ type: "response.created", response: { id } }];
-      if ("tool" in reply) {
-        const item = { type: "function_call", id: `fc_${id}`, call_id: `call_${id}`, name: reply.tool, arguments: JSON.stringify(reply.args) };
-        events.push({ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } }, { type: "response.output_item.done", output_index: 0, item });
+      if ("tool" in reply || "tools" in reply) {
+        const calls = "tools" in reply ? reply.tools : [reply];
+        calls.forEach((call, index) => {
+          const item = { type: "function_call", id: `fc_${id}_${index}`, call_id: `call_${id}_${index}`, name: call.tool, arguments: JSON.stringify(call.args) };
+          events.push({ type: "response.output_item.added", output_index: index, item: { ...item, arguments: "" } }, { type: "response.output_item.done", output_index: index, item });
+        });
       } else {
         const item = { type: "message", id: `msg_${id}`, role: "assistant", content: [] };
         events.push({ type: "response.output_item.added", output_index: 0, item },
@@ -114,6 +146,12 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
       events.push({ type: "response.completed", response: { id, status: "completed" } });
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.end(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(""));
+      })().catch(error => {
+        violations.push(`provider handler error: ${String(error)}`);
+        res.destroy();
+      });
+      handlers.add(handler);
+      void handler.finally(() => handlers.delete(handler));
     });
   });
   await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
@@ -177,15 +215,33 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
     }).slice(0, 65536), { mode: 0o600 });
   };
   const close = async () => {
+    const errors: unknown[] = [];
+    try { await closeWorkflowProxyChild(proxy); } catch (error) { errors.push(error); }
+    for (const res of held) res.destroy();
+    stopHandlers();
+    let resourcesTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await closeWorkflowProxyChild(proxy);
-    } finally {
-      for (const res of held) res.destroy();
-      await Promise.all([proxy?.close(), router?.close(), frontend?.close()]);
-      server.closeAllConnections();
-      await new Promise<void>(r => server.close(() => r()));
-      requests.length = replies.length = held.length = 0;
-    }
+      const results = await Promise.race([
+        Promise.allSettled([proxy?.close(), router?.close(), frontend?.close()]),
+        new Promise<never>((_, reject) => { resourcesTimer = setTimeout(() => reject(Error("router/proxy/frontend shutdown timed out")), 10000); }),
+      ]);
+      for (const result of results) if (result.status === "rejected") errors.push(result.reason);
+    } catch (error) { errors.push(error); }
+    finally { if (resourcesTimer) clearTimeout(resourcesTimer); }
+    server.closeAllConnections();
+    const serverClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => { await serverClosed; while (handlers.size) await Promise.all([...handlers]); })(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error(`provider shutdown timed out with ${handlers.size} active handler(s)`)), 5000); }),
+      ]);
+    } catch (error) { errors.push(error); }
+    finally { if (timer) clearTimeout(timer); }
+    if (violations.length) errors.push(Error(`provider violations: ${JSON.stringify(violations)}`));
+    if (errors.length) throw new AggregateError(errors, "workflow fixture shutdown failed");
+    // Preserve observed traffic and queued replies for post-close assertions.
+    held.length = 0;
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
@@ -195,7 +251,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }
     }, { timeout: 5000 }).toBe(200);
     frontend = await serveFrontendDist(process.env.MECHA_E2E_FRONTEND_DIST || join(repoRoot, "web/router-ui-react/dist"));
-    const f = { router, proxy, frontend, requests, violations, replies, wsFrames, close,
+    const f = { router, proxy, frontend, requests, violations, replies, interleavedReplies, interleavedOwners, wsFrames, close,
       providerUrl: `http://127.0.0.1:${address.port}/codex/responses`,
       releaseHeld() { for (const res of held.splice(0)) res.destroy(); },
       async restart() {
@@ -211,11 +267,11 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
         f.clock += delta;
         return { now: new Date(f.clock).toISOString() };
       },
-      async api(path: string, body?: object, method = body === undefined ? "GET" : "POST") {
+      async api(path: string, body?: object, method = body === undefined ? "GET" : "POST", requestID = randomUUID()) {
         assertLocalEvaluatorDefault(path, body);
         const res = await fetch(proxy!.url + path, {
           method,
-          headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), "X-Request-ID": randomUUID() },
+          headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), "X-Request-ID": requestID },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
         const text = await res.text();
@@ -280,8 +336,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
     try {
       if (checkingModels) await captureReadiness();
     } catch { /* Keep original failure and always remove the disposable DB. */ }
-    finally { await close(); }
-    throw error;
+    return closeAfterWorkflowStartupFailure(error, close);
   }
 }
 export type WorkflowHarness = Awaited<ReturnType<typeof workflowHarness>>;

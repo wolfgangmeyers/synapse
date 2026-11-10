@@ -67,6 +67,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-BACKGROUND-CLEANUP-001` | Background Worker Cleanup (24-hour age sweep; acceptance pending) | `Workflows` | [`background-worker-cleanup.spec.md`](./background-worker-cleanup.spec.md) | `tests/e2e/background-expiry.spec.ts`, `tests/e2e/background-cleanup.spec.ts`, `tests/e2e/background-scheduled-expiry.spec.ts`, `tests/e2e/background-active-retry.spec.ts` (partial) | `Draft` |
 | `SPEC-LIFECYCLE-007` | Deterministic Embedded Own Reminder Delays & Idempotency | `AgentManagement` | [`embedded-own-reminder-delay.spec.md`](./embedded-own-reminder-delay.spec.md) | `router-proxy/internal/store/embedded_own_reminder_test.go` | `Active` |
 | `SPEC-WORKFLOWS-002` | Implicit Workflow Goals & Workflow-Level Snooze | `Workflows` | [`workflow-implicit-goals.spec.md`](./workflow-implicit-goals.spec.md) | `tests/e2e/workflow-implicit-goals.spec.ts` | `Active` |
+| `SPEC-WORKFLOWS-IMPLICIT-RETURN-001` | Implicit Workflow Return to Previous State | `Workflows` | [`workflow-implicit-return.spec.md`](./workflow-implicit-return.spec.md) | `tests/e2e/workflow-implicit-return*.spec.ts` and focused return suites (partial; see spec matrix) | `Draft`; acceptance incomplete |
 | `SPEC-WORKFLOWS-003` | Structured Workflow Schedules & Test Clock | `Workflows` | [`SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md`](./SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
 
 ---

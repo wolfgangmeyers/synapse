@@ -141,6 +141,15 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		allowExit = &ae
 	}
 
+	var implicitReturn *bool
+	if raw, exists := payload["allow_implicit_return"]; exists {
+		var value bool
+		if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		implicitReturn = &value
+	}
+
 	var workflowID *string
 	if raw, exists := payload["workflow_id"]; exists && len(raw) > 0 && string(raw) != "null" {
 		var wID string
@@ -169,16 +178,17 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 	}
 
 	return store.WorkflowStateRequest{
-		WorkflowID:   workflowID,
-		Name:         name,
-		Description:  desc,
-		EntryText:    entryText,
-		Reminders:    reminders,
-		Monitors:     monitors,
-		AllowedTools: allowedTools,
-		Transitions:  transitions,
-		AllowExit:    allowExit,
-		UIPosX:       uiPosX,
-		UIPosY:       uiPosY,
+		WorkflowID:          workflowID,
+		Name:                name,
+		Description:         desc,
+		EntryText:           entryText,
+		Reminders:           reminders,
+		Monitors:            monitors,
+		AllowedTools:        allowedTools,
+		Transitions:         transitions,
+		AllowExit:           allowExit,
+		AllowImplicitReturn: implicitReturn,
+		UIPosX:              uiPosX,
+		UIPosY:              uiPosY,
 	}, nil
 }

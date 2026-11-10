@@ -27,6 +27,7 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
   const [entryText, setEntryText] = useState(state.entry_text ?? "");
   const [makeEntry, setMakeEntry] = useState(isEntry);
   const [allowExit, setAllowExit] = useState(state.allow_exit !== false);
+  const [allowImplicitReturn, setAllowImplicitReturn] = useState(state.allow_implicit_return === true);
 
   const initialRestricted = Boolean(state.allowed_tools && state.allowed_tools.length > 0);
   const [restrictTools, setRestrictTools] = useState(initialRestricted);
@@ -267,6 +268,7 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
         reminders,
         monitors,
         allow_exit: allowExit,
+        allow_implicit_return: allowImplicitReturn,
       };
       await onSave(updated, makeEntry);
       onClose();
@@ -378,6 +380,17 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
               checked={allowExit}
               onChange={(e) => setAllowExit(e.target.checked)}
             />
+            <span className="switch-slider" />
+          </label>
+        </div>
+
+        <div className="toggle-switch-row">
+          <div className="toggle-switch-label">
+            <span className="toggle-switch-title">Allow implicit return</span>
+            <span className="toggle-switch-sub" id="implicit-return-description">Allows return to the immediately previous state only if it still exists, is different from this state, and belongs to the active workflow.</span>
+          </div>
+          <label className="switch-toggle" aria-label="Allow implicit return">
+            <input type="checkbox" checked={allowImplicitReturn} onChange={(e) => setAllowImplicitReturn(e.target.checked)} aria-describedby="implicit-return-description" />
             <span className="switch-slider" />
           </label>
         </div>
