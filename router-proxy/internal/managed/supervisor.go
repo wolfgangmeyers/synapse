@@ -457,6 +457,7 @@ type managedBinding struct {
 }
 
 type Manager struct {
+	workflowTransitionCapturedTestHook func()
 	// Test hook set before admission; nil in production.
 	subagentAdmissionTestHook func()
 

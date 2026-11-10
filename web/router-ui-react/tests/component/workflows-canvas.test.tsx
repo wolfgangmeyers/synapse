@@ -300,6 +300,27 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
     unmount();
   });
 
+  it("saves the implicit return setting through the canvas and shows conditional dead-end guidance without adding an edge (IR-002, IR-011)", async () => {
+    const user = userEvent.setup();
+    const states = [{ ...mockStates[0], transitions: [], allow_implicit_return: true }];
+    const update = vi.fn().mockResolvedValue({});
+    const client = {
+      getWorkflow: vi.fn().mockResolvedValue({ workflow: mockWorkflows[0], states }),
+      updateWorkflowState: update,
+      updateWorkflowLayout: vi.fn().mockResolvedValue(undefined),
+      workflowTools: vi.fn().mockResolvedValue({ tools: [] }),
+    } as unknown as RouterHttpClient;
+    const view = render(<WorkflowCanvas workflowId="wf-1" client={client} onBack={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("config-btn-st-1")).toBeDefined());
+    expect(screen.getByTestId("mock-edges").children.length).toBe(0);
+    expect(screen.getByText(/return.*previous state.*only.*exists/i)).toBeDefined();
+    await user.click(screen.getByTestId("config-btn-st-1"));
+    await user.click(screen.getByRole("checkbox", { name: /allow implicit return/i }));
+    await user.click(screen.getByRole("button", { name: "Save State Settings" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith("st-1", expect.objectContaining({ allow_implicit_return: false })));
+    view.unmount();
+  });
+
   it("opens WorkflowVariablesModal when Variables button is clicked in toolbar", async () => {
     const user = userEvent.setup();
     const updateWorkflowMock = vi.fn().mockResolvedValue({

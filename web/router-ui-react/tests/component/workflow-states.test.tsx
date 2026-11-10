@@ -24,6 +24,34 @@ describe("WorkflowStatesPage", () => {
     },
   ];
 
+  it("creates and edits the per-state implicit return option (IR-001, IR-002)", async () => {
+    const user = userEvent.setup();
+    const create = vi.fn().mockResolvedValue({});
+    const update = vi.fn().mockResolvedValue({});
+    const client = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: [{ ...mockStates[0], allow_implicit_return: true }] }),
+      createWorkflowState: create,
+      updateWorkflowState: update,
+    } as unknown as RouterHttpClient;
+    const view = render(<WorkflowStatesPage client={client} />);
+    await screen.findByText("Planning");
+    await user.click(screen.getByRole("button", { name: /New State/i }));
+    expect(screen.getByText(/immediately previous state.*different.*active workflow/i)).toBeDefined();
+    const toggle = screen.getByRole("button", { name: /allow implicit return/i });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    await user.type(screen.getByLabelText(/State Name \*/i), "New");
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: /Create State/i }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ allow_implicit_return: true })));
+    await user.click(screen.getByRole("button", { name: "Edit state" }));
+    const editToggle = screen.getByRole("button", { name: /allow implicit return/i });
+    expect(editToggle.getAttribute("aria-pressed")).toBe("true");
+    await user.click(editToggle);
+    await user.click(screen.getByRole("button", { name: /Save Changes/i }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith("state-1", expect.objectContaining({ allow_implicit_return: false })));
+    view.unmount();
+  });
+
   it("renders workflow states list and header properly", async () => {
     const mockClient = {
       workflowStates: vi.fn().mockResolvedValue({ workflow_states: mockStates }),

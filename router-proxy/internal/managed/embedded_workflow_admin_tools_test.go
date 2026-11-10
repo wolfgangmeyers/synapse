@@ -16,14 +16,14 @@ import (
 func setupWorkflowAdminToolsFixture(t *testing.T) (*Manager, *store.Store, embeddedOwner, string) {
 	t.Helper()
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "workflow_admin_tools_test.db")
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "workflow_admin_tools_test.db")
 	db, err := store.Open(ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 
-	root := t.TempDir()
 	require.NoError(t, db.SetDefaultModel(ctx, &store.ManagedModel{Provider: "google-vertex", ID: "gemini-3.8-flash"}))
 	mgr, err := NewManager(ManagerOptions{
 		Store:    db,

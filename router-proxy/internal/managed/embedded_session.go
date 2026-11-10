@@ -1432,6 +1432,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	workerPrompt := buildEmbeddedEngineSystemPrompt(role, binding.AgentID, saved.Cwd, saved.SelectedModel.Provider == claudeCodeProvider)
 	if activeWorkflowState != nil {
 		wfVars := saved.WorkflowVariables
+		if guidanceState, err := m.store.WorkflowStateForGuidance(ctx, binding.AgentID, activeWorkflowState); err == nil {
+			activeWorkflowState = guidanceState
+		}
 		if guidance := formatWorkflowStateGuidance(ctx, m.store, activeWorkflowState, wfVars); guidance != "" {
 			workerPrompt = workerPrompt + "\n\n" + guidance
 		}
