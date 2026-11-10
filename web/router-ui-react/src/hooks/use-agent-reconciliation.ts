@@ -10,7 +10,7 @@ export interface AgentReconciliation {
   error?: Error;
   refresh(): Promise<void>;
 }
-export function useAgentReconciliation(transport: RouterTransport, scope?: RouterScope, intervalMs = 3_000): AgentReconciliation {
+export function useAgentReconciliation(transport: RouterTransport, scope?: RouterScope): AgentReconciliation {
   const scopeKey = scope === undefined ? transport.http.routerUrl : `${scope.routerUrl}\u001f${scope.agentId}`;
   const [agents, setAgents] = useState<Agent[]>([]); const [agentsScopeKey, setAgentsScopeKey] = useState(scopeKey); const [ready, setReady] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState<Error | undefined>(); const requestGeneration = useRef(0);
   const refresh = useCallback(async () => {
@@ -21,12 +21,13 @@ export function useAgentReconciliation(transport: RouterTransport, scope?: Route
     const unsubscribe = transport.subscribe((event) => {
       if (event.type !== "agents") return;
       setReady(true);
+      setError(undefined);
       if (scope !== undefined && (transport.http.routerUrl !== scope.routerUrl || event.agents.some((agent) => agent.agent_id === scope.agentId))) { setAgents(event.agents.filter((agent) => agent.agent_id !== scope.agentId)); return; }
       setAgents(event.agents);
     });
-    void refresh(); const timer = setInterval(() => { void refresh(); }, intervalMs);
-    return () => { unsubscribe(); clearInterval(timer); };
-  }, [transport, scopeKey, scope?.routerUrl, scope?.agentId, intervalMs, refresh]);
+    void refresh();
+    return () => { unsubscribe(); };
+  }, [transport, scopeKey, scope?.routerUrl, scope?.agentId, refresh]);
   const scopedError = agentsScopeKey === scopeKey ? error : undefined;
   return { agents: agentsScopeKey === scopeKey ? agents : [], ready: agentsScopeKey === scopeKey && ready, loading, ...(scopedError === undefined ? {} : { error: scopedError }), refresh };
 }

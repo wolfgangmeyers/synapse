@@ -274,6 +274,10 @@ export function SubagentViewerDialog({
     ? subagents.find((s) => s.id === selectedSubagentId) ?? null
     : null;
 
+  // Parent projections may be recreated on every render; only a change in the
+  // active IDs should restart preview reads.
+  const activeSubagentIds = JSON.stringify(subagents.filter((s) => s.status === "running" || s.status === "queued").map((s) => s.id).sort());
+
   // Poll active subagents in list view for last activity preview
   useEffect(() => {
     if (!open || selectedSubagentId !== null || !client) return;
@@ -281,14 +285,12 @@ export function SubagentViewerDialog({
     let active = true;
 
     const pollPreviews = async () => {
-      const activeSubagents = subagents.filter(
-        (s) => s.status === "running" || s.status === "queued",
-      );
+      const activeSubagents: string[] = JSON.parse(activeSubagentIds);
 
       await Promise.all(
-        activeSubagents.map(async (subagent) => {
+        activeSubagents.map(async (subagentId) => {
           try {
-            const res = await client.managedHistory(subagent.id, "complete");
+            const res = await client.managedHistory(subagentId, "complete");
             if (!active) return;
             const entries = res.entries ?? [];
             if (entries.length === 0) return;
@@ -298,8 +300,8 @@ export function SubagentViewerDialog({
               const preview = formatLastActivityPreview(sorted[i]);
               if (preview) {
                 setPreviews((prev) => {
-                  if (prev[subagent.id] === preview) return prev;
-                  return { ...prev, [subagent.id]: preview };
+                  if (prev[subagentId] === preview) return prev;
+                  return { ...prev, [subagentId]: preview };
                 });
                 return;
               }
@@ -315,13 +317,13 @@ export function SubagentViewerDialog({
 
     const intervalId = window.setInterval(() => {
       void pollPreviews();
-    }, 2000);
+    }, 10000);
 
     return () => {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [client, open, selectedSubagentId, subagents]);
+  }, [client, open, selectedSubagentId, activeSubagentIds]);
 
   // Fetch and poll history when a subagent is selected
   useEffect(() => {
