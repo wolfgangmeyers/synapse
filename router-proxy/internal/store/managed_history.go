@@ -2,11 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -572,28 +572,37 @@ func (s *Store) ShouldRecordGoalEvaluation(ctx context.Context, agentID, outcome
 	return true, nil
 }
 
+// lastGoalActivityMatchesReasonTx compares the parsed reason, never raw output.
+func (s *Store) lastGoalActivityMatchesReasonTx(ctx context.Context, agentID, reason string) (bool, error) {
+	var message, content string
+	var storedReason sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT h.message,COALESCE(h.message_content,''),p.reason FROM managed_complete_history h LEFT JOIN embedded_goal_activity_publications p ON p.event_key=h.event_key AND (h.event_key NOT LIKE 'goal-evaluation:%' OR h.event_key LIKE 'goal-evaluation:v2:%') AND (SELECT count(*) FROM embedded_goal_activity_publications p2 WHERE p2.event_key=h.event_key)=1 WHERE h.agent_id=? AND h.category='managed_goal_evaluation' ORDER BY h.sequence DESC LIMIT 1`, agentID).Scan(&message, &content, &storedReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedReason.Valid {
+		content = storedReason.String
+	}
+	return message == "Goal Evaluation • NOT_DONE" && content == reason, nil
+}
+
+// GoalEvaluationActivityKey identifies the durable claim independently of owner changes.
+func GoalEvaluationActivityKey(b EmbeddedBinding, k EmbeddedGoalEvaluationKey) string {
+	identity := fmt.Sprintf("%q:%q:%d:%d:%q:%d:%d:%q", b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest)
+	return fmt.Sprintf("goal-evaluation:v2:%x", sha256.Sum256([]byte(identity)))
+}
+
 // BackfillEmbeddedGoalEvaluations ensures that completed evaluations stored in
 // embedded_goal_evaluations have corresponding rows in managed_complete_history.
-// Redundant repeated NOT_DONE evaluations are pruned/deduplicated so they never flood history.
+// Consecutive identical NOT_DONE evaluations are deduplicated without removing distinct activity.
 func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("store is closed")
-	}
+	return s.runImmediate(ctx, func() error { return s.backfillEmbeddedGoalEvaluationsTx(ctx) })
+}
 
-	// First, prune existing redundant NOT_DONE goal evaluation spam from managed_complete_history
-	// so each agent keeps at most 5 most recent NOT_DONE evaluations, preserving room for all other events.
-	_, _ = s.db.ExecContext(ctx, `
-		DELETE FROM managed_complete_history
-		WHERE category = 'managed_goal_evaluation'
-		  AND (message = 'Goal Evaluation • NOT_DONE' OR message LIKE '%NOT_DONE%')
-		  AND sequence NOT IN (
-		    SELECT sequence FROM managed_complete_history
-		    WHERE category = 'managed_goal_evaluation' AND (message = 'Goal Evaluation • NOT_DONE' OR message LIKE '%NOT_DONE%')
-		    ORDER BY sequence DESC LIMIT 5
-		  )
-	`)
+func (s *Store) backfillEmbeddedGoalEvaluationsTx(ctx context.Context) error {
 
 	var tableExists int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedded_goal_evaluations'`).Scan(&tableExists); err != nil || tableExists == 0 {
@@ -601,10 +610,15 @@ func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT agent_id, user_seq, final_seq, state, reason, COALESCE(completed_at, '')
-		FROM embedded_goal_evaluations
-		WHERE state IN ('DONE', 'NOT_DONE', 'COMPLETED')
-		ORDER BY completed_at ASC
+		SELECT e.agent_id, e.session_id, e.epoch, e.user_seq, e.user_digest, e.goal_revision, e.final_seq, e.final_digest, e.state, e.reason, COALESCE(e.completed_at, '')
+		FROM embedded_goal_evaluations e JOIN managed_agent_policies p ON p.agent_id=e.agent_id
+        JOIN embedded_sessions ses ON ses.agent_id=e.agent_id AND ses.session_id=e.session_id AND ses.epoch=e.epoch AND ses.generation=e.generation AND ses.current=1
+        JOIN managed_agents m ON m.agent_id=e.agent_id AND m.pi_session_id=e.session_id AND m.session_epoch=e.epoch AND m.runtime_generation=e.generation AND m.runtime='embedded' AND m.desired_state='running' AND (m.lifecycle_state='running' OR (m.lifecycle_state='starting' AND EXISTS (SELECT 1 FROM managed_http_operations o WHERE o.operation_id=m.launch_operation_id AND o.state='pending')))
+		WHERE e.state IN ('DONE', 'NOT_DONE', 'COMPLETED') AND e.completed_at IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM embedded_goal_activity_publications a WHERE a.agent_id=e.agent_id AND a.session_id=e.session_id AND a.epoch=e.epoch AND a.user_seq=e.user_seq AND a.user_digest=e.user_digest AND a.goal_revision=e.goal_revision)
+		AND p.desired_revision=e.goal_revision AND p.applied_revision=e.goal_revision AND p.projection_state='applied'
+		AND (p.goal_enabled=1 OR (e.state IN ('DONE','COMPLETED') AND p.goal_enabled=0 AND p.evaluator_state='done' AND p.last_outcome='COMPLETED'))
+		ORDER BY e.completed_at ASC, e.user_seq ASC, e.final_seq ASC, e.session_id ASC, e.epoch ASC, e.user_digest ASC, e.goal_revision ASC
 	`)
 	if err != nil {
 		return err
@@ -612,17 +626,22 @@ func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 	defer rows.Close()
 
 	type evalRecord struct {
-		agentID     string
-		userSeq     int64
-		finalSeq    int64
-		state       string
-		reason      string
-		completedAt string
+		agentID      string
+		sessionID    string
+		epoch        int64
+		userDigest   string
+		goalRevision int64
+		userSeq      int64
+		finalSeq     int64
+		finalDigest  string
+		state        string
+		reason       string
+		completedAt  string
 	}
 	agentRecords := make(map[string][]evalRecord)
 	for rows.Next() {
 		var r evalRecord
-		if err := rows.Scan(&r.agentID, &r.userSeq, &r.finalSeq, &r.state, &r.reason, &r.completedAt); err != nil {
+		if err := rows.Scan(&r.agentID, &r.sessionID, &r.epoch, &r.userSeq, &r.userDigest, &r.goalRevision, &r.finalSeq, &r.finalDigest, &r.state, &r.reason, &r.completedAt); err != nil {
 			return err
 		}
 		agentRecords[r.agentID] = append(agentRecords[r.agentID], r)
@@ -630,30 +649,31 @@ func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 
 	for _, records := range agentRecords {
-		var notDone []evalRecord
-		var done []evalRecord
 		for _, r := range records {
-			if r.state == "NOT_DONE" {
-				notDone = append(notDone, r)
-			} else {
-				done = append(done, r)
+			if r.state == "DONE" {
+				r.state = "COMPLETED"
 			}
-		}
-		// Keep at most the 5 most recent notDone evaluations
-		if len(notDone) > 5 {
-			notDone = notDone[len(notDone)-5:]
-		}
-		var toInsert []evalRecord
-		toInsert = append(toInsert, done...)
-		toInsert = append(toInsert, notDone...)
-		sort.Slice(toInsert, func(i, j int) bool {
-			return toInsert[i].completedAt < toInsert[j].completedAt
-		})
-
-		for _, r := range toInsert {
-			eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", r.agentID, r.userSeq, r.finalSeq, r.state)
+			// Legacy keys omit session and revision, so an existing row cannot
+			// establish that this particular evaluation was published. Migration
+			// 128 already marks all pre-upgrade completed evidence as handled.
+			eventKey := GoalEvaluationActivityKey(EmbeddedBinding{AgentID: r.agentID, SessionID: r.sessionID, Epoch: r.epoch}, EmbeddedGoalEvaluationKey{UserSeq: r.userSeq, UserDigest: r.userDigest, GoalRevision: r.goalRevision, FinalSeq: r.finalSeq, FinalDigest: r.finalDigest})
+			if r.state == "NOT_DONE" {
+				duplicate, err := s.lastGoalActivityMatchesReasonTx(ctx, r.agentID, r.reason)
+				if err != nil {
+					return err
+				}
+				if duplicate {
+					if _, err := s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason) VALUES (?,?,?,?,?,?,?,?)`, r.agentID, r.sessionID, r.epoch, r.userSeq, r.userDigest, r.goalRevision, eventKey, r.reason); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			summary := r.reason
 			if summary == "" {
 				if r.state == "NOT_DONE" {
@@ -681,7 +701,12 @@ func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 				MessageContent: &reasonCopy,
 				OccurredAt:     r.completedAt,
 			}
-			_, _ = s.recordManagedCompleteHistoryTx(ctx, r.agentID, "managed_goal_evaluation", "info", msg, eventKey, presentationJSON, pres, detail)
+			if _, err := s.recordManagedCompleteHistoryTx(ctx, r.agentID, "managed_goal_evaluation", "info", msg, eventKey, presentationJSON, pres, detail); err != nil {
+				return err
+			}
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason) VALUES (?,?,?,?,?,?,?,?)`, r.agentID, r.sessionID, r.epoch, r.userSeq, r.userDigest, r.goalRevision, eventKey, r.reason); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

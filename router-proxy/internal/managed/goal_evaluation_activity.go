@@ -1,7 +1,6 @@
 package managed
 
 import (
-	"fmt"
 	"log"
 	"strings"
 
@@ -25,26 +24,22 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 		summary = summary[:497] + "..."
 	}
 
-	if should, _ := m.store.ShouldRecordGoalEvaluation(m.runCtx, binding.AgentID, outcome, preview); !should {
-		return
-	}
-
 	rawContent := preview
 	if len(details) > 0 && strings.TrimSpace(details[0]) != "" {
 		rawContent = details[0]
 	}
 
-	eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", binding.AgentID, key.UserSeq, key.FinalSeq, outcome)
+	eventKey := store.GoalEvaluationActivityKey(binding, key)
 	pres := &store.ManagedHistoryPresentation{
 		Kind:    "goal_evaluation",
 		Outcome: strings.ToLower(outcome),
 		Summary: summary,
 	}
 	msg := "Goal Evaluation • " + outcome
-	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(m.runCtx, binding.AgentID, "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &rawContent)
+	entry, err := m.store.RecordEmbeddedGoalEvaluationActivity(m.runCtx, binding, key, outcome, reason, msg, eventKey, pres, rawContent)
 	if err != nil {
 		log.Printf("[embedded:%s] Failed to record goal evaluation history (%s): %v", binding.AgentID, eventKey, err)
-	} else {
+	} else if entry.ID != "" {
 		m.publishCompleteHistory(entry)
 	}
 }
