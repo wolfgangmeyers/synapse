@@ -56,17 +56,16 @@ func TestEmbeddedWorkflowSnoozeArguments(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1000), ms)
 
-	// 7. Value above maximum (e.g. 48 hours) clamps to 24 hours (86,400,000ms)
+	// 7. Value above the configured maximum clamps to it.
 	const fortyEightHoursMs = int64(48 * 60 * 60 * 1000)
 	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_ms": fortyEightHoursMs}, 600000)
 	require.NoError(t, err)
-	require.Equal(t, store.EmbeddedGoalSnoozeMaxDurationMS, ms)
-	require.Equal(t, int64(86400000), ms)
+	require.Equal(t, int64(600000), ms)
 
 	const fortyEightHoursMinutes = 48 * 60
 	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": fortyEightHoursMinutes}, 600000)
 	require.NoError(t, err)
-	require.Equal(t, store.EmbeddedGoalSnoozeMaxDurationMS, ms)
+	require.Equal(t, int64(600000), ms)
 
 	// 8. duration_minutes takes precedence over duration_ms
 	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": 10, "duration_ms": 50000}, 600000)
@@ -224,7 +223,7 @@ func TestWorkflowSnoozeStrictNumbers(t *testing.T) {
 	for _, value := range []any{int64(math.MaxInt64), json.Number("9223372036854775807"), float64(1e15)} {
 		_, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": value}, 600000)
 		require.NoError(t, err)
-		require.Equal(t, int64(86400000), ms)
+		require.Equal(t, int64(600000), ms)
 	}
 }
 

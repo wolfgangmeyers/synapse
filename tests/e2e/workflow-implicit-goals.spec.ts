@@ -52,7 +52,7 @@ test.describe("Workflow Implicit Goals & State Modal E2E", () => {
     const snoozeInput = createDialog.locator("#workflow-snooze-input");
     await expect(snoozeInput).toBeVisible();
     await expect(snoozeInput).toHaveValue("10");
-    await expect(createDialog.locator('label[for="workflow-snooze-input"]')).toHaveText("Snooze (minutes)");
+    await expect(createDialog.locator('label[for="workflow-snooze-input"]')).toHaveText("Maximum snooze (minutes)");
 
     // Set custom workflow details
     const workflowName = "E2E Test Workflow " + Date.now();
@@ -397,8 +397,10 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     { label: "minutes precedence", tool: "workflow_snooze", args: { duration_minutes: 2, duration_ms: 900000 }, expected: 120000 },
     { label: "nonpositive defaults", tool: "workflow_snooze", args: { duration_minutes: 0, duration_ms: -1 }, expected: 600000 },
     { label: "minimum", tool: "workflow_snooze", args: { duration_ms: 1 }, expected: 1000 },
-    { label: "maximum", tool: "workflow_snooze", args: { duration_ms: 86400001 }, expected: 86400000 },
-    { label: "representable oversized minutes", tool: "workflow_snooze", args: { duration_minutes: 9007199254740991 }, expected: 86400000 },
+    { label: "configured maximum", tool: "workflow_snooze", args: { duration_ms: 86400001 }, expected: 600000 },
+    { label: "representable oversized minutes", tool: "workflow_snooze", args: { duration_minutes: 9007199254740991 }, expected: 600000 },
+    { label: "equal maximum", tool: "workflow_snooze", args: { duration_ms: 600000 }, expected: 600000 },
+    { label: "alias shorter", tool: "goal_snooze", args: { duration_ms: 120000 }, expected: 120000 },
     { label: "alias default", tool: "goal_snooze", args: {}, expected: 600000 },
     { label: "alias configured cap", tool: "goal_snooze", args: { duration_ms: 86400000 }, expected: 600000 },
   ];
@@ -412,6 +414,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     expect(result.DurationMS).toBe(c.expected);
     expect(f.rows("SELECT snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent)[0].snoozed_until).toBe(result.DueAt);
     const nativeResult = JSON.parse(lastToolOutput(f));
+    expect(nativeResult.guidance).toMatch(/waiting on the user.*explicitly call mecha_blocked/i);
     if (c.tool === "workflow_snooze") expect(nativeResult).toMatchObject({ ok: true, duration_ms: c.expected, workflow: workflow.name, snoozed_until: result.DueAt });
     else expect(nativeResult).toMatchObject({ DurationMS: c.expected, DueAt: result.DueAt });
     expect(result.DueAt).toBe(settled(f, agent)[0].due_at);

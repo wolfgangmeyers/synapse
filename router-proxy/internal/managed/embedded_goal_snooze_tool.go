@@ -193,7 +193,7 @@ func (m *Manager) embeddedGoalSnoozeTool(owner embeddedOwner, turn func() store.
 		if m.embeddedAfterGoalCommit != nil {
 			m.embeddedAfterGoalCommit(ctx)
 		}
-		payload, err := json.Marshal(policy)
+		payload, err := policy.GoalResultJSON()
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}
