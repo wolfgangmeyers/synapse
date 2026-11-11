@@ -1,6 +1,8 @@
 -- The retired RPC extension is optional for embedded launches. Rebuild only
 -- this leaf table: it has no incoming foreign keys or schema-owned triggers.
--- Keep all legacy values, hashes and timestamps unchanged.
+-- The dedicated runner preserves historical orphans while enforcement is off,
+-- then verifies unchanged foreign-key diagnostics and restores enforcement.
+-- Keep all legacy values, row identities, hashes and timestamps unchanged.
 CREATE TABLE managed_launch_recipes_131 (
   agent_id TEXT PRIMARY KEY REFERENCES managed_agents(agent_id) ON DELETE CASCADE,
   pi_executable TEXT NOT NULL CHECK (length(CAST(pi_executable AS BLOB)) BETWEEN 1 AND 4096),
@@ -19,12 +21,12 @@ CREATE TABLE managed_launch_recipes_131 (
   antigravity_extension TEXT NOT NULL DEFAULT '' CHECK (length(CAST(antigravity_extension AS BLOB)) <= 4096)
 );
 INSERT INTO managed_launch_recipes_131 (
-  agent_id, pi_executable, session_root, cwd, provider, model_id,
+  rowid, agent_id, pi_executable, session_root, cwd, provider, model_id,
   mecha_rpc_extension, pi_subagents_extension, cursor_extension,
   test_extensions_json, environment_json, recipe_sha256, created_at, updated_at,
   antigravity_extension
 ) SELECT
-  agent_id, pi_executable, session_root, cwd, provider, model_id,
+  rowid, agent_id, pi_executable, session_root, cwd, provider, model_id,
   mecha_rpc_extension, pi_subagents_extension, cursor_extension,
   test_extensions_json, environment_json, recipe_sha256, created_at, updated_at,
   antigravity_extension
