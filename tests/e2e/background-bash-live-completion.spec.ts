@@ -34,7 +34,7 @@ test("background completion reaches the live projection and selected agent heade
     expect(jobId.length).toBeGreaterThan(0);
     const widget = page.getByRole("region", { name: "Background shell jobs" });
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    const job = widget.locator("li").filter({ hasText: jobId });
+    const job = widget.locator(".background-bash-job-list li").first();
     await expect(job).toContainText("running");
     const beforeCompletion = frames.length;
     await writeFile(release, "release");
@@ -45,6 +45,7 @@ test("background completion reaches the live projection and selected agent heade
       return agents.some((record: { agent_id?: string; background_bash_jobs?: { id: string; status: string }[] }) =>
         record.agent_id === agent && record.background_bash_jobs?.some(item => item.id === jobId && item.status === "succeeded"));
     }), { timeout: 15_000, message: "completion must appear in the UI live WebSocket projection" }).toBe(true);
+    await widget.getByLabel("Filter:").selectOption("completed");
     await expect(job).toContainText("succeeded", { timeout: 15_000 });
     // The browser must never be sent a backwards or same-version agent update
     // while launch and completion snapshots race with other publications.

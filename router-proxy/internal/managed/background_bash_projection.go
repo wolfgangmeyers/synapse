@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -60,7 +61,11 @@ func (m *Manager) backgroundBashJobsContext(ctx context.Context, record *store.M
 func backgroundBashPublicJobs(jobs []BackgroundBashJob) []map[string]string {
 	public := make([]map[string]string, 0, len(jobs))
 	for _, job := range jobs {
-		public = append(public, map[string]string{"id": job.ID, "status": job.Status})
+		item := map[string]string{"id": job.ID, "status": job.Status}
+		if !job.StartedAt.IsZero() {
+			item["started_at"] = job.StartedAt.Format(time.RFC3339Nano)
+		}
+		public = append(public, item)
 	}
 	return public
 }

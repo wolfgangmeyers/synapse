@@ -123,7 +123,8 @@ test("completion, shared polling budget and header activity", async ({ page }) =
     await expect(widget.getByRole("button", { name: /shell jobs 1/i })).toBeVisible();
     await expect(widget.getByText(job.job_id)).toBeHidden();
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    await expect(widget).toContainText(job.job_id);
+    await expect(widget).not.toContainText(job.job_id);
+    await expect(widget).toContainText("Started ");
     await expect(widget).toContainText("running");
     await page.getByRole("button", { name: "Close dialog" }).click();
     await f.configure({ turns: [[
@@ -148,6 +149,7 @@ test("completion, shared polling budget and header activity", async ({ page }) =
     expect(JSON.stringify(reads[3])).toContain("wait for the completion notification or continue other work");
     await writeFile(release, "release");
     await widget.getByRole("button", { name: /shell jobs/i }).click();
+    await widget.getByLabel("Filter:").selectOption("failed");
     await expect(widget).toContainText("failed", { timeout: 10_000 });
     await expect.poll(() => f.rows("SELECT body FROM messages WHERE id=?", `background-bash-completed-${job.job_id}`).map(r => String(r.body)), { timeout: 10_000 }).toEqual([expect.stringContaining("exit code 23")]);
     await expect.poll(async () => JSON.stringify(await f.inputs()), { timeout: 10_000 }).toContain(`Background bash job ${job.job_id} finished: failed (exit code 23)`);
@@ -208,6 +210,7 @@ test("timeout reaches a terminal snapshot", async ({ page }) => {
     await f.final(page, agent, "Timeout job launched");
     const job = checkedResult(f, agent, "launch_background_bash");
     await page.getByRole("region", { name: "Background shell jobs" }).getByRole("button", { name: /shell jobs/i }).click();
+    await page.getByRole("dialog").getByLabel("Filter:").selectOption("failed");
     await expect(page.getByRole("dialog", { name: "Background shell jobs" })).toContainText("timed_out", { timeout: 10_000 });
     await page.getByRole("button", { name: "Close dialog" }).click();
     await f.configure({ turns_by_input: [{ contains: "Inspect timeout", steps: [call("timeout-get", "get_background_bash_job", { job_id: job.job_id }), { text: "Timeout checked" }] }] });
@@ -237,29 +240,30 @@ test("worker header follows live jobs across worker switches", async ({ page }) 
     const firstId = checkedResult(f, first, "launch_background_bash").job_id;
     const widget = page.getByRole("region", { name: "Background shell jobs" });
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    await expect(widget).toContainText(firstId);
+    await expect(widget.locator(".background-bash-job-list li")).toHaveCount(1);
     await page.getByRole("button", { name: "Close dialog" }).click();
     const second = await f.launch(page);
-    await expect(widget).toHaveCount(0);
+    await expect(widget.getByRole("button", { name: /shell jobs 0/i })).toBeVisible();
     await f.configure(script(releaseB, "Second job launched"));
     await f.userTurn(page, "Start second job");
     await f.final(page, second, "Second job launched");
     const secondId = checkedResult(f, second, "launch_background_bash").job_id;
     expect(secondId).not.toBe(firstId);
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    await expect(widget).toContainText(secondId);
+    await expect(widget.locator(".background-bash-job-list li")).toHaveCount(1);
     await expect(widget).not.toContainText(firstId);
     await page.getByRole("button", { name: "Close dialog" }).click();
     await page.locator(`[data-agent-id="${first}"]`).click();
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    await expect(widget).toContainText(firstId);
+    await expect(widget.locator(".background-bash-job-list li")).toHaveCount(1);
     await expect(widget).not.toContainText(secondId);
     await writeFile(releaseA, "release");
+    await widget.getByLabel("Filter:").selectOption("completed");
     await expect(widget).toContainText("succeeded", { timeout: 10_000 });
     await page.getByRole("button", { name: "Close dialog" }).click();
     await page.locator(`[data-agent-id="${second}"]`).click();
     await widget.getByRole("button", { name: /shell jobs/i }).click();
-    await expect(widget).toContainText(secondId);
+    await expect(widget.locator(".background-bash-job-list li")).toHaveCount(1);
     await expect(widget).toContainText("running");
     expect(f.violations).toEqual([]);
   } finally {
