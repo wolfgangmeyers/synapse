@@ -4887,6 +4887,17 @@ dialog,
   gap: 0.75rem;
 }
 
+.canvas-toolbar-actions .btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+}
+
+.canvas-toolbar-actions .btn:hover:not(:disabled) {
+  background: #334155;
+  border-color: #64748b;
+}
+
 .canvas-status-pill {
   font-size: 0.8rem;
   background: rgba(16, 185, 129, 0.15);
@@ -5093,6 +5104,26 @@ dialog,
   background: rgba(234, 179, 8, 0.15);
   color: #facc15;
   border-color: rgba(234, 179, 8, 0.3);
+}
+
+.node-return-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  flex-basis: 100%;
+}
+
+.node-return-explanation {
+  color: #cbd5e1;
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.node-badge.badge-return {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border-color: rgba(168, 85, 247, 0.3);
 }
 
 .node-badge.badge-exit-allowed {

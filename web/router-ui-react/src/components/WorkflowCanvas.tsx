@@ -274,7 +274,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
     }
     if (conditionalDeadEnds.length > 0) {
       issues.push({
-        type: "danger",
+        type: "warning",
         message: `State(s) without outgoing edges or exit permission: ${conditionalDeadEnds.map((s) => s.name).join(", ")}. Implicit return to the previous state is available only when a valid previous state exists; agents may get trapped.`,
       });
     }

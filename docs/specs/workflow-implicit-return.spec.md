@@ -22,6 +22,12 @@ A workflow author can allow an agent to return from a state to the state it just
 
 ## 3. User Scenarios (Behavioral Contract)
 
+### Scenario: [IR-024] Understand return paths on the canvas
+- **User Goal**: Understand which states permit a return without mistaking a conditional return for a guaranteed route.
+- **Given**: A workflow canvas with states with and without implicit return, including dead ends with and without the option.
+- **When**: The author views the canvas, changes the option, and reloads it.
+- **Then**: Each enabled state displays an auto-return badge, including states with outgoing edges or exit permission; disabled states do not. A concise explanation is always visible beneath the badge, stating that return requires a different previous state in the active workflow; it does not require hover, touch, or keyboard interaction. A dead end without return remains a red danger, while a return-enabled dead end is a warning explaining the predecessor limitation and possible trap. No implicit edge is drawn. Toolbar actions use the dark visual treatment of the application's tabs.
+
 ### Scenario: [IR-001] Default-off migration and creation
 - **User Goal**: Keep existing and newly created workflows compatible.
 - **Given**: A populated database with existing states and an active binding, or a new state or older bundle without the option.
@@ -111,6 +117,7 @@ The mappings below identify existing candidate coverage, not a claim of complete
 | IR-009 | `tests/e2e/workflow-return-entry-contract.spec.ts` | Return entry effects compared with an explicit transition. |
 | IR-010 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-return-missing-lifecycle.spec.ts` | Restart, exit and fresh activation. |
 | IR-011 | `tests/e2e/workflow-implicit-return.spec.ts`; `tests/e2e/workflow-implicit-return-git-sync.spec.ts` | Definition round trips, older import and git sync. |
+| IR-024 | `tests/e2e/workflow-implicit-return.spec.ts` | Canvas badges, editor toggle persistence, dead-end warnings, explicit edges and toolbar styling. |
 | IR-012 | `tests/e2e/workflow-implicit-return-concurrency.spec.ts` | Partial concurrency coverage; competing binding updates need full E2E evidence. |
 
 Acceptance requires passing tests for every scenario and the required system boundaries. No new test run is claimed here.
