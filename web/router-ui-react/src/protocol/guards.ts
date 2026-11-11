@@ -178,7 +178,7 @@ export function isManagedAgent(value: unknown): value is ManagedAgent {
   if (isRecord(value) && Object.hasOwn(value, "urgent") && typeof value.urgent !== "boolean") return false;
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
   if (!isRecord(value) || !required.every((key) => Object.hasOwn(value, key))) return false;
-  if (value.background_bash_jobs !== undefined && (!Array.isArray(value.background_bash_jobs) || !value.background_bash_jobs.every((job: unknown) => isRecord(job) && isSafeString(job.id, 1, 256) && isSafeString(job.status, 1, 64)))) return false;
+  if (value.background_bash_jobs !== undefined && (!Array.isArray(value.background_bash_jobs) || !value.background_bash_jobs.every((job: unknown) => isRecord(job) && isSafeString(job.id, 1, 256) && isSafeString(job.status, 1, 64) && (job.started_at === undefined || isSafeString(job.started_at, 1, 64))))) return false;
   if (privateRuntimeFields.some((field) => Object.hasOwn(value, field))) return false;
   if (Object.hasOwn(value, "record_kind") && (value as any).record_kind === "archived") return false;
   if (Object.hasOwn(value, "allow_inline_tools") && value.allow_inline_tools !== undefined && typeof value.allow_inline_tools !== "boolean") return false;

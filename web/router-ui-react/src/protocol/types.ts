@@ -868,7 +868,7 @@ export interface AgentProgress {
 }
 
 // Optional managed projection; absent on routers without background shell support.
-export interface BackgroundBashJob { id: string; status: string }
+export interface BackgroundBashJob { id: string; status: string; started_at?: string }
 
 export interface ManagedAgent {
   background_bash_jobs?: BackgroundBashJob[];

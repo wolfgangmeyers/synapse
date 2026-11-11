@@ -7745,5 +7745,6 @@ select.form-control option,
 .background-bash-title { color: #93c5fd; white-space: nowrap; }
 .background-bash-activity ul { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0; padding: 0; list-style: none; }
 .background-bash-activity li { overflow-wrap: anywhere; }
-.background-bash-job-list { max-height: 60vh; overflow: auto; overflow-wrap: anywhere; }
+.background-bash-job-list { max-height: 60vh; overflow: auto; overflow-wrap: anywhere; list-style: none; margin: 0; padding: 0; }
+.background-bash-job-list .subagent-card { width: 100%; text-align: left; color: var(--text); }
 .background-bash-job-list pre { max-height: 40vh; }

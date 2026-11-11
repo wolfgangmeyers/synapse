@@ -6,8 +6,22 @@ import { DialogShell } from "./DialogShell";
 type Detail = Awaited<ReturnType<RouterHttpClient["backgroundBashDetail"]>>;
 type Result = { agentId: string; client: RouterHttpClient; id: string; status: string; value: Detail | "unavailable" | "error" };
 
+function jobLabel(job: BackgroundBashJob, index: number) {
+  const date = job.started_at ? new Date(job.started_at) : null;
+  return date && !Number.isNaN(date.getTime())
+    ? `Started ${date.toLocaleString()} (${String(date.getMilliseconds()).padStart(3, "0")} ms)`
+    : `Shell job ${index + 1}`;
+}
+
+type JobFilter = "active" | "completed" | "failed";
+function jobCategory(status: string): JobFilter {
+  if (status === "running" || status === "uncertain") return "active";
+  return status === "succeeded" ? "completed" : "failed";
+}
+
 export function BackgroundBashActivity({ jobs = [], agentId, client }: { jobs: BackgroundBashJob[] | undefined; agentId?: string; client?: RouterHttpClient | undefined }) {
   const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState<JobFilter>("active");
   const [selected, setSelected] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [scope, setScope] = useState({ agentId, client });
@@ -45,9 +59,14 @@ export function BackgroundBashActivity({ jobs = [], agentId, client }: { jobs: B
   }, [open, client, agentId, job?.id, job?.status, retry]);
   const active = jobs.filter(item => item.status === "running" || item.status === "uncertain").length;
   const detail = job && result && result.agentId === agentId && result.client === client && result.id === job.id && result.status === job.status ? result.value : undefined;
+  const sortedJobs = jobs.map((item, index) => ({ item, index, time: item.started_at ? Date.parse(item.started_at) : NaN }))
+    .sort((a, b) => (Number.isNaN(b.time) ? -Infinity : b.time) - (Number.isNaN(a.time) ? -Infinity : a.time) || a.index - b.index);
+  const visibleJobs = sortedJobs.filter(({ item }) => jobCategory(item.status) === filter);
+  const counts = { active: 0, completed: 0, failed: 0 };
+  jobs.forEach(item => { counts[jobCategory(item.status)]++; });
   const close = () => { setOpen(false); setSelected(null); setResult(null); };
   return <section aria-label="Background shell jobs">
-    <button type="button" className={`header-metric-card subagents-card clickable${active > 0 ? " active" : ""}`} onClick={() => setOpen(true)}>
+    <button type="button" className={`header-metric-card subagents-card clickable${active > 0 ? " active" : ""}`} onClick={() => { setFilter("active"); setOpen(true); }}>
       <span className="header-metric-icon subagents-icon"><i className="fa-solid fa-terminal" aria-hidden="true" /></span>
       <span className="header-metric-center"><span className="header-metric-title">Shell jobs</span></span>
       <span className="header-metric-right"><span className="header-metric-value">{active}</span></span>
@@ -57,7 +76,7 @@ export function BackgroundBashActivity({ jobs = [], agentId, client }: { jobs: B
         {selected !== null ? <div className="subagent-drilldown-view">
           <header className="subagent-drilldown-header">
             <button type="button" className="icon-btn-round subagent-back-button" aria-label="Back to shell jobs" onClick={() => { setSelected(null); setResult(null); }}><i className="fa-solid fa-arrow-left" aria-hidden="true" /></button>
-            <div className="subagent-drilldown-info">{job ? <span>{job.id}: {job.status}</span> : <span>Job unavailable or expired.</span>}</div>
+            <div className="subagent-drilldown-info">{job ? <span>{jobLabel(job, jobs.indexOf(job))}: {job.status}</span> : <span>Job unavailable or expired.</span>}</div>
           </header>
           {job && <div className="subagent-conversation-view background-bash-detail">
             {detail === "unavailable" ? <p>Output unavailable or expired.</p> : detail === "error" ? <p>Could not load output. <button type="button" onClick={() => setRetry(n => n + 1)}>Retry</button></p> : detail ? <>
@@ -67,8 +86,8 @@ export function BackgroundBashActivity({ jobs = [], agentId, client }: { jobs: B
             </> : <p>Loading output…</p>}
           </div>}
         </div> : <div className="subagent-list-view">
-          <p>Results are held in memory and expire.</p>
-          {jobs.length === 0 ? <p>No retained shell jobs.</p> : <ul className="subagent-card-grid background-bash-job-list">{jobs.map(item => <li key={item.id}><button type="button" className={`subagent-card${item.status === "running" || item.status === "uncertain" ? " active" : ""}`} onClick={() => { setResult(null); setSelected(item.id); }}><span>{item.id}</span><span>{item.status}</span></button></li>)}</ul>}
+          <div className="subagent-list-toolbar"><label htmlFor="shell-job-filter" className="subagent-filter-label">Filter:</label><select id="shell-job-filter" className="subagent-filter-select" value={filter} onChange={event => setFilter(event.target.value as JobFilter)}><option value="active">Active ({counts.active})</option><option value="completed">Completed ({counts.completed})</option><option value="failed">Failed ({counts.failed})</option></select></div>
+          {visibleJobs.length === 0 ? <div className="subagent-empty-state"><p>{jobs.length === 0 ? "No retained shell jobs." : "No shell jobs match the selected filter."}</p></div> : <ul className="subagent-card-grid background-bash-job-list">{visibleJobs.map(({ item, index }) => <li key={item.id}><button type="button" className={`subagent-card${item.status === "running" || item.status === "uncertain" ? " active" : ""}`} onClick={() => { setResult(null); setSelected(item.id); }}><span>{jobLabel(item, index)}</span><span>{item.status}</span></button></li>)}</ul>}
         </div>}
       </div>
     </DialogShell>
