@@ -496,6 +496,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 				continue
 			}
 		}
+		if migration.ID == "131_optional_retired_rpc_recipe" {
+			if err := s.applyOptionalRetiredRPCRecipeMigration131(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
 		if migration.ID == "104_widen_managed_agents_lifecycle_state" {
 			if err := s.applyWidenManagedAgentsLifecycleState104(ctx, migration); err != nil {
 				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
