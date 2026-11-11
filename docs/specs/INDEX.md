@@ -154,3 +154,9 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 - [Goal evaluation activity publication](goal-activity-publication.spec.md) (Draft; acceptance testing pending).
 
 - [Tool permissions popups](tool-permissions-popup.spec.md)
+
+## Sidebar Branding
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-UI-BRAND-001` | Synapse sidebar wordmark | `AgentManagement` | [`sidebar-brand.spec.md`](./sidebar-brand.spec.md) | `tests/e2e/sidebar-brand.spec.ts` | `Active` |
