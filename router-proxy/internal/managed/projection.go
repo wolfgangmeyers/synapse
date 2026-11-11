@@ -184,15 +184,15 @@ func publicAgentContext(ctx context.Context, agent *store.ManagedAgentRecord) ma
 	return result
 }
 
-// PublicAgentWithGoal adds only the embedded agent's own durable desired
-// policy. Applied revision and projection state remain separate from SDK set.
+// PublicAgentWithGoal adds the worker's own durable desired policy.
+// Applied revision and projection state remain separate from runtime state.
 func PublicAgentWithGoal(agent *store.ManagedAgentRecord, policy *store.ManagedGoalPolicy) map[string]any {
 	return PublicAgentWithGoalContext(context.Background(), agent, policy)
 }
 
 func PublicAgentWithGoalContext(ctx context.Context, agent *store.ManagedAgentRecord, policy *store.ManagedGoalPolicy) map[string]any {
 	result := publicAgentContext(ctx, agent)
-	if result == nil || agent.Runtime != "embedded" || policy == nil || policy.AgentID != agent.AgentID {
+	if result == nil || policy == nil || policy.AgentID != agent.AgentID {
 		return result
 	}
 	settings := policy.Config.Settings

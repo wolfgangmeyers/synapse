@@ -123,7 +123,7 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 
 const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,evaluator_lease_until,last_outcome,evaluator_attempts,not_done_wakeups,rearm_activity_count,next_wakeup_at,snoozed_until,last_settled_sequence,evaluator_id,evaluator_goal_revision,evaluator_settled_sequence,evaluator_pi_session_id,evaluator_session_epoch,evaluator_process_pid,evaluator_process_start_marker,evaluator_process_incarnation,evaluator_runtime_generation,evaluator_reason,wakeup_message_id,snooze_pi_session_id,snooze_session_epoch,snooze_process_pid,snooze_process_start_marker,snooze_process_incarnation,snooze_runtime_generation,created_at,updated_at`
 
-// embeddedProjectionGoalTx reads an embedded agent's saved policy inside the
+// embeddedProjectionGoalTx reads a managed agent's saved policy inside the
 // caller's projection transaction. A fresh agent has no policy yet.
 func (s *Store) embeddedProjectionGoalTx(ctx context.Context, agentID string) (*ManagedGoalPolicy, error) {
 	policy, err := scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, agentID))
@@ -242,6 +242,10 @@ func (s *Store) UpdateManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 			return err
 		}
 		result, err = s.updateManagedGoalPolicyTx(ctx, fence.AgentID, config, settings)
+		if err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
 	return result, err

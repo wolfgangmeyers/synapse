@@ -2,7 +2,7 @@ import { test } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, chmod, rm, writeFile, mkdir, readFile, access } from "node:fs/promises";
+import { mkdtemp, chmod, rm, writeFile, mkdir, readFile, access, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -242,7 +242,8 @@ export async function startIsolatedRouter(options: {
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   if (options.backgroundExpiryInterval && options.testClock === false) throw new Error("Background expiry interval requires the test clock");
-  const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
+  // Credential storage rejects symlinked ancestors; macOS tmpdir commonly uses /var.
+  const root = await mkdtemp(join(await realpath(tmpdir()), "mecha-e2e-"));
   let ownedChild: ChildProcess | undefined;
   try {
   await chmod(root, 0o700);
@@ -468,7 +469,7 @@ export async function startIsolatedRouter(options: {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          rej(new Error(`Isolated router exited prematurely (code ${code}).`));
+          rej(new Error(`Isolated router exited prematurely (code ${code}).${readinessStderr ? ` ${readinessStderr}` : ""}`));
         }
       });
     });
@@ -653,7 +654,7 @@ export async function setupE2EHarness(options?: {
   backgroundExpiryInterval?: string;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
-  const distDir = join(repoRoot, "web/router-ui-react/dist");
+  const distDir = process.env.MECHA_E2E_FRONTEND_DIST ?? join(repoRoot, "web/router-ui-react/dist");
 
   // Ensure frontend build exists
   const { existsSync } = await import("node:fs");
@@ -769,7 +770,7 @@ export async function startEmbeddedSafetyFixture() {
   try {
     router = await startIsolatedRouter({ repoRoot, managed: true, embedded: { endpoint: `http://127.0.0.1:${address.port}` } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
-    frontend = await serveFrontendDist(join(repoRoot, "web/router-ui-react/dist"));
+    frontend = await serveFrontendDist(process.env.MECHA_E2E_FRONTEND_DIST ?? join(repoRoot, "web/router-ui-react/dist"));
 
     const db = new DatabaseSync(router.databasePath);
     db.exec("PRAGMA busy_timeout=5000");

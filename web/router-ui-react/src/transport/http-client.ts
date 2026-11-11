@@ -33,7 +33,7 @@ export interface ConversationTimelineResponse {
 export interface ReminderResponse { reminders: Reminder[] }
 export interface ReminderWriteResponse { reminder: Reminder }
 export interface PromptTemplateResponse { prompt_templates: PromptTemplate[] }
-export interface ManagedAgentsResponse { generated_at: string; projection_version: number; agents: ManagedAgent[] }
+export interface ManagedAgentsResponse { generated_at: string; projection_version: number; agents: ManagedAgent[]; children?: ManagedChildrenProjection[]; children_version?: number }
 export interface ManagedAgentResponse { generated_at: string; projection_version: number; agent: ManagedAgent }
 export interface ManagedOperationResponse { operation_id: string; agent?: ManagedAgent; agents?: Array<{ agent_id: string; operation_id: string; status: string }> }
 export interface ManagedDirectoriesResponse { path: string; parent: string; breadcrumbs?: Array<{ name: string; path: string }>; directories: Array<{ name: string; path: string }> }
@@ -370,7 +370,8 @@ function managedAgents(value: unknown): ManagedAgentsResponse {
     ? rawAgents.filter((candidate) => recordValue(candidate)?.record_kind !== "archived")
     : undefined;
   if (!root || !isRouterUtcTimestamp(root.generated_at) || !safeInteger(root.projection_version) || !agents || !agents.every(isManagedAgent)) throw invalidResponse("Router returned an invalid managed-agent list", value);
-  return { generated_at: root.generated_at, projection_version: root.projection_version, agents };
+  if (root.children !== undefined && (!Array.isArray(root.children) || !root.children.every(isManagedChildrenProjection) || !safeInteger(root.children_version))) throw invalidResponse("Router returned invalid shared children", value);
+  return { generated_at: root.generated_at, projection_version: root.projection_version, agents, ...(Array.isArray(root.children) && safeInteger(root.children_version) ? { children: root.children, children_version: root.children_version } : {}) };
 }
 function managedAgent(value: unknown): ManagedAgentResponse {
   const root = recordValue(value);
@@ -628,7 +629,7 @@ export interface RouterHttpClient {
   setAgentUrgency(agentId: string, urgent: boolean): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
-  managedAgents(): Promise<ManagedAgentsResponse>;
+  managedAgents(includeChildren?: boolean): Promise<ManagedAgentsResponse>;
   managedAgent(id: string): Promise<ManagedAgentResponse>;
   managedDirectories(path: string): Promise<ManagedDirectoriesResponse>;
   managedChildren(id: string): Promise<ManagedChildrenResponse>;
@@ -821,7 +822,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
-    managedAgents: async () => managedAgents(await managedRequest("/v1/managed-agents", "GET")),
+    managedAgents: async (includeChildren) => managedAgents(await managedRequest(`/v1/managed-agents${includeChildren ? "?include_children=true" : ""}`, "GET")),
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
     managedDirectories: async (path) => managedDirectories(await managedRequest(`/v1/managed-directories?path=${encodeURIComponent(path)}`, "GET")),
     managedChildren: async (id) => managedChildren(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/children`, "GET")),

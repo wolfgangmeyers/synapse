@@ -12,6 +12,8 @@ import type { RouterScope } from "../state/scopes";
 import type { RouterHttpClient } from "../transport/http-client";
 
 export interface SidebarProps {
+  sidebarTab?: "agents" | "background";
+  onSidebarTabChange?: (tab: "agents" | "background") => void;
   scope: RouterScope;
   client?: RouterHttpClient | undefined;
   routerLabel: string;
@@ -64,9 +66,11 @@ function isCompletedAgent(agent: Agent): boolean {
   return lifecycle === "terminated" || lifecycle === "failed" || desired === "terminated" || activity === "stopped" || activity === "failed";
 }
 
-export function Sidebar({ scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onLaunchBackgroundWorkflow, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onKnowledgeBase, onWorkflows, onWorkflowSchedules, onOpenProgressHistory }: SidebarProps): ReactElement {
+export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onLaunchBackgroundWorkflow, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onKnowledgeBase, onWorkflows, onWorkflowSchedules, onOpenProgressHistory }: SidebarProps): ReactElement {
   const [localFilter, setLocalFilter] = useState(filter ?? "");
-  const [sidebarTab, setSidebarTab] = useState<"agents" | "background">("agents");
+  const [localTab, setLocalTab] = useState<"agents" | "background">("agents");
+  const sidebarTab = controlledTab ?? localTab;
+  const setSidebarTab = (tab: "agents" | "background") => { setLocalTab(tab); onSidebarTabChange?.(tab); };
   const persistence = useMemo(() => storage ?? browserStorage(), [storage]);
   const scopeKey = ownerScope(scope.routerUrl, scope.agentId);
   const [recent, setRecent] = useState(() => loadRecentAgents(persistence, scopeKey));
