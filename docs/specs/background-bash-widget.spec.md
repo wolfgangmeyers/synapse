@@ -41,4 +41,4 @@ The selected agent's shell widget exposes active work and retained results witho
 | BBW-002 | `tests/e2e/background-bash-widget.spec.ts` | Pending |
 | BBW-003 | `tests/e2e/background-bash-widget.spec.ts` | Pending |
 
-This supplements BB-009 of `background-bash.spec.md`; both specifications remain Draft. The widget E2E remains pending: `widget counts active jobs and shows retained bounded output and exit codes` passed earlier widget assertions but later failed while selecting another agent because the conversation intercepted the click.
+This supplements BB-009 of `background-bash.spec.md`; both specifications remain Draft. The widget E2E passed on a subsequent isolated run after an earlier run failed selecting another agent because the conversation intercepted the click. The matrix remains pending: that single test does not cover every scenario and invariant above.
