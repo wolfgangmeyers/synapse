@@ -23,7 +23,7 @@ it("keeps the header compact and discloses live job details", () => {
   expect(screen.getByText(/long-job-id-0/)).toBeVisible();
   rerender(<BackgroundBashActivity jobs={[{ id: "job-2", status: "completed" }]} />);
   expect(screen.queryByText(/long-job-id-0/)).not.toBeInTheDocument();
-  expect(screen.getByText(/job-2/)).toHaveTextContent("completed");
+  expect(screen.getByRole("button", { name: /job-2 completed/i })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
   expect(screen.queryByText(/job-2/)).not.toBeVisible();
   rerender(<BackgroundBashActivity jobs={[]} />);
@@ -56,6 +56,7 @@ it("retries errors explicitly and uses projection status consistently", async ()
   const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
   render(<BackgroundBashActivity jobs={[{ id: "job-1", status: "succeeded" }]} agentId="one" client={client} />);
   fireEvent.click(screen.getByRole("button", { name: /shell jobs 0/i }));
+  fireEvent.click(screen.getByRole("button", { name: /job-1 succeeded/i }));
   expect(await screen.findByText(/Could not load output/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByText("final")).toBeVisible();
@@ -63,21 +64,25 @@ it("retries errors explicitly and uses projection status consistently", async ()
   expect(detail).toHaveBeenCalledTimes(2);
 });
 
-it("bounds requests, times out hung reads, and refreshes only active results", async () => {
+it("polls only the selected running job while open", async () => {
   vi.useFakeTimers();
   try {
-    const jobs = Array.from({ length: 10 }, (_, i) => ({ id: `job-${i}`, status: i === 9 ? "running" : "succeeded" }));
-    const detail = vi.fn((_agent: string, id: string) => id === "job-0" ? new Promise(() => {}) : Promise.resolve({ id, status: "succeeded", output: id, truncated: false, exitCode: 0 }));
+    const detail = vi.fn((_agent: string, id: string) => Promise.resolve({ id, status: "running", output: id, truncated: false, exitCode: null }));
     const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
-    render(<BackgroundBashActivity jobs={jobs} agentId="one" client={client} />);
+    render(<BackgroundBashActivity jobs={[{ id: "running", status: "running" }, { id: "done", status: "succeeded" }]} agentId="one" client={client} />);
     fireEvent.click(screen.getByRole("button", { name: /shell jobs 1/i }));
+    expect(detail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /running running/i }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(detail.mock.calls.filter(call => call[1] === "running").length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(screen.getByRole("button", { name: "Back to shell jobs" }));
+    fireEvent.click(screen.getByRole("button", { name: /done succeeded/i }));
     await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-    expect(screen.getByText(/Could not load output/)).toBeVisible();
-    expect(screen.getByText("job-9", { selector: "code" })).toBeVisible();
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-    expect(detail.mock.calls.filter(call => call[1] === "job-9")).toHaveLength(2);
-    expect(detail.mock.calls.filter(call => call[1] === "job-1")).toHaveLength(1);
-    expect(detail.mock.calls.filter(call => call[1] === "job-0")).toHaveLength(1);
+    expect(detail.mock.calls.filter(call => call[1] === "done")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
+    const count = detail.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(detail).toHaveBeenCalledTimes(count);
   } finally { vi.useRealTimers(); }
 });
 
@@ -89,6 +94,7 @@ it("hides cached detail immediately when projection status changes", async () =>
   const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
   const { rerender } = render(<BackgroundBashActivity jobs={[{ id: "job-1", status: "running" }]} agentId="one" client={client} />);
   fireEvent.click(screen.getByRole("button", { name: /shell jobs 1/i }));
+  fireEvent.click(screen.getByRole("button", { name: /job-1 running/i }));
   expect(await screen.findByText("old output")).toBeVisible();
   rerender(<BackgroundBashActivity jobs={[{ id: "job-1", status: "succeeded" }]} agentId="one" client={client} />);
   expect(screen.queryByText("old output")).not.toBeInTheDocument();
@@ -103,6 +109,71 @@ it("does not show a terminal exit code under an active projection", async () => 
   const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
   render(<BackgroundBashActivity jobs={[{ id: "job-1", status: "running" }]} agentId="one" client={client} />);
   fireEvent.click(screen.getByRole("button", { name: /shell jobs 1/i }));
+  fireEvent.click(screen.getByRole("button", { name: /job-1 running/i }));
   expect(await screen.findByText("finished")).toBeVisible();
   expect(screen.queryByText(/Exit code:/)).not.toBeInTheDocument();
+});
+
+it.each(["agent", "client"])("never shows another %s's cached or late output", async (change) => {
+  type Value = { id: string; status: string; output: string; truncated: boolean; exitCode: number | null };
+  const value = (output: string): Value => ({ id: "same", status: "succeeded", output, truncated: false, exitCode: 0 });
+  let resolveOld!: (value: Value) => void;
+  let resolveNew!: (value: Value) => void;
+  const oldDetail = vi.fn().mockResolvedValueOnce(value("old secret"))
+    .mockImplementationOnce(() => new Promise<Value>(resolve => { resolveOld = resolve; }))
+    .mockImplementation(() => new Promise<Value>(resolve => { resolveNew = resolve; }));
+  const newDetail = vi.fn(() => new Promise<Value>(resolve => { resolveNew = resolve; }));
+  const oldClient = { backgroundBashDetail: oldDetail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
+  const newClient = change === "client" ? { backgroundBashDetail: newDetail } as unknown as typeof oldClient : oldClient;
+  const jobs = [{ id: "same", status: "succeeded" }];
+  const { rerender } = render(<BackgroundBashActivity jobs={jobs} agentId="one" client={oldClient} />);
+  fireEvent.click(screen.getByRole("button", { name: /shell jobs 0/i }));
+  fireEvent.click(screen.getByRole("button", { name: /same succeeded/i }));
+  expect(await screen.findByText("old secret")).toBeVisible();
+  // Start a second request for the old scope and leave it in flight.
+  fireEvent.click(screen.getByRole("button", { name: "Back to shell jobs" }));
+  fireEvent.click(screen.getByRole("button", { name: /same succeeded/i }));
+  rerender(<BackgroundBashActivity jobs={jobs} agentId={change === "agent" ? "two" : "one"} client={newClient} />);
+  expect(screen.queryByText("old secret")).not.toBeInTheDocument();
+  expect(screen.getByText("Loading output…")).toBeVisible();
+  await act(async () => resolveOld(value("late old secret")));
+  expect(screen.queryByText("late old secret")).not.toBeInTheDocument();
+  await act(async () => resolveNew(value("new output")));
+  expect(screen.getByText("new output")).toBeVisible();
+  // Returning to the original scope must not resurrect its earlier cached output.
+  rerender(<BackgroundBashActivity jobs={jobs} agentId="one" client={oldClient} />);
+  expect(screen.queryByText("old secret")).not.toBeInTheDocument();
+  expect(screen.queryByText("late old secret")).not.toBeInTheDocument();
+});
+
+it.each(["agent", "client"])("hides displayed output immediately on %s change", async change => {
+  const detail = vi.fn().mockResolvedValue({ id: "same", status: "succeeded", output: "old output", truncated: false, exitCode: 0 });
+  const pending = vi.fn(() => new Promise(() => {}));
+  const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
+  const other = { backgroundBashDetail: pending } as unknown as typeof client;
+  const jobs = [{ id: "same", status: "succeeded" }];
+  const { rerender } = render(<BackgroundBashActivity jobs={jobs} agentId="one" client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: /shell jobs 0/i }));
+  fireEvent.click(screen.getByRole("button", { name: /same succeeded/i }));
+  expect(await screen.findByText("old output")).toBeVisible();
+  if (change === "agent") detail.mockImplementation(() => new Promise(() => {}));
+  rerender(<BackgroundBashActivity jobs={jobs} agentId={change === "agent" ? "two" : "one"} client={change === "client" ? other : client} />);
+  expect(screen.queryByText("old output")).not.toBeInTheDocument();
+  expect(screen.getByText("Loading output…")).toBeVisible();
+});
+
+it("times out a hung detail request and waits for retry", async () => {
+  vi.useFakeTimers();
+  try {
+    const detail = vi.fn(() => new Promise(() => {}));
+    const client = { backgroundBashDetail: detail } as unknown as import("../../src/transport/http-client").RouterHttpClient;
+    render(<BackgroundBashActivity jobs={[{ id: "job", status: "running" }]} agentId="one" client={client} />);
+    fireEvent.click(screen.getByRole("button", { name: /shell jobs 1/i }));
+    fireEvent.click(screen.getByRole("button", { name: /job running/i }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    expect(screen.getByText(/Could not load output/)).toBeVisible();
+    expect(detail).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(detail).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
 });
