@@ -66,3 +66,38 @@ for (const role of ["root", "worker"] as const) {
     }
   });
 }
+
+test("root regular bash promotes at its default deadline", async ({ page }) => {
+  test.setTimeout(90_000);
+  const name = `promotion-default-${randomUUID()}`;
+  const f = await workflowHarness({ embeddedRoot: { name, requestId: randomUUID(), model, instruction: "Root bootstrap" }, initialReplies: [{ answer: "Root ready" }] });
+  const release = join(f.router.root, "default-release");
+  const starts = join(f.router.root, "default-starts");
+  const q = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+  try {
+    await f.open(page);
+    await page.locator(`[data-agent-id="${name}"]`).click();
+    await expect(page.getByText("Root ready", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    f.replies.push({ tool: "bash", args: { command: `echo $$ >> ${q(starts)}; while [ ! -f ${q(release)} ]; do sleep .05; done` } }, { answer: "Default promoted" });
+    const started = Date.now();
+    await userTurn(page, "Run default slow command");
+    await expect(page.getByText("Default promoted", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(14_000);
+    const rows = f.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind IN ('toolResult','tool_result') ORDER BY rowid", name).map(row => JSON.parse(String(row.body))).filter(row => row.toolName === "bash");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isError).toBeFalsy();
+    const job = JSON.parse(rows[0].content[0].text);
+    expect(job).toMatchObject({ job_id: expect.any(String), status: "running" });
+    const pid = (await readFile(starts, "utf8")).trim();
+    expect(pid).toMatch(/^\d+$/);
+    process.kill(Number(pid), 0);
+    f.replies.push({ answer: "Default completion acknowledged" });
+    await writeFile(release, "release");
+    await expect.poll(() => f.rows("SELECT CAST(body AS TEXT) AS body FROM messages WHERE id=?", `background-bash-completed-${job.job_id}`).length, { timeout: 30_000 }).toBe(1);
+    expect((await readFile(starts, "utf8")).trim()).toBe(pid);
+    expect(f.violations).toEqual([]);
+  } finally {
+    await writeFile(release, "release").catch(() => {});
+    await f.close();
+  }
+});
