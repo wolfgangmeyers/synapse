@@ -41,6 +41,7 @@ test("managed worker launches, lists, gets and kills a real background shell", a
     await expect.poll(async () => (await f.records()).some(row => row.kind === "catalog"),
       { message: "Claude must discover the managed MCP tool catalog" }).toBe(true);
     const catalog = (await f.records()).find(row => row.kind === "catalog");
+    expect(catalog?.names).not.toContain("wait_background_bash_job");
     expect(catalog?.names).toEqual(expect.arrayContaining([
       "launch_background_bash", "list_background_bash_jobs", "get_background_bash_job", "kill_background_bash_job",
     ]));
@@ -294,6 +295,7 @@ test("subagent can invoke background job tools for its own job through its check
     const receipt = (await f.records()).find(r => r.kind === "barrier" && r.name === "background-child-held")!;
     const catalog = (await f.records()).find(r => r.kind === "catalog" && r.pid === receipt.pid);
     expect(catalog).toBeDefined();
+    expect(catalog!.names).not.toContain("wait_background_bash_job");
     for (const name of names) expect(catalog!.names).toContain(name);
     // The child must produce each checked tool call; a raw MCP request has no witness.
     await f.releaseBarrier(receipt);

@@ -32,7 +32,7 @@ func TestBackgroundBashChildRegistrationAndIsolation(t *testing.T) {
 	for _, tool := range tools {
 		byName[tool.Name] = tool
 	}
-	for _, name := range []string{"launch_background_bash", "list_background_bash_jobs", "get_background_bash_job", "kill_background_bash_job", "wait_background_bash_job"} {
+	for _, name := range []string{"launch_background_bash", "list_background_bash_jobs", "get_background_bash_job", "kill_background_bash_job"} {
 		require.NotNil(t, byName[name].Execute, name)
 	}
 	r, err := byName["launch_background_bash"].Execute(context.Background(), "launch", map[string]any{"command": "exit 7"}, nil)
@@ -42,11 +42,9 @@ func TestBackgroundBashChildRegistrationAndIsolation(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(r.Content[0].(ai.TextContent).Text), &job))
 	require.NotEmpty(t, job.ID)
-	_, err = backgroundBashWaitTool(m.backgroundBash, backgroundBashOwnerKey(parent)).Execute(context.Background(), "foreign", map[string]any{"job_id": job.ID}, nil)
+	require.NotContains(t, byName, "wait_background_bash_job")
+	_, err = m.backgroundBash.Get(backgroundBashOwnerKey(parent), job.ID)
 	require.Error(t, err)
-	r, err = byName["wait_background_bash_job"].Execute(context.Background(), "wait", map[string]any{"job_id": job.ID}, nil)
-	require.NoError(t, err)
-	require.Contains(t, r.Content[0].(ai.TextContent).Text, `"exit_code":7`)
 	for i := 0; i < 3; i++ {
 		_, err = byName["list_background_bash_jobs"].Execute(context.Background(), "list", map[string]any{}, nil)
 		require.NoError(t, err)
@@ -54,6 +52,6 @@ func TestBackgroundBashChildRegistrationAndIsolation(t *testing.T) {
 	_, err = m.backgroundBashTools(parent, t.TempDir())[1].Execute(context.Background(), "list", map[string]any{}, nil)
 	require.ErrorContains(t, err, backgroundBashReadExhausted)
 	valid = false
-	_, err = byName["wait_background_bash_job"].Execute(context.Background(), "wait", map[string]any{"job_id": job.ID}, nil)
+	_, err = byName["get_background_bash_job"].Execute(context.Background(), "get", map[string]any{"job_id": job.ID}, nil)
 	require.Error(t, err)
 }

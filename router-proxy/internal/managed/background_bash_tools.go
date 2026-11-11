@@ -19,7 +19,7 @@ import (
 
 func isBackgroundBashTool(name string) bool {
 	switch name {
-	case "launch_background_bash", "list_background_bash_jobs", "get_background_bash_job", "kill_background_bash_job", "wait_background_bash_job":
+	case "launch_background_bash", "list_background_bash_jobs", "get_background_bash_job", "kill_background_bash_job":
 		return true
 	}
 	return false
@@ -153,18 +153,6 @@ func (m *Manager) backgroundBashToolsForOwner(owner embeddedOwner, cwd, laneID s
 			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(body)}}}, nil
 		}})
 	}
-	m.mu.Lock()
-	jobs := m.backgroundBash
-	m.mu.Unlock()
-	wait := backgroundBashWaitTool(jobs, backgroundBashOwnerKey(owner))
-	execute := wait.Execute
-	wait.Execute = func(ctx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
-		if err := check(ctx); err != nil {
-			return agent.AgentToolResult{}, err
-		}
-		return execute(ctx, id, args, update)
-	}
-	tools = append(tools, wait)
 	return tools
 }
 

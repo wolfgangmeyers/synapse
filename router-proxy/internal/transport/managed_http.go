@@ -144,6 +144,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && managedAllowInlineToolsPOSTPath(req.URL.Path) != "":
 		r.handleManagedAgentAllowInlineTools(w, req, managedAllowInlineToolsPOSTPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/background-bash-jobs/"):
+		r.handleBackgroundBashDetail(w, req)
+		return true
 	case req.Method == http.MethodGet && managedChildrenPath(req.URL.Path) != "":
 		r.handleManagedChildrenGET(w, req, managedChildrenPath(req.URL.Path))
 		return true
@@ -2443,4 +2446,33 @@ func (r *Router) handleGitWorktreeCheck(w http.ResponseWriter, req *http.Request
 	}
 	body, _ := json.Marshal(result)
 	r.writeManagedRaw(w, req, 200, map[string]string{"Content-Type": "application/json; charset=utf-8"}, body)
+}
+
+func (r *Router) handleBackgroundBashDetail(w http.ResponseWriter, req *http.Request) {
+	const prefix = "/v1/managed-agents/"
+	path := strings.TrimPrefix(req.URL.Path, prefix)
+	parts := strings.Split(path, "/")
+	if !strings.HasPrefix(req.URL.Path, prefix) || len(parts) != 3 || parts[0] == "" || parts[1] != "background-bash-jobs" || parts[2] == "" {
+		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Job unavailable"})
+		return
+	}
+	snapshot, err := r.store.ManagedAgentSnapshot(req.Context(), parts[0])
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && snapshot.Agent == nil) {
+		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Job unavailable"})
+		return
+	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Could not read job"})
+		return
+	}
+	job, err := r.managed.BackgroundBashJobDetail(req.Context(), snapshot.Agent, parts[2])
+	if errors.Is(err, managed.ErrBackgroundBashNotFound) {
+		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Job unavailable or expired"})
+		return
+	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Could not read job"})
+		return
+	}
+	r.writeManagedJSON(w, req, 200, map[string]any{"id": job.ID, "status": job.Status, "output": job.Output, "truncated": job.Truncated, "exitCode": job.ExitCode}, nil)
 }

@@ -227,8 +227,8 @@ func (m *Manager) executePromotableBash(ctx context.Context, owner embeddedOwner
 		// Manager owns the waiter from here, including retries on failed verification.
 		return handoff(cause, true)
 	}
-	timer := time.NewTimer(spec.timeout)
-	defer timer.Stop()
+	wake, cancelTimer := m.foregroundBashTimer(owner.binding.AgentID, spec.timeout)
+	defer cancelTimer()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -302,7 +302,7 @@ func (m *Manager) executePromotableBash(ctx context.Context, owner embeddedOwner
 		select {
 		case <-ctx.Done():
 			return agent.AgentToolResult{}, cleanup(ctx.Err())
-		case <-timer.C:
+		case <-wake:
 			if owner.backgroundBash != nil {
 				owner.backgroundBash.mu.Lock()
 				if owner.backgroundBash.revoked {
@@ -374,4 +374,24 @@ func cleanupForegroundWithIdentity(cmd *exec.Cmd, identity ProcessIdentity) erro
 		return nil
 	}
 	return err
+}
+
+// foregroundBashTimer uses the injected clock when it supports timers. The
+// buffered wake remains safe if cancellation races an already queued callback.
+func (m *Manager) foregroundBashTimer(agentID string, delay time.Duration) (<-chan struct{}, func()) {
+	wake := make(chan struct{}, 1)
+	fire := func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	if clock, ok := m.clock.(interface {
+		AfterNamedFunc(string, time.Duration, func()) func()
+		NamedTimerEnabled(string) bool
+	}); ok && clock.NamedTimerEnabled("foreground-bash:"+agentID) {
+		return wake, clock.AfterNamedFunc("foreground-bash:"+agentID, delay, fire)
+	}
+	timer := time.AfterFunc(delay, fire)
+	return wake, func() { timer.Stop() }
 }
