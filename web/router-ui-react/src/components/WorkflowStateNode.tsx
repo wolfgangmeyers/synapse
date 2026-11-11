@@ -93,6 +93,15 @@ function WorkflowStateNodeComponent({ data, selected }: NodeProps) {
           </span>
         )}
 
+        {state.allow_implicit_return && (
+          <div className="node-return-info">
+            <span className="node-badge badge-return">
+              <i className="fa-solid fa-reply" aria-hidden="true" /> Auto Return
+            </span>
+            <span className="node-return-explanation">Requires a different previous state in the active workflow.</span>
+          </div>
+        )}
+
         {canExit ? (
           <span className="node-badge badge-exit-allowed" title="Agent can exit or complete workflow from this state">
             <i className="fa-solid fa-door-open" aria-hidden="true" /> Can Exit

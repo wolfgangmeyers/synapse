@@ -20,6 +20,52 @@ test.describe("Implicit workflow return", () => {
     await expect.poll(() => f.rows("SELECT activity_state FROM managed_agents WHERE agent_id=?", agent)[0]?.activity_state).toBe("idle");
   }
 
+  test("IR-024: canvas identifies conditional return and definite dead ends", async ({ page }) => {
+    await f.open(page);
+    const workflow = await f.api("/v1/workflows", { name: `Canvas ${randomUUID()}` });
+    const { workflow_state: entry } = await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "Entry" });
+    const { workflow_state: returning } = await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "Returning", allow_exit: false, allow_implicit_return: true });
+    const { workflow_state: trapped } = await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "Trapped", allow_exit: false });
+    await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "Exiting", allow_exit: true, allow_implicit_return: true });
+    await f.api(`/v1/workflow-states/${entry.id}`, { name: "Entry", allow_implicit_return: true, transitions: [{ target_state_id: returning.id }, { target_state_id: trapped.id }] }, "PUT");
+    await f.api(`/v1/workflows/${workflow.id}`, { name: workflow.name, entry_state_id: entry.id }, "PUT");
+    await page.evaluate(() => { window.location.hash = "#/workflows"; });
+    await page.getByText(workflow.name, { exact: true }).first().click();
+    const returnNode = page.locator(".workflow-node-card").filter({ hasText: "Returning" });
+    const trapNode = page.locator(".workflow-node-card").filter({ hasText: "Trapped" });
+    await expect(returnNode.getByText("Auto Return")).toBeVisible();
+    await expect(returnNode.getByText("Requires a different previous state in the active workflow.")).toBeVisible();
+    await expect(page.locator(".workflow-node-card").filter({ hasText: "Entry" }).getByText("Auto Return")).toBeVisible();
+    await expect(page.locator(".workflow-node-card").filter({ hasText: "Exiting" }).getByText("Auto Return")).toBeVisible();
+    await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+    await expect(trapNode.getByText("Auto Return")).toHaveCount(0);
+    await expect(page.locator(".health-issue-item.warning").filter({ hasText: "Returning" })).toContainText("only when a valid previous state exists");
+    await expect(page.locator(".health-issue-item.danger").filter({ hasText: "Returning" })).toHaveCount(0);
+    await expect(page.locator(".health-issue-item.danger").filter({ hasText: "Trapped" })).toBeVisible();
+    for (const name of ["Tidy Layout", "Variables", "Export", "Add State"]) {
+      const button = page.getByRole("button", { name });
+      await expect(button).toHaveCSS("background-color", "rgb(30, 41, 59)");
+    }
+    const dialog = page.locator("dialog.state-config-dialog[open]");
+    const toggle = dialog.locator('label[aria-label="Allow implicit return"]');
+    for (const enabled of [false, true]) {
+      await page.getByRole("button", { name: "Configure Returning" }).click();
+      await toggle.click();
+      await dialog.getByRole("button", { name: "Save State Settings" }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(returnNode.getByText("Auto Return")).toHaveCount(enabled ? 1 : 0);
+      await expect(returnNode.getByText("Requires a different previous state in the active workflow.")).toHaveCount(enabled ? 1 : 0);
+      await expect(page.locator(`.health-issue-item.${enabled ? "warning" : "danger"}`).filter({ hasText: "Returning" })).toBeVisible();
+      await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+      await page.reload();
+      await page.getByText(workflow.name, { exact: true }).first().click();
+      await expect(returnNode.getByText("Auto Return")).toHaveCount(enabled ? 1 : 0);
+      await expect(returnNode.getByText("Requires a different previous state in the active workflow.")).toHaveCount(enabled ? 1 : 0);
+      await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+      expect((await f.api(`/v1/workflow-states/${returning.id}`)).workflow_state.allow_implicit_return).toBe(enabled);
+    }
+  });
+
   test("IR-001/003: defaults off and preserves omitted updates but accepts explicit false", async ({ page }) => {
     await f.open(page);
     const workflow = await f.api("/v1/workflows", { name: `Return ${randomUUID()}` });
