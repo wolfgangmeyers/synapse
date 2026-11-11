@@ -30,6 +30,11 @@ On Linux, a regular embedded managed root, worker or subagent Bash command still
 
 The promoted job uses existing ownership, bounded output, lifecycle and polling rules. Its owner can inspect and stop it; list and running or uncertain get consume the existing background read budget, and terminal get is free. The subagent’s trusted identity must scope its jobs; it cannot inspect or stop another owner’s job. The wait/wake behavior below is a required outcome, not a prescribed new API. The current implementation names its wait tool `wait_background_bash_job`.
 
+### Scenario: Default and explicit foreground deadlines
+- **Given**: A permitted regular managed Bash invocation on Linux omits its timeout.
+- **When**: The command is still running at its default foreground deadline.
+- **Then**: A root promotes after 15 seconds, a worker after 120 seconds, and a subagent after 30 seconds. An explicit valid timeout overrides the default. Commands finishing before the applicable deadline return normally; explicit background launches and non-Linux foreground behavior are unchanged.
+
 ### Scenario: [BB-PROMOTE-001] Slow command continues as the same process
 - **User Goal**: Continue slow work without blocking or repeating side effects.
 - **Given**: An embedded managed root, worker or subagent on Linux starts a permitted regular Bash command that remains running past its foreground timeout.

@@ -54,6 +54,13 @@ func parseEmbeddedBash(args map[string]any) (embeddedBashCommand, error) {
 	return c, nil
 }
 
+func rootBashPromotionDeadline(spec embeddedBashCommand, args map[string]any, role string) embeddedBashCommand {
+	if _, explicit := args["timeout"]; !explicit && role == "root" {
+		spec.timeout = 15 * time.Second
+	}
+	return spec
+}
+
 func embeddedBashSchema() *ai.Schema {
 	closed := false
 	s := ai.Object(ai.Prop("command", ai.String()), ai.Opt("timeout", ai.Number()))
@@ -66,7 +73,7 @@ type embeddedBashFailureClass uint8
 
 const maxBashOutputBytes = 64 * 1024
 
-func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentTool {
+func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, role string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "bash",
 		Description: "Run a bash command in the current working directory.",
@@ -84,6 +91,7 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentT
 				return agent.AgentToolResult{}, err
 			}
 			if backgroundBashPlatformSupport() == nil {
+				spec = rootBashPromotionDeadline(spec, args, role)
 				return m.executePromotableBash(ctx, owner, cwd, spec)
 			}
 

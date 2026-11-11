@@ -356,7 +356,7 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
 		tools = append(tools, m.embeddedRestartRouterTool(owner))
 		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
-		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd))
+		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, role))
 		m.ensureBackgroundBash()
 		tools = append(tools, m.backgroundBashTools(owner, saved.Cwd)...)
 		readTool, err := coding.CreateTool("read", saved.Cwd)
