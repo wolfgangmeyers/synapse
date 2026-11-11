@@ -5811,6 +5811,11 @@ dialog.kb-dialog[open] {
   overflow: hidden !important;
 }
 
+/* display:flex above overrides the UA display:none on closed dialogs. */
+.subagent-viewer-dialog:not([open]) {
+  display: none;
+}
+
 .subagent-viewer-dialog .dialog-shell {
   height: 100%;
   max-height: 100%;
