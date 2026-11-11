@@ -61,7 +61,8 @@ test("live projections avoid repeated fanout and recover after disconnect", asyn
     expect(goals).toBe(0);
     f.replies.push({ hold: true });
     await f.userTurn(page, "Launch fallback child");
-    await f.final(page, agent, "Fallback child launched", undefined, false);
+    // The response must exist before reconnect, so this checks recovery of a missed update.
+    await expect.poll(() => f.rows("SELECT 1 FROM embedded_entries WHERE agent_id=? AND kind='assistant' AND body LIKE ?", agent, "%Fallback child launched%").length).toBeGreaterThan(0);
     await expect.poll(() => f.rows("SELECT status FROM managed_subagents WHERE parent_agent_id=?", agent)).toEqual([{ status: "running" }]);
     await expect(page.getByRole("button", { name: /Subagents/ })).toBeVisible();
     await page.getByRole("button", { name: /Subagents/ }).click();
@@ -71,7 +72,7 @@ test("live projections avoid repeated fanout and recover after disconnect", asyn
     const oldFrames = liveFrames;
     await expect.poll(() => liveFrames, { timeout: 12000 }).toBeGreaterThan(oldFrames);
     await expect.poll(() => recoveredHistory).toBeGreaterThan(0);
-    await expect(page.getByText("Fallback child launched", { exact: true }).first()).toBeVisible();
+    await f.final(page, agent, "Fallback child launched", undefined, false);
   } finally { await f.close(); }
 });
 
@@ -174,7 +175,7 @@ for (const runtime of ["claude", "pi"] as const) {
         };
       });
       await f.open(page);
-      const agent = await f.launch(page, runtime === "pi" ? { runtime: "rpc", model: { provider: "openai-codex", id: "gpt-6.1-terra" } } : {});
+      const agent = await f.launch(page, runtime === "pi" ? { model: { provider: "openai-codex", id: "gpt-6.1-terra" } } : {});
       const flag = page.locator(`[data-agent-id="${agent}"] .goal-indicator`);
       f.replies.push({ hold: true });
       await f.api(`/v1/managed-agents/${agent}/goal`, { action: "set", goal: "Fresh goal" }, "PUT");
