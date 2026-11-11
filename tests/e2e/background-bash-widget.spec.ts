@@ -19,12 +19,12 @@ test("widget counts active jobs and shows retained bounded output and exit codes
     await f.open(page);
     const agent = await f.launch(page);
     const widget = page.getByRole("region", { name: "Background shell jobs" });
-    await expect(widget.getByRole("button", { name: /shell jobs 0/i })).toBeVisible();
-    await widget.getByRole("button").click();
+    await expect(widget.getByRole("button", { name: /shell jobs 0/i })).toHaveCSS("animation-name", "none");
+    await widget.getByRole("button", { name: /shell jobs [0-9]+/i }).click();
     await expect(page.getByRole("dialog")).toContainText("No retained shell jobs");
     await page.getByRole("button", { name: "Close dialog" }).click();
     await f.configure({ turns_by_input: [{ contains: "Start widget jobs", steps: [
-      launch("held", `printf 'before\\n'; read -r x < ${quote(release)}; printf 'after\\n'; printf 'error-text\\n\\377\\n' >&2; exit 7`),
+      launch("held", `printf 'before\\n'; read -r x < ${quote(release)}; printf 'middle\\n'; read -r x < ${quote(release)}; printf 'after\\n'; printf 'error-text\\n\\377\\n' >&2; exit 7`),
       launch("large", "head -c 70000 /dev/zero | tr '\\0' x"),
       { text: "Widget jobs launched" },
     ] }] });
@@ -34,22 +34,38 @@ test("widget counts active jobs and shows retained bounded output and exit codes
     expect(responses).toHaveLength(2);
     const ids = responses.map(r => JSON.parse((r.result as { content: { text: string }[] }).content[0].text).job_id as string);
     await expect(widget.getByRole("button", { name: /shell jobs 1/i })).toBeVisible({ timeout: 15000 });
-    await widget.getByRole("button").click();
+    await expect(widget.getByRole("button", { name: /shell jobs [0-9]+/i })).toHaveCSS("animation-name", "header-subagents-pulse");
+    let reads = 0;
+    page.on("request", request => { if (request.url().includes("/background-bash-jobs/")) reads++; });
+    await widget.getByRole("button", { name: /shell jobs [0-9]+/i }).click();
     const dialog = page.getByRole("dialog");
-    const held = dialog.locator("li").filter({ hasText: ids[0] });
-    const large = dialog.locator("li").filter({ hasText: ids[1] });
+    await expect(dialog).not.toContainText("router restart");
+    await dialog.getByRole("button", { name: new RegExp(ids[0]) }).click();
+    const held = dialog.locator(".subagent-drilldown-view");
     await expect(held.locator("pre code")).toContainText("before");
+    await fifo.write("continue\n");
+    await expect(held.locator("pre code")).toContainText("middle", { timeout: 10000 });
+    expect(reads).toBeGreaterThanOrEqual(2);
+    await dialog.getByRole("button", { name: "Back to shell jobs" }).click();
+    await dialog.getByRole("button", { name: new RegExp(ids[1]) }).click();
+    const large = dialog.locator(".subagent-drilldown-view");
     await expect(large).toContainText("Output truncated", { timeout: 15000 });
     await expect(large.locator("pre code")).toHaveText("x".repeat(65536));
+    await expect(large).toContainText("Exit code: 0");
+    await dialog.getByRole("button", { name: "Back to shell jobs" }).click();
+    await dialog.getByRole("button", { name: new RegExp(ids[0]) }).click();
     await fifo.write("release\n");
     await expect(widget.getByRole("button", { name: /shell jobs 0/i })).toBeVisible({ timeout: 15000 });
     await expect(held).toContainText("failed", { timeout: 15000 });
     await expect(held).toContainText("Exit code: 7");
-    await expect(held.locator("pre code")).toHaveText("before\nafter\nerror-text\n�\n");
-    await expect(large).toContainText("Exit code: 0");
+    await expect(held.locator("pre code")).toHaveText("before\nmiddle\nafter\nerror-text\n�\n");
+    await expect(widget.getByRole("button", { name: /shell jobs [0-9]+/i })).toHaveCSS("animation-name", "none");
     // Exercise explicit retry and detail/projection disagreement
     // through the real router, modifying only the first two browser responses.
     await page.getByRole("button", { name: "Close dialog" }).click();
+    const readsAfterClose = reads;
+    await page.waitForTimeout(2500);
+    expect(reads).toBe(readsAfterClose);
     let detailRequests = 0;
     const detailPattern = `**/background-bash-jobs/${ids[0]}`;
     await page.route(detailPattern, async route => {
@@ -63,12 +79,13 @@ test("widget counts active jobs and shows retained bounded output and exit codes
         await route.continue();
       }
     });
-    await widget.getByRole("button").click();
+    await widget.getByRole("button", { name: /shell jobs [0-9]+/i }).click();
+    await dialog.getByRole("button", { name: new RegExp(ids[0]) }).click();
     await expect(held).toContainText("Could not load output");
     await expect(held).not.toContainText("Output unavailable or expired");
     await held.getByRole("button", { name: "Retry" }).click();
     await expect(held).toContainText(`${ids[0]}: failed`);
-    await expect(held.locator("pre code")).toHaveText("before\nafter\nerror-text\n�\n");
+    await expect(held.locator("pre code")).toHaveText("before\nmiddle\nafter\nerror-text\n�\n");
     await page.unroute(detailPattern);
     const missing = await f.request(page, `/v1/managed-agents/${encodeURIComponent(agent)}/background-bash-jobs/missing-job`, undefined, "GET");
     expect(missing.status).toBe(404);
