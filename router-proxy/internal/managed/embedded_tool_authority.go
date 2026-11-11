@@ -592,7 +592,7 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 			if role != "root" && role != "worker" {
 				return &agent.PolicyDenial{Reason: "background bash requires embedded root or worker"}
 			}
-			if call.ToolCall.Name == "list_background_bash_jobs" || call.ToolCall.Name == "get_background_bash_job" || call.ToolCall.Name == "wait_background_bash_job" {
+			if call.ToolCall.Name == "list_background_bash_jobs" || call.ToolCall.Name == "get_background_bash_job" {
 				return nil
 			}
 		}
