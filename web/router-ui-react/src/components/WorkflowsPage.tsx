@@ -607,7 +607,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
             </div>
             <div className="form-group" style={{ marginBottom: "1.5rem" }}>
               <label htmlFor="workflow-snooze-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
-                Snooze (minutes)
+                Maximum snooze (minutes)
               </label>
               <input
                 id="workflow-snooze-input"
@@ -622,7 +622,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 }}
               />
               <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", display: "block", marginTop: "0.25rem" }}>
-                Default snooze duration for workflow_snooze and settling intervals when this workflow is active (default: 10 minutes).
+                Default and maximum snooze for this workflow; agents may request a shorter wait (default: 10 minutes, maximum: 24 hours).
               </span>
             </div>
             <div className="dialog-actions workflow-dialog-actions">
@@ -677,7 +677,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
             </div>
             <div className="form-group" style={{ marginBottom: "1.5rem" }}>
               <label htmlFor="rename-snooze-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
-                Snooze (minutes)
+                Maximum snooze (minutes)
               </label>
               <input
                 id="rename-snooze-input"
@@ -688,7 +688,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 onChange={(e) => setRenameSnoozeMinutes(Math.max(1, parseInt(e.target.value, 10) || 1))}
               />
               <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", display: "block", marginTop: "0.25rem" }}>
-                Default snooze duration for workflow_snooze and settling intervals when this workflow is active (default: 10 minutes).
+                Default and maximum snooze for this workflow; agents may request a shorter wait (default: 10 minutes, maximum: 24 hours).
               </span>
             </div>
             <div className="dialog-actions workflow-dialog-actions">
