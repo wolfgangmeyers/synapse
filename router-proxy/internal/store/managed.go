@@ -5267,14 +5267,12 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedBackgroundTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
-		if agent.Runtime == "embedded" {
-			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
-			if err != nil {
-				return rollback(err)
-			}
-			if policy != nil {
-				goalPolicies[agent.AgentID] = policy
-			}
+		policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
+		if err != nil {
+			return rollback(err)
+		}
+		if policy != nil {
+			goalPolicies[agent.AgentID] = policy
 		}
 	}
 	sourceRows, err := s.db.QueryContext(ctx, `SELECT agent_id, desired_policy_canonical, desired_policy_sha256,
@@ -5407,12 +5405,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 	if err := loadManagedBackgroundTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
-	var goalPolicy *ManagedGoalPolicy
-	if agent.Runtime == "embedded" {
-		goalPolicy, err = s.embeddedProjectionGoalTx(ctx, agent.AgentID)
-		if err != nil {
-			return rollback(err)
-		}
+	goalPolicy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
+	if err != nil {
+		return rollback(err)
 	}
 	generated := s.clock.Now().UTC()
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {

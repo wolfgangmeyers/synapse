@@ -1392,6 +1392,17 @@ func (r *Router) handleManagedAgentsGETWithSnapshot(w http.ResponseWriter, req *
 		return
 	}
 	envelope := managed.ProjectionListEnvelope(snapshot)
+	// The UI needs children alongside the same agent inventory during startup
+	// and live-connection recovery, without a request for every worker.
+	if req.URL.Query().Get("include_children") == "true" {
+		version, _, children, childErr := managedChildrenSnapshotFromStoredWithStore(req.Context(), r.store, snapshot)
+		if childErr != nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed children"})
+			return
+		}
+		envelope["children"] = children
+		envelope["children_version"] = version
+	}
 	if agents, ok := envelope["agents"].([]map[string]any); ok {
 		records := make(map[string]*store.ManagedAgentRecord, len(snapshot.Agents))
 		for _, record := range snapshot.Agents {

@@ -69,6 +69,8 @@ func (m *Manager) executeManagedGoalControl(ctx context.Context, binding *manage
 	if err != nil {
 		return RootControlHandlerResult{}, err
 	}
+	// Show the saved goal even if the runtime cannot apply it yet.
+	m.publishProjection()
 	// The saved desired revision is the durable result. Projection is separate:
 	// callers see its pending state while the current session retries it.
 	if err := m.projectManagedGoalPolicy(ctx, binding, invocation.Fence, policy, invocation.RequestID); err != nil {

@@ -12,7 +12,6 @@ import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, mi
 import { loadManagedRecentFolders, normalizeManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "./persistence/managed-folder-history";
 import { type RouterTransport, type RouterTransportOptions } from "./transport/router-transport";
 import { managedRequestErrorMessage } from "./transport/http-client";
-import { loadManagedGoalProjection } from "./transport/managed-goal-projection";
 import { uiLiveErrorMessage } from "./transport/ui-live-client";
 import { isRecord } from "./protocol/guards";
 import type { ManagedAgent } from "./protocol/types";
@@ -292,20 +291,23 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   // Background lookup map resolving workflow state IDs to human-readable state and workflow names.
   // Periodically synchronizes so agent rows and conversation headers display named workflow states even
   // when an agent projection only carries state IDs.
+  const [sidebarTab, setSidebarTab] = useState<"agents" | "background">("agents");
   const [workflowStateMap, setWorkflowStateMap] = useState<Record<string, { state_name?: string | undefined; workflow_name?: string | undefined }>>({});
 
   useEffect(() => {
-    if (!session.transport?.http?.workflowStates) return;
+    if (sidebarTab !== "background" || !session.transport?.http?.workflowStates) return;
     let mounted = true;
+    let generation = 0;
     const fetchWorkflowData = async () => {
+      const request = ++generation;
       try {
         const [statesRes, workflowsRes] = await Promise.allSettled([
           session.transport.http.workflowStates(),
           session.transport.http.listWorkflows(),
         ]);
-        if (!mounted) return;
-        const states = statesRes.status === "fulfilled" ? statesRes.value.workflow_states || [] : [];
-        const workflows = workflowsRes.status === "fulfilled" ? workflowsRes.value || [] : [];
+        if (!mounted || request !== generation || statesRes.status !== "fulfilled" || workflowsRes.status !== "fulfilled") return;
+        const states = statesRes.value.workflow_states || [];
+        const workflows = workflowsRes.value || [];
         const wfMap = new Map(workflows.map((w) => [w.id, w.name]));
         const mapping: Record<string, { state_name?: string | undefined; workflow_name?: string | undefined }> = {};
         for (const st of states) {
@@ -327,7 +329,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
       mounted = false;
       clearInterval(interval);
     };
-  }, [session.transport]);
+  }, [session.transport, sidebarTab]);
 
   const visibleAgents = useMemo(
     () => mergeAgentSources(session.state.agents, session.state.managedAgents ?? [], session.state.managedChildren, workflowStateMap)
@@ -764,30 +766,10 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const pendingReminderIds = new Set([...session.state.pendingControls.values()].flatMap((pending) => pending.action === "reminder-lock" && pending.peer === selectedLegacyPeer && pending.reminderId !== undefined ? [pending.reminderId] : []));
   const arrivalForDialog = arrivalAgent ? session.state.arrivals.get(arrivalAgent) : undefined;
   const sortedPromptTemplates = useMemo(() => sortPromptTemplatesByMRU(session.state.templates, templateUsage), [session.state.templates, templateUsage]);
-  const refreshManagedGoalStates = (agents: Parameters<typeof loadManagedGoalProjection>[1]): void => {
-    void loadManagedGoalProjection(session.transport.http, agents).then((goals) => {
-      for (const { agentId, goalState } of goals) session.dispatch({ type: "managed/goal-state", scope, agentId, goalState });
-    });
-  };
   const refreshManaged = async (): Promise<void> => {
-    // A router restart can temporarily clear the capability frame while stale
-    // managed rows remain visible. Refresh the direct endpoint anyway so the
-    // user can recover their retained child records without another reconnect.
-    const snapshot = await session.transport.http.managedAgents();
+    const snapshot = await session.transport.http.managedAgents(true);
     session.dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
-    refreshManagedGoalStates(snapshot.agents);
-    try {
-      const nonTerminating = snapshot.agents.filter(
-        (agent) => !(agent.lifecycle_state === "terminating" || agent.desired_state === "terminated")
-      );
-      const childrenSettled = await Promise.allSettled(
-        nonTerminating.map((agent) => session.transport.http.managedChildren(agent.agent_id))
-      );
-      const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-      session.dispatch({ type: "managed/children", scope, children });
-    } catch {
-      // Child projection can be repaired on next pass
-    }
+    if (snapshot.children !== undefined) session.dispatch({ type: "managed/children", scope, children: snapshot.children, ...(snapshot.children_version === undefined ? {} : { version: snapshot.children_version }) });
   };
   const changeManagedModel = async (model: ModelSummary): Promise<void> => {
     if (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts !== true) return;
@@ -931,7 +913,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
 
   return <>
     <AppShell
-      sidebar={<Sidebar scope={scope} client={session.transport.http} storage={storage} routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={isConnected ? visibleAgents : []} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onStopSubagent={handleStopSubagent} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); void session.resync().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} onLaunchBackgroundWorkflow={() => setDialog("run-background-workflow")} onWorkflowSchedules={() => setDialog("workflow-schedules")} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setDialog("managed"); }, onRestartRouter: restartRouter, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); }, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onKnowledgeBase: () => { setDialog("knowledge-base"); }, onWorkflows: () => { window.location.hash = "#/workflows"; }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } } : { onRestartRouter: restartRouter, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onKnowledgeBase: () => { setDialog("knowledge-base"); }, onWorkflows: () => { window.location.hash = "#/workflows"; }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } })} />}
+      sidebar={<Sidebar sidebarTab={sidebarTab} onSidebarTabChange={setSidebarTab} scope={scope} client={session.transport.http} storage={storage} routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={isConnected ? visibleAgents : []} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onStopSubagent={handleStopSubagent} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); void session.resync().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} onLaunchBackgroundWorkflow={() => setDialog("run-background-workflow")} onWorkflowSchedules={() => setDialog("workflow-schedules")} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setDialog("managed"); }, onRestartRouter: restartRouter, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); }, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onKnowledgeBase: () => { setDialog("knowledge-base"); }, onWorkflows: () => { window.location.hash = "#/workflows"; }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } } : { onRestartRouter: restartRouter, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onKnowledgeBase: () => { setDialog("knowledge-base"); }, onWorkflows: () => { window.location.hash = "#/workflows"; }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } })} />}
       conversation={isConnected ? <div className="conversation-runtime">{session.state.outboxNotice && <div role="alert">{session.state.outboxNotice} <button type="button" onClick={() => session.dispatch({ type: "outbox/dismiss", scope })}>Dismiss</button></div>}<Conversation onDiscardHistoryBefore={isManagedSelected ? discardCombinedHistory : undefined} client={session.transport.http} templates={session.state.templates} {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} timelineEvents={conversation.timelineEvents} liveTimelineIds={conversation.liveTimelineIds} historyWindowReady={!conversation.loading && (!isManagedSelected || selectedActivity.ready)} messages={selectedAgent === undefined ? [] : reconcileHistoryMessages(mergeMessages(selectMessages(session.state, selectedConversationPeer), acceptedView.generation === viewGeneration.current.generation ? visibleAccepted(acceptedView.messages, conversation.messages) : []), conversation.messages, 0).map((message) => (message.attachments === undefined ? message : { ...message, attachments: message.attachments.map((attachment, index) => ({ ...attachment, cacheKey: attachment.cacheKey ?? cacheKeyForAttachment(scope.routerUrl, scope.agentId, selectedConversationPeer ?? "", canonicalSendId(message.id), attachmentCacheIdentity(attachment, index)) })) }))} {...(isManagedSelected && selectedAgent ? { conversationView: "complete" as const, activityEntries: selectedActivity.entries, liveActivityIds: selectedActivity.liveIds, activityHistoryReady: selectedActivity.ready && !conversation.loading } : {})} composeEnabled={selectedConversationPeer !== undefined && (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts === true)} showAgentControls={selectedLegacyPeer !== undefined} showGoalControl={selectedLegacyPeer !== undefined || selectedAgent?.source === "router-managed"} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(selectedAgent && (selectedLegacyPeer !== undefined || selectedAgent.source === "router-managed") ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} isEmbedded={selectedAgent.runtime === "embedded" || selectedAgent.managed_agent?.runtime === "embedded"} pending={selectedAgent.source === "router-managed" ? pendingManagedModelChange : pendingModelControl} loading={selectedAgent.source === "router-managed" && managedHeaderModelsLoading} {...(selectedAgent.source === "router-managed" && managedHeaderModelError ? { emptyMessage: managedHeaderModelError } : {})} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true || pendingManagedModelChange : session.state.connection !== "connected" || pendingModelControl} onChange={selectedAgent.source === "router-managed" ? changeManagedModel : chooseModel} /> } : {})} {...(selectedAgent ? { promptControls: <PromptControls templates={sortedPromptTemplates} usage={templateUsage} loaded={templatesLoaded} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true : session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { markTemplateUsed(template); setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...((selectedActivity.error || conversation.error) ? { onRetryHistory: () => { if (selectedActivity.error) void selectedActivity.loadOlder(); if (conversation.error) void conversation.refresh(); } } : {})} {...((selectedActivity.error ?? conversation.error) ? { error: (selectedActivity.error ?? conversation.error)?.message } : {})} {...(selectedAgent && dialog === undefined && (managedError || (selectedAgent.source === "router-managed" && managedHeaderModelError)) ? { agentError: managedError || managedHeaderModelError, onDismissError: () => { setManagedError(undefined); setManagedHeaderModelError(undefined); } } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (!selectedConversationPeer) return; const retained = new Set(Object.values(committedOutbox.current).flat().map((message) => message.id)); for (const id of sendsInFlight.current.keys()) retained.add(id); if (retained.size >= 150) throw new Error("Outbox full. Copy or resolve existing messages before sending."); void send(selectedConversationPeer, body, images).catch(() => undefined); }} onAction={(action) => {
   if (selectedAgent?.agent_id) void manageAction(selectedAgent.agent_id, action);
 }} onConfirmTermination={(confirm) => {
