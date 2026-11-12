@@ -77,7 +77,7 @@ The promoted job uses existing ownership, bounded output, lifecycle and polling 
 ### Scenario: [BB-REST-ERROR] Managed agent projection cannot be sampled
 - **Given**: A managed agent list or detail request needs a background-job snapshot.
 - **When**: Its owner or store snapshot fails.
-- **Then**: The entire request returns an internal HTTP error, not a successful partial projection or null jobs. Snapshot work uses the request context.
+- **Then**: The entire request returns an internal HTTP error, not a successful partial projection or null jobs. Snapshot work uses the request context. A failed or stopped agent has no current owner to sample, so it contributes an empty job list instead. If an active owner's fence changes during sampling, that stale view is rejected.
 
 
 ### Scenario: [BB-001] Root and worker launch a job
