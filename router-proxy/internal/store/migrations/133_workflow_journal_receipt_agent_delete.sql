@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS workflow_journal_receipts_agent_delete;

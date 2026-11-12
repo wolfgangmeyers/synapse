@@ -50,6 +50,7 @@ export interface ConversationHeaderProps {
   expanded?: boolean | undefined;
   onOpenProgressHistory?: ((agentId: string) => void) | undefined;
   onOpenWorkflow?: (() => void) | undefined;
+  onOpenWorkflowJournal?: ((agentId: string) => void) | undefined;
 }
 
 
@@ -148,7 +149,7 @@ async function urgencyDeadline<T>(request: Promise<T>): Promise<T> {
   }
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow, onOpenWorkflowJournal }: ConversationHeaderProps): ReactElement {
 
   const isClaude = isClaudeCodeAgent(agent);
   const isManaged = isManagedAgent(agent);
@@ -603,6 +604,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
 
               {/* Action Buttons Toolbar directly adjacent to title */}
               <div className="conversation-header-actions">
+                {isManaged && agent && onOpenWorkflowJournal ? <HeaderActionButton aria-label="Workflow journal" title="Workflow journal" icon="fa-solid fa-clock-rotate-left" onClick={() => onOpenWorkflowJournal(agent.agent_id)} /> : null}
                 {agent && pinnedControls.includes("urgency") ? <HeaderActionButton
                   className="urgency-header-button"
                   aria-label={displayedUrgency ? "Clear urgency" : "Mark urgent"}

@@ -819,6 +819,18 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			implicitReturn = *req.AllowImplicitReturn
 		}
 
+		newWorkflowID := ""
+		if workflowIDVal != nil {
+			newWorkflowID = *workflowIDVal
+		}
+		if existingWorkflowID.String != newWorkflowID {
+			// Record the visit using the destination definition identity even
+			// though the journal event is appended before the definition update.
+			if err := s.journalStateMovedToTx(ctx, id, newWorkflowID, name); err != nil {
+				return err
+			}
+		}
+
 		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, reminders_json = ?, monitors_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, allow_implicit_return = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
 			workflowIDVal, name, desc, entryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, implicitReturn, uiPosX, uiPosY, now, id)
 		if err != nil {
@@ -894,6 +906,10 @@ func (s *Store) DeleteWorkflowState(ctx context.Context, id string) (bool, error
 			return err
 		}
 
+		before, err := s.adminBindingsTx(ctx)
+		if err != nil {
+			return err
+		}
 		res, err := s.db.ExecContext(ctx, `DELETE FROM workflow_states WHERE id = ?`, id)
 		if err != nil {
 			return err
@@ -903,6 +919,9 @@ func (s *Store) DeleteWorkflowState(ctx context.Context, id string) (bool, error
 			return err
 		}
 		deleted = rowsAff > 0
+		if deleted {
+			return s.journalAdminBindingsChangedTx(ctx, before)
+		}
 		return nil
 	})
 	return deleted, err

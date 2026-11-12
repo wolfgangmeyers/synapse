@@ -754,24 +754,34 @@ func (s *Store) ReserveManagedLaunch(ctx context.Context, agent ManagedAgentReco
 }
 
 func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int) error {
-	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "", nil)
+	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "", nil, nil)
 }
 
 func (s *Store) ReserveManagedEmbeddedLaunch(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string) error {
 	if agent.Runtime != "embedded" || (role != "root" && role != "worker") {
 		return errors.New("invalid embedded launch role")
 	}
-	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, role, nil)
+	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, role, nil, nil)
 }
 
 func (s *Store) ReserveManagedEmbeddedWorkerFromOwner(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, parent EmbeddedBinding) error {
 	if agent.Runtime != "embedded" {
 		return errors.New("worker requires embedded runtime")
 	}
-	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", &parent)
+	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", &parent, nil)
 }
 
-func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding) error {
+// ReserveManagedBackgroundWorkflow atomically binds the workflow before the worker can start.
+func (s *Store) ReserveManagedBackgroundWorkflow(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, workflowID, stateID string, vars map[string]string) error {
+	if agent.Runtime != "embedded" || !agent.IsBackground || workflowID == "" || stateID == "" {
+		return errors.New("invalid background workflow launch")
+	}
+	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", nil, func() error {
+		return s.setManagedAgentActiveWorkflowJournalTx(ctx, agent.AgentID, &workflowID, &stateID, vars)
+	})
+}
+
+func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding, activate func() error) error {
 	if maxAgents < 1 {
 		return errors.New("managed process limit must be positive")
 	}
@@ -887,6 +897,8 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM agent_progress_history WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `UPDATE recipient_sources SET state='retired' WHERE recipient_name = ?`, agent.Name)
+				// Workflow journal receipts are retained until expiry, even when an
+				// agent identity is replaced.
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id = ?`, existingID)
 			}
 		} else if !errors.Is(checkErr, sql.ErrNoRows) {
@@ -915,6 +927,11 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 				return &ManagedNameConflictError{Name: agent.Name}
 			}
 			return err
+		}
+		if activate != nil {
+			if err := activate(); err != nil {
+				return err
+			}
 		}
 		if role != "" {
 			if _, err := s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, agent.AgentID, agent.PiSessionID, agent.SessionEpoch, agent.RuntimeGeneration, role); err != nil {
@@ -5007,34 +5024,16 @@ func (s *Store) setManagedAgentActiveWorkflowStateTx(ctx context.Context, agentI
 		}
 	}
 	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+
+	query := `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`
 	if workflowStateID == nil {
-		// When clearing state, also clear workflow_id and variables if columns exist
 		hasWfID, _ := managedAgentColumnTx(ctx, s.db, "active_workflow_id")
 		hasVars, _ := managedAgentColumnTx(ctx, s.db, "workflow_variables_json")
-		var res sql.Result
-		var execErr error
 		if hasWfID && hasVars {
-			res, execErr = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=NULL, active_workflow_id=NULL, workflow_variables_json=NULL, updated_at=? WHERE agent_id=?`, now, agentID)
-		} else {
-			res, execErr = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`, stateIDVal, now, agentID)
+			query = `UPDATE managed_agents SET active_workflow_state_id=?, active_workflow_id=NULL, workflow_variables_json=NULL, updated_at=? WHERE agent_id=?`
 		}
-		if execErr != nil {
-			return execErr
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return errors.New("managed agent not found")
-		}
-		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
-			return err
-		}
-		return nil
 	}
-
-	res, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`, stateIDVal, now, agentID)
+	res, err := s.db.ExecContext(ctx, query, stateIDVal, now, agentID)
 	if err != nil {
 		return err
 	}
@@ -6182,6 +6181,25 @@ func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 		if err := s.setManagedAgentActiveWorkflowStateTx(ctx, agentID, stateID); err != nil {
 			return err
 		}
+		if stateID == nil {
+			var workflow string
+			if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(active_workflow_id,'') FROM managed_agents WHERE agent_id=?`, agentID).Scan(&workflow); err != nil {
+				return err
+			}
+			if workflow == "" {
+				if err := s.journalEndTx(ctx, agentID, "deactivated"); err != nil {
+					return err
+				}
+			} else {
+				if err := s.journalStateLostTx(ctx, agentID); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := s.journalVisitTx(ctx, agentID, *stateID, "admin_visit"); err != nil {
+				return err
+			}
+		}
 		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
 	})
 }
@@ -6191,11 +6209,32 @@ func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, 
 		stateID = nil
 	}
 	return s.runImmediate(ctx, func() error {
-		if err := s.setManagedAgentActiveWorkflowWithVariablesTx(ctx, agentID, workflowID, stateID, vars); err != nil {
+		return s.setManagedAgentActiveWorkflowJournalTx(ctx, agentID, workflowID, stateID, vars)
+	})
+}
+
+func (s *Store) setManagedAgentActiveWorkflowJournalTx(ctx context.Context, agentID string, workflowID, stateID *string, vars map[string]string) error {
+	if err := s.setManagedAgentActiveWorkflowWithVariablesTx(ctx, agentID, workflowID, stateID, vars); err != nil {
+		return err
+	}
+	if err := s.journalEndTx(ctx, agentID, "replaced"); err != nil {
+		return err
+	}
+	if stateID != nil {
+		state := ""
+		if stateID != nil {
+			state = *stateID
+		}
+		if err := s.journalStartTx(ctx, agentID, state, false); err != nil {
 			return err
 		}
-		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
-	})
+		if state == "" {
+			if err := s.journalSnapshotWorkflowOnlyTx(ctx, agentID); err != nil {
+				return err
+			}
+		}
+	}
+	return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
 }
 
 func (s *Store) retireEmbeddedGoalSnoozeEvidenceTx(ctx context.Context, agentID string) error {

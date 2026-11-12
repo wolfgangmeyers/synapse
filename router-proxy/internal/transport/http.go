@@ -31,7 +31,7 @@ const (
 	permissiveCORSMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	// Browser clients use these request IDs for idempotency and diagnostics.
 	// This list grants no capability; router reachability remains the boundary.
-	permissiveCORSHeaders = "content-type, x-request-id, x-correlation-id"
+	permissiveCORSHeaders = "content-type, x-request-id, x-correlation-id, idempotency-key"
 	permissiveCORSExposed = "x-correlation-id, x-request-id"
 )
 

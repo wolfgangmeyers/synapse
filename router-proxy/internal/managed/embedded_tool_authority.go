@@ -353,6 +353,7 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		tools = append(tools, m.embeddedKBDeleteTool(owner))
 		tools = append(tools, m.embeddedKBListTool(owner))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
+		tools = append(tools, m.embeddedWorkflowJournalNoteTool(owner))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
 		tools = append(tools, m.embeddedRestartRouterTool(owner))
 		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))

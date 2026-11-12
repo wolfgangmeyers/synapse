@@ -117,6 +117,10 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
 		return true
+	case workflowJournalRouteMatched(req.URL.Path):
+		agentID, runID, _ := workflowJournalPath(req.URL.Path)
+		r.handleWorkflowJournal(w, req, agentID, runID)
+		return true
 	case req.Method == http.MethodGet && managedWorkflowStatePath(req.URL.Path) != "":
 		r.handleManagedWorkflowStateGET(w, req, managedWorkflowStatePath(req.URL.Path))
 		return true
@@ -1810,12 +1814,6 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		return
 	}
 
-	agent, err := r.store.ManagedAgent(req.Context(), agentID)
-	if err != nil {
-		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
-		return
-	}
-
 	switch action {
 	case "activate":
 		var workflowID *string
@@ -1842,43 +1840,49 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			workflowStateID = strings.TrimSpace(workflowStateID)
 		}
 
-		// If workflow_id is provided and workflow_state_id is empty, lookup workflow EntryStateID
-		if workflowID != nil && workflowStateID == "" {
-			wf, err := r.store.GetWorkflow(req.Context(), *workflowID)
-			if err != nil || wf == nil {
+		op := req.Header.Get("Idempotency-Key")
+		if op == "" {
+			op = requestID
+		}
+		wfID := ""
+		if workflowID != nil {
+			wfID = *workflowID
+		}
+		activation, replay, activationErr := r.store.ActivateWorkflow(req.Context(), agentID, op, payload, store.WorkflowActivationRequest{Action: action, WorkflowID: wfID, StateID: workflowStateID, Variables: variables})
+		if activationErr != nil {
+			switch {
+			case errors.As(activationErr, new(*store.ManagedAgentNotFoundError)):
+				r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+			case errors.Is(activationErr, store.ErrWorkflowJournalOperationConflict):
+				r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Idempotency key conflicts with earlier request"})
+			case errors.Is(activationErr, store.ErrActivationWorkflowNotFound):
 				r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_NOT_FOUND", "Workflow not found"})
-				return
+			case errors.Is(activationErr, store.ErrActivationStateNotFound):
+				r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_STATE_NOT_FOUND", "Workflow state not found"})
+			case errors.Is(activationErr, store.ErrActivationMissingState):
+				r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_FIELD", "workflow state or entry state is required"})
+			default:
+				r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
 			}
-			if wf.EntryStateID == nil || strings.TrimSpace(*wf.EntryStateID) == "" {
-				r.writeManagedError(w, req, &managedHTTPError{400, "BAD_REQUEST", "workflow has no entry state"})
-				return
-			}
-			workflowStateID = strings.TrimSpace(*wf.EntryStateID)
+			return
 		}
-
-		if workflowStateID == "" {
-			r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_FIELD", "workflow_state_id is required for activate when workflow has no entry state"})
+		workflowID, wfState, variables := activation.WorkflowID, activation.State, activation.Variables
+		if replay {
+			activeWorkflowID := ""
+			if workflowID != nil {
+				activeWorkflowID = *workflowID
+			}
+			var activeWorkflowStateID string
+			if wfState != nil {
+				activeWorkflowStateID = wfState.ID
+			}
+			r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"agent_id": agentID, "active_workflow_id": activeWorkflowID, "active_workflow_state_id": activeWorkflowStateID, "active_workflow_state": wfState, "workflow_variables": variables}, nil)
 			return
 		}
 
-		wfState, err := r.store.GetWorkflowState(req.Context(), workflowStateID)
-		if err != nil {
-			r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_STATE_NOT_FOUND", "Workflow state not found"})
-			return
-		}
-
-		// If workflow_id wasn't explicitly passed in payload, inherit it from state if set
-		if workflowID == nil && wfState.WorkflowID != nil && strings.TrimSpace(*wfState.WorkflowID) != "" {
-			workflowID = wfState.WorkflowID
-		}
-
+		agent, _ := r.store.ManagedAgent(req.Context(), agentID)
 		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
 		_ = r.store.CleanUpManagedAgentWorkflowMonitors(req.Context(), agentID)
-
-		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, workflowID, &wfState.ID, variables); err != nil {
-			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
-			return
-		}
 
 		// Activate implicit workflow completion goal
 		wfName := "active"
@@ -1911,7 +1915,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 
 		// Inject guidance prompt if agent is embedded/running
-		if agent.Runtime == "embedded" && agent.LifecycleState == "running" {
+		if agent != nil && agent.Runtime == "embedded" && agent.LifecycleState == "running" {
 			var sb strings.Builder
 			sb.WriteString(fmt.Sprintf("[Workflow Activated: %s]\n", wfState.Name))
 			if strings.TrimSpace(wfState.Description) != "" {
@@ -1993,12 +1997,28 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		}, nil)
 
 	case "deactivate":
-		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
-		_ = r.store.CleanUpManagedAgentWorkflowMonitors(req.Context(), agentID)
-		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, nil, nil, nil); err != nil {
-			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
+		op := req.Header.Get("Idempotency-Key")
+		if op == "" {
+			op = requestID
+		}
+		_, replay, activationErr := r.store.ActivateWorkflow(req.Context(), agentID, op, payload, store.WorkflowActivationRequest{Action: action})
+		if activationErr != nil {
+			if errors.As(activationErr, new(*store.ManagedAgentNotFoundError)) {
+				r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+			} else if errors.Is(activationErr, store.ErrWorkflowJournalOperationConflict) {
+				r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Idempotency key conflicts with earlier request"})
+			} else {
+				r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
+			}
 			return
 		}
+		if replay {
+			r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"agent_id": agentID, "active_workflow_id": "", "active_workflow_state_id": "", "active_workflow_state": nil, "workflow_variables": nil}, nil)
+			return
+		}
+
+		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
+		_ = r.store.CleanUpManagedAgentWorkflowMonitors(req.Context(), agentID)
 		if r.managed != nil {
 			_ = r.managed.SyncEmbeddedWorkflowTools(req.Context(), agentID)
 		}

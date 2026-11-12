@@ -22,7 +22,22 @@ func TestEmbeddedMigration065ApplyReopenRollbackRetryAndCoexistence(t *testing.T
 	s, err := Open(ctx, path, Options{Migrations: prefix})
 	require.NoError(t, err)
 	require.Zero(t, embeddedRedCount(t, s, "schema_migrations WHERE id='"+embedded065ID+"'"))
-	managed := embeddedManagedAgent(t, s, "embedded-migration-agent")
+	// Model a row created by the pre-065 RPC-era schema. The current managed
+	// launch API correctly requires migration 065, so seed historical state
+	// directly rather than routing this fixture through that API.
+	const agentID = "embedded-migration-agent"
+	const sessionID = "embedded-migration-session"
+	const generation = "embedded-migration-generation"
+	_, err = s.db.Exec(`INSERT INTO managed_agents (
+		agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
+		desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
+		session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
+		manifest_revision,manifest_hash,created_at,updated_at
+	) VALUES (?, ?, 1, ?, 'openai-codex', 'gpt-5', 'running', 'running', 'idle', 1, ?, 7,
+		321, 'start', 'incarnation', ?, 1, ?, '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')`,
+		agentID, agentID, t.TempDir(), sessionID, generation, testManifestHash)
+	require.NoError(t, err)
+	managed := EmbeddedBinding{AgentID: agentID, SessionID: sessionID, Epoch: 7, Generation: generation}
 	require.NoError(t, s.Close())
 	broken := append([]Migration(nil), migrations...)
 	broken[idx].SQL = "CREATE TABLE embedded_rollback_probe (id INTEGER);" + broken[idx].SQL + "; INSERT INTO absent_embedded_test_table VALUES (1);"
