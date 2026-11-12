@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { startIsolatedRouter, startRouterProxy, serveFrontendDist, type IsolatedRouter, type IsolatedProxy, type IsolatedFrontend } from "./harness";
 
-export type Reply = ({ tool: string; args: object } | { tools: { tool: string; args: object }[] } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { failure: 503; evaluation: true; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { hold: true }) & { ownsRequest?: (request: Record<string, unknown>) => boolean };
+export type Reply = ({ tool: string; args: object } | { tools: { tool: string; args: object }[] } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { failure: 400 | 503; evaluation?: true; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { hold: true }) & { ownsRequest?: (request: Record<string, unknown>) => boolean };
 export const model = { provider: "openai-codex", id: "gpt-6.1-terra" };
 
 // ResolveModel bypasses the worker resolver for Claude evaluations. Only this
@@ -135,7 +135,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
       }
       if ("failure" in reply) {
         res.writeHead(reply.failure, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "deterministic evaluator failure", type: "server_error" } }));
+        res.end(JSON.stringify({ error: { message: reply.evaluation ? "deterministic evaluator failure" : "deterministic provider failure", type: "server_error" } }));
         return;
       }
       if ("answer" in reply && reply.advanceMS) await fixture!.advance(reply.advanceMS);

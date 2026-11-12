@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -24,6 +25,18 @@ func (m *Manager) BackgroundBashJobsSnapshot(ctx context.Context, record *store.
 
 func (m *Manager) backgroundBashJobsContext(ctx context.Context, record *store.ManagedAgentRecord, beforeRead func()) ([]map[string]string, error) {
 	if m == nil || record == nil {
+		return backgroundBashPublicJobs(nil), nil
+	}
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Failed or stopped agents have no current owner to project. The manager
+	// may still retain their old owner for cleanup; validating it would turn
+	// one failed agent into an error for the entire agent list.
+	if record.Runtime != "embedded" || record.DesiredState != "running" || (record.LifecycleState != "starting" && record.LifecycleState != "running") {
 		return backgroundBashPublicJobs(nil), nil
 	}
 	m.mu.Lock()

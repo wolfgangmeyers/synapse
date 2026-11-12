@@ -104,6 +104,84 @@ func TestBackgroundBashGlobalChangeReservesProjectionVersion(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+func TestBackgroundBashProjectionOmitsFailedOwner(t *testing.T) {
+	manager, db, _, id, _ := requiredToolsFixture(t, "root")
+	manager.ensureBackgroundBash()
+	manager.mu.Lock()
+	owner := manager.embeddedOwners[id]
+	jobs := manager.backgroundBash
+	manager.mu.Unlock()
+	beforeFailure, err := db.ManagedAgent(context.Background(), id)
+	require.NoError(t, err)
+	jobs.mu.Lock()
+	jobs.jobs["failed-owner-job"] = &backgroundBashEntry{job: BackgroundBashJob{ID: "failed-owner-job", Owner: backgroundBashOwnerKey(owner), Status: "succeeded", FinishedAt: time.Now()}}
+	jobs.mu.Unlock()
+	got, err := manager.BackgroundBashJobsSnapshot(context.Background(), beforeFailure)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]string{{"id": "failed-owner-job", "status": "succeeded"}}, got)
+
+	require.NoError(t, db.MarkEmbeddedOwnerFailed(context.Background(), owner.binding, beforeFailure.LaunchOperationID, "TEST_START_FAILED", "provider failed"))
+	afterFailure, err := db.ManagedAgent(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, "failed", afterFailure.LifecycleState)
+	for _, tc := range []struct {
+		name   string
+		change func(*store.ManagedAgentRecord)
+	}{
+		{"failed", func(record *store.ManagedAgentRecord) {}},
+		{"terminated", func(record *store.ManagedAgentRecord) { record.LifecycleState = "terminated" }},
+		{"desired termination", func(record *store.ManagedAgentRecord) {
+			record.LifecycleState, record.DesiredState = "running", "terminated"
+		}},
+		{"non-embedded", func(record *store.ManagedAgentRecord) { record.Runtime, record.LifecycleState = "rpc", "running" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := *afterFailure
+			tc.change(&record)
+			got, err := manager.BackgroundBashJobsSnapshot(context.Background(), &record)
+			require.NoError(t, err)
+			require.Equal(t, []map[string]string{}, got)
+		})
+	}
+	// If failure races an already-sampled running row, reject that old view
+	// rather than combining data from different projection versions.
+	got, err = manager.BackgroundBashJobsSnapshot(context.Background(), beforeFailure)
+	require.ErrorIs(t, err, store.ErrStaleEmbeddedFence)
+	require.Empty(t, got)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = manager.BackgroundBashJobsSnapshot(ctx, afterFailure)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = manager.BackgroundBashJobsSnapshot(nil, afterFailure)
+	require.EqualError(t, err, "context is required")
+}
+
+func TestBackgroundBashProjectionRejectsOwnerWhoseFenceChanges(t *testing.T) {
+	manager, db, _, id, _ := requiredToolsFixture(t, "root")
+	manager.ensureBackgroundBash()
+	manager.mu.Lock()
+	owner := manager.embeddedOwners[id]
+	jobs := manager.backgroundBash
+	manager.mu.Unlock()
+	record, err := db.ManagedAgent(context.Background(), id)
+	require.NoError(t, err)
+	jobs.mu.Lock()
+	jobs.jobs["old-owner-job"] = &backgroundBashEntry{job: BackgroundBashJob{ID: "old-owner-job", Owner: backgroundBashOwnerKey(owner), Status: "succeeded", FinishedAt: time.Now()}}
+	jobs.mu.Unlock()
+
+	// Lose the durable fence after the initial validation, but before the
+	// snapshot returns. The old owner's jobs must never cross the boundary.
+	got, err := manager.backgroundBashJobsContext(context.Background(), record, func() {
+		_, acquireErr := db.AcquireEmbeddedOwner(context.Background(), owner.binding, "successor-owner", time.Minute)
+		require.NoError(t, acquireErr)
+	})
+	require.ErrorIs(t, err, store.ErrStaleEmbeddedFence)
+	require.Empty(t, got)
+	got, err = manager.BackgroundBashJobsSnapshot(context.Background(), record)
+	require.ErrorIs(t, err, store.ErrStaleEmbeddedFence)
+	require.Empty(t, got)
+}
+
 func TestBackgroundBashProjectionDiscardsOwnerReplacedDuringRead(t *testing.T) {
 	manager, db, _, id, _ := requiredToolsFixture(t, "root")
 	manager.ensureBackgroundBash()
