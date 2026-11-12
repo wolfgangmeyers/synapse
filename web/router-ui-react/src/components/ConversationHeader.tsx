@@ -904,7 +904,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
           <div className="conversation-header-subagents-row">
-            <BackgroundBashActivity jobs={agent?.managed_agent?.background_bash_jobs} />
+            {agent?.managed_agent && <BackgroundBashActivity key={`${client?.routerUrl}:${agent.agent_id}`} jobs={agent.managed_agent.background_bash_jobs} agentId={agent.agent_id} client={client} />}
             {agent ? (
             <div
               className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}

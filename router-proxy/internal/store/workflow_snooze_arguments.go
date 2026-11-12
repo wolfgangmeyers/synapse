@@ -67,10 +67,14 @@ func NormalizeEmbeddedWorkflowSnoozeArguments(raw []byte, defaultMS int64) ([]by
 	if err = d.Decode(&extra); err != io.EOF {
 		return nil, 0, errors.New("trailing arguments")
 	}
-	duration := defaultMS
-	if duration <= 0 {
-		duration = 600000
+	limit := defaultMS
+	if limit <= 0 {
+		limit = 600000
 	}
+	if limit > EmbeddedGoalSnoozeMaxDurationMS {
+		limit = EmbeddedGoalSnoozeMaxDurationMS
+	}
+	duration := limit
 	if minutes > 0 {
 		if minutes >= EmbeddedGoalSnoozeMaxDurationMS/60000 {
 			duration = EmbeddedGoalSnoozeMaxDurationMS
@@ -83,13 +87,23 @@ func NormalizeEmbeddedWorkflowSnoozeArguments(raw []byte, defaultMS int64) ([]by
 	if duration < 1000 {
 		duration = 1000
 	}
-	if duration > EmbeddedGoalSnoozeMaxDurationMS {
-		duration = EmbeddedGoalSnoozeMaxDurationMS
+	if duration > limit {
+		duration = limit
 	}
 	canonical, err := json.Marshal(fields)
 	return canonical, duration, err
 }
 
 func (p EmbeddedGoalSnoozePreference) WorkflowResultJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{"ok": true, "snoozed_until": p.DueAt, "duration_ms": p.DurationMS, "duration_minutes": p.DurationMS / 60000, "workflow": p.Workflow})
+	return json.Marshal(map[string]any{"ok": true, "snoozed_until": p.DueAt, "duration_ms": p.DurationMS, "duration_minutes": p.DurationMS / 60000, "workflow": p.Workflow, "guidance": SnoozeBlockedGuidance})
+}
+
+// SnoozeBlockedGuidance distinguishes a timed delay from a user dependency.
+const SnoozeBlockedGuidance = "If waiting on the user, explicitly call mecha_blocked with the reason."
+
+func (p EmbeddedGoalSnoozePreference) GoalResultJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		EmbeddedGoalSnoozePreference
+		Guidance string `json:"guidance"`
+	}{p, SnoozeBlockedGuidance})
 }

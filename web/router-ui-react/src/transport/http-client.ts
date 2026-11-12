@@ -631,6 +631,7 @@ export interface RouterHttpClient {
   attachmentUrl(reference: string): string;
   managedAgents(includeChildren?: boolean): Promise<ManagedAgentsResponse>;
   managedAgent(id: string): Promise<ManagedAgentResponse>;
+  backgroundBashDetail(id: string, jobId: string, signal?: AbortSignal): Promise<{ id: string; status: string; output: string; truncated: boolean; exitCode: number | null }>;
   managedDirectories(path: string): Promise<ManagedDirectoriesResponse>;
   managedChildren(id: string): Promise<ManagedChildrenResponse>;
   managedGoal(id: string): Promise<ManagedGoalResponse>;
@@ -823,6 +824,12 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
     managedAgents: async (includeChildren) => managedAgents(await managedRequest(`/v1/managed-agents${includeChildren ? "?include_children=true" : ""}`, "GET")),
+    backgroundBashDetail: async (id, jobId, signal) => {
+      const value = await request(`/v1/managed-agents/${encodeURIComponent(id)}/background-bash-jobs/${encodeURIComponent(jobId)}`, { method: "GET", credentials: "omit", ...(signal ? { signal } : {}) });
+      const v = recordValue(value);
+      if (!v || v.id !== jobId || typeof v.status !== "string" || typeof v.output !== "string" || typeof v.truncated !== "boolean" || !(v.exitCode === null || (typeof v.exitCode === "number" && Number.isInteger(v.exitCode)))) throw invalidResponse("Invalid shell job detail", value);
+      return v as { id: string; status: string; output: string; truncated: boolean; exitCode: number | null };
+    },
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
     managedDirectories: async (path) => managedDirectories(await managedRequest(`/v1/managed-directories?path=${encodeURIComponent(path)}`, "GET")),
     managedChildren: async (id) => managedChildren(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/children`, "GET")),

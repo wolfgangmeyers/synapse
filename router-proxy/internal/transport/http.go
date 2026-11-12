@@ -262,6 +262,23 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		r.handleRouterRestart(w, req)
 		return
+	case path == "/v1/test/clock/timer":
+		if r.testClock == nil {
+			r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+			return
+		}
+		name := "foreground-bash:" + req.URL.Query().Get("agent_id")
+		if req.Method == http.MethodPost {
+			r.testClock.EnableNamedTimer(name)
+			r.writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
+			return
+		}
+		if req.Method != http.MethodGet {
+			r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+			return
+		}
+		r.writeJSON(w, http.StatusOK, map[string]any{"registered": r.testClock.HasTimer(name)})
+		return
 	case path == "/v1/test/clock/advance":
 		r.handleTestClockAdvance(w, req)
 		return

@@ -7,10 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"github.com/sky-valley/pi/agent"
-	"github.com/sky-valley/pi/ai"
 	"testing"
 	"time"
 )
@@ -92,43 +89,6 @@ func TestBackgroundBashWaitCancellationAndKill(t *testing.T) {
 	case j := <-result:
 		if j.Status != "killed" {
 			t.Fatalf("unexpected result: %+v", j)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-}
-
-func TestBackgroundBashWaitToolAndShutdown(t *testing.T) {
-	m := NewBackgroundBashManager(nil)
-	job, err := m.Launch("child", BackgroundBashLaunch{Command: "sleep 30"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool := backgroundBashWaitTool(m, "child")
-	foreign := backgroundBashWaitTool(m, "other")
-	if _, err := foreign.Execute(context.Background(), "foreign", map[string]any{"job_id": job.ID}, nil); err == nil {
-		t.Fatal("foreign tool accessed job")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	result := make(chan agent.AgentToolResult, 1)
-	failures := make(chan error, 1)
-	go func() {
-		r, e := tool.Execute(ctx, "wait", map[string]any{"job_id": job.ID}, nil)
-		if e != nil {
-			failures <- e
-			return
-		}
-		result <- r
-	}()
-	m.Close()
-	select {
-	case err := <-failures:
-		t.Fatal(err)
-	case r := <-result:
-		text, ok := r.Content[0].(ai.TextContent)
-		if !ok || !strings.Contains(text.Text, job.ID) || !strings.Contains(text.Text, "killed") {
-			t.Fatalf("unexpected tool result: %+v", r)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())

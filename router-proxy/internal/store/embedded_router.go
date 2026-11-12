@@ -1416,12 +1416,17 @@ func (s *Store) checkEmbeddedGoalInvocationDomainTx(ctx context.Context, w *Embe
 	if err != nil {
 		return err
 	}
-	if w.name == "workflow_snooze" {
+	if w.name == "workflow_snooze" || w.name == "goal_snooze" {
 		var p EmbeddedGoalSnoozePreference
 		if err = json.Unmarshal([]byte(payload), &p); err != nil {
 			return err
 		}
-		expected, err := p.WorkflowResultJSON()
+		var expected []byte
+		if w.name == "workflow_snooze" {
+			expected, err = p.WorkflowResultJSON()
+		} else {
+			expected, err = p.GoalResultJSON()
+		}
 		if err != nil {
 			return err
 		}

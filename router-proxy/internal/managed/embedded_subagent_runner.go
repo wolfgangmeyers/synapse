@@ -77,7 +77,6 @@ type subagentTask struct {
 	lastStage          string
 	lastStageTime      time.Time
 	inactivityTimedOut bool
-	backgroundWaits    int
 }
 
 func (t *subagentTask) touchActivity(now time.Time) {
@@ -266,7 +265,7 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 				limit = maxDuration
 			}
 			expired := started && now.Sub(task.startTime) > limit
-			inactive := task.backgroundWaits == 0 && !task.lastActivity.IsZero() && now.Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
+			inactive := !task.lastActivity.IsZero() && now.Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
 			if !expired && inactive {
 				task.inactivityTimedOut = true
 			}
@@ -1077,7 +1076,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			})
 		}
 	}
-	tools = append(tools, task.wrapBackgroundWait(m.backgroundBashToolsForOwner(childOwner, childAgent.Cwd, task.parent.AgentID, checkChild), m.clock.Now)...)
+	tools = append(tools, m.backgroundBashToolsForOwner(childOwner, childAgent.Cwd, task.parent.AgentID, checkChild)...)
 
 	model, stream, err := m.resolveSubagentModel(*childAgent)
 	if err != nil {
@@ -1322,7 +1321,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			case <-ticker.C:
 				task.mu.Lock()
 				last := task.lastActivity
-				timedOut := task.backgroundWaits == 0 && !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
+				timedOut := !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
 				if timedOut && !task.stopped && !task.inactivityTimedOut {
 					task.inactivityTimedOut = true
 					task.mu.Unlock()
@@ -1771,7 +1770,7 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 		cleanup()
 		return "failed", "", err.Error()
 	}
-	childTools := task.wrapBackgroundWait(m.backgroundBashToolsForOwner(childOwner, child.Cwd, task.parent.AgentID, check), m.clock.Now)
+	childTools := m.backgroundBashToolsForOwner(childOwner, child.Cwd, task.parent.AgentID, check)
 	if err := bridge.addTools(childTools); err != nil {
 		cleanup()
 		return "failed", "", err.Error()
@@ -1903,7 +1902,7 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 				return
 			case <-ticker.C:
 				task.mu.Lock()
-				expired := task.backgroundWaits == 0 && !task.lastActivity.IsZero() && m.clock.Now().Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
+				expired := !task.lastActivity.IsZero() && m.clock.Now().Sub(task.lastActivity) >= DefaultSubagentInactivityTimeout
 				if expired {
 					task.inactivityTimedOut = true
 				}

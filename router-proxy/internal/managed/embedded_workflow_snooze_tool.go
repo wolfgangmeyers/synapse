@@ -52,7 +52,7 @@ func embeddedWorkflowSnoozeArguments(args map[string]any, defaultMs int64) ([]by
 func (m *Manager) embeddedWorkflowSnoozeTool(owner embeddedOwner, turn func() store.EmbeddedGoalSnoozeTurn, admitted func(string) *store.EmbeddedGoalInvocation, completed func(string, *store.EmbeddedGoalInvocation, ai.ToolResultMessage)) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "workflow_snooze",
-		Description: "Set a delay preference for active workflow continuation (up to 24 hours). Defaults to the active workflow's configured snooze duration.",
+		Description: "Set a delay preference for active workflow continuation up to the active workflow's configured maximum (at most 24 hours). Defaults to that maximum.",
 		Parameters:  embeddedWorkflowSnoozeSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if m.embeddedAfterIntent != nil {

@@ -40,10 +40,18 @@ test("completion notice and header activity preserve the shared polling pool acr
     expect(JSON.parse(beforeNotice[0].content[0].text)).toEqual(expect.arrayContaining([expect.objectContaining({ job_id: running, status: "running" })]));
     const widget = page.getByRole("region", { name: "Background shell jobs" });
     await widget.getByRole("button", { name: /shell jobs 2/i }).click();
-    await expect(widget.locator("li").filter({ hasText: finished })).toContainText("running");
-    await expect(widget.locator("li").filter({ hasText: running })).toContainText("running");
+    await expect(widget.locator(".background-bash-job-list li")).toHaveCount(2);
+    const projected = await f.request(page, `/v1/managed-agents/${encodeURIComponent(agent)}`, undefined, "GET");
+    const entries = projected.body.agent.background_bash_jobs as { id: string; started_at: string }[];
+    const expected = [...entries].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at)).map(entry => {
+      const date = new Date(entry.started_at);
+      return `Started ${date.toLocaleString()} (${String(date.getMilliseconds()).padStart(3, "0")} ms)`;
+    });
+    await expect(widget.locator(".background-bash-job-list li button span:first-child")).toHaveText(expected);
+    await expect(widget.locator(".background-bash-job-list")).toHaveCSS("grid-template-columns", /.+ .+/);
     await writeFile(release, "release");
-    await expect(widget.locator("li").filter({ hasText: finished })).toContainText("succeeded", { timeout: 15_000 });
+    await widget.getByLabel("Filter:").selectOption("completed");
+    await expect(widget.locator(".background-bash-job-list li").first()).toContainText("succeeded", { timeout: 15_000 });
     await expect.poll(async () => JSON.stringify(await f.inputs()), { timeout: 15_000 }).toContain(`Background bash job ${finished} finished`);
     await page.getByRole("button", { name: "Close dialog" }).click();
     await f.idle(agent);
