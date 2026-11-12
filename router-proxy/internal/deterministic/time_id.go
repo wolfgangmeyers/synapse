@@ -26,28 +26,63 @@ var ErrIDSourceExhausted = errors.New("deterministic ID source exhausted")
 // FixedClock is a thread-safe, manually advanced clock for deterministic
 // tests. It records every Now call so a fixture can assert the call order.
 type FixedClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	calls  []time.Time
-	timers map[*fixedTimer]struct{}
+	mu      sync.Mutex
+	now     time.Time
+	calls   []time.Time
+	timers  map[*fixedTimer]struct{}
+	enabled map[string]bool
 }
 
 type fixedTimer struct {
 	at       time.Time
 	callback func()
+	name     string
 }
 
 // AfterFunc fires callbacks when Advance reaches their deadline. Cancel is
 // idempotent; callbacks run outside the clock lock.
 func (c *FixedClock) AfterFunc(delay time.Duration, callback func()) func() {
+	return c.AfterNamedFunc("", delay, callback)
+}
+
+// AfterNamedFunc exposes active test timer registrations to test fixtures.
+func (c *FixedClock) AfterNamedFunc(name string, delay time.Duration, callback func()) func() {
 	c.mu.Lock()
 	if c.timers == nil {
 		c.timers = make(map[*fixedTimer]struct{})
 	}
-	t := &fixedTimer{at: c.now.Add(delay), callback: callback}
+	t := &fixedTimer{at: c.now.Add(delay), callback: callback, name: name}
 	c.timers[t] = struct{}{}
 	c.mu.Unlock()
 	return func() { c.mu.Lock(); delete(c.timers, t); c.mu.Unlock() }
+}
+
+// EnableNamedTimer opts an individual test scenario into virtual time.
+func (c *FixedClock) EnableNamedTimer(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enabled == nil {
+		c.enabled = make(map[string]bool)
+	}
+	c.enabled[name] = true
+}
+
+func (c *FixedClock) NamedTimerEnabled(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enabled[name]
+}
+
+// HasTimer reports a currently registered named timer.
+func (c *FixedClock) HasTimer(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for timer := range c.timers {
+		if timer.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // NewFixedClock creates a clock at start. The start time must be valid.

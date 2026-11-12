@@ -56,12 +56,11 @@ background-repeat: no-repeat;
 This ensures artwork richness while maintaining high text contrast and legibility for all controls.
 
 ### Brand Header (`BrandHeader.tsx`)
-- **Glowing Cyan Sigil**: 38×38px SVG icon styled with dual drop shadows:
-  ```css
-  filter: drop-shadow(0 0 8px #38bdf8) drop-shadow(0 0 16px rgba(129, 140, 248, 0.6));
-  ```
-- **Gradient Typography**: "Mecha-Developer" title rendered with `linear-gradient(90deg, #38bdf8 0%, #818cf8 55%, #c084fc 100%)`, `-webkit-background-clip: text`, and subtle text shadows.
-- **Subtitle**: "AI AGENTS FOR REAL BUILDERS" in bold uppercase `#818cf8` with wide letter spacing (`0.14em`).
+- Display the supplied original transparent Synapse PNG (`/synapse-logo.png`, 2172×724 RGBA) with alt text `Synapse`.
+- Replace the entire old SVG sigil, Mecha-Developer heading, and tagline with this one image.
+- Fit the sidebar content width with automatic height, preserving the full 3:1 aspect ratio without cropping.
+- Do not add filters, shadows, or a background to the logo or its header. The sidebar background remains unchanged.
+- Keep branding styles local to `BrandHeader.css`.
 
 ### Unified RouterSelector Widget (`RouterSelector.tsx`)
 The `RouterSelector` consolidates router connection state, active user identity, and router/agent administration into a single cohesive control card:

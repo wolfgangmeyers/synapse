@@ -41,6 +41,7 @@ func TestNormalizeEmbeddedWorkflowSnoozeArgumentsValidRawJSONControls(t *testing
 	}{
 		{"empty object uses workflow default", `{}`, 120000},
 		{"positive milliseconds with nonpositive minutes", `{"duration_minutes":0,"duration_ms":2000}`, 2000},
+		{"configured maximum", `{"duration_ms":900000}`, 120000},
 		{"optional reason and trailing whitespace", " {\"reason\":\"later\",\"duration_minutes\":1} \n\t", 60000},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

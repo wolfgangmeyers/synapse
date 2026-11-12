@@ -26,6 +26,8 @@ const (
 	BackgroundBashDefaultTimeout = 600 * time.Second
 )
 
+var ErrBackgroundBashNotFound = errors.New("background bash job not found")
+
 type BackgroundBashLaunch struct {
 	Command          string
 	Dir              string
@@ -820,7 +822,7 @@ func (m *BackgroundBashManager) Get(owner, id string) (BackgroundBashJob, error)
 	defer func() { m.changedAsyncLocked(owners); m.mu.Unlock() }()
 	e := m.jobs[id]
 	if e == nil || e.job.Owner != owner || backgroundBashExpired(e, time.Now()) {
-		return BackgroundBashJob{}, errors.New("background bash job not found")
+		return BackgroundBashJob{}, ErrBackgroundBashNotFound
 	}
 	return m.snapshot(e), nil
 }

@@ -46,8 +46,8 @@ func TestBackgroundBashProjectionTwoManagersDoNotOverwriteEachOther(t *testing.T
 	require.NoError(t, err)
 	record2, err := db2.ManagedAgent(ctx, id2)
 	require.NoError(t, err)
-	require.Equal(t, []map[string]string{{"id": job1.ID, "status": "running"}}, first.BackgroundBashJobs(record1))
-	require.Equal(t, []map[string]string{{"id": job2.ID, "status": "running"}}, second.BackgroundBashJobs(record2))
+	require.Equal(t, []map[string]string{{"id": job1.ID, "status": "running", "started_at": job1.StartedAt.Format(time.RFC3339Nano)}}, first.BackgroundBashJobs(record1))
+	require.Equal(t, []map[string]string{{"id": job2.ID, "status": "running", "started_at": job2.StartedAt.Format(time.RFC3339Nano)}}, second.BackgroundBashJobs(record2))
 	stale := *record1
 	stale.PiSessionID = "replaced"
 	require.Empty(t, first.BackgroundBashJobs(&stale))

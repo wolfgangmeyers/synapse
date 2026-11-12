@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -72,7 +73,51 @@ func (m *Manager) backgroundBashJobsContext(ctx context.Context, record *store.M
 func backgroundBashPublicJobs(jobs []BackgroundBashJob) []map[string]string {
 	public := make([]map[string]string, 0, len(jobs))
 	for _, job := range jobs {
-		public = append(public, map[string]string{"id": job.ID, "status": job.Status})
+		item := map[string]string{"id": job.ID, "status": job.Status}
+		if !job.StartedAt.IsZero() {
+			item["started_at"] = job.StartedAt.Format(time.RFC3339Nano)
+		}
+		public = append(public, item)
 	}
 	return public
+}
+
+// BackgroundBashJobDetail reads one retained job for the current fenced owner.
+func (m *Manager) BackgroundBashJobDetail(ctx context.Context, record *store.ManagedAgentRecord, id string) (BackgroundBashJob, error) {
+	if m == nil || record == nil {
+		return BackgroundBashJob{}, ErrBackgroundBashNotFound
+	}
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[record.AgentID]
+	jobs, closed := m.backgroundBash, m.closed
+	m.mu.Unlock()
+	if !ok || jobs == nil || closed || owner.binding.SessionID != record.PiSessionID || owner.binding.Epoch != record.SessionEpoch || owner.binding.Generation != record.RuntimeGeneration {
+		return BackgroundBashJob{}, ErrBackgroundBashNotFound
+	}
+	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+		if errors.Is(err, store.ErrStaleEmbeddedFence) {
+			return BackgroundBashJob{}, ErrBackgroundBashNotFound
+		}
+		return BackgroundBashJob{}, err
+	}
+	job, err := jobs.Get(backgroundBashOwnerKey(owner), id)
+	if err != nil {
+		return BackgroundBashJob{}, err
+	}
+	m.mu.Lock()
+	current, ok := m.embeddedOwners[record.AgentID]
+	valid := ok && !m.closed && current.binding == owner.binding && current.identity == owner.identity
+	m.mu.Unlock()
+	if !valid {
+		return BackgroundBashJob{}, ErrBackgroundBashNotFound
+	}
+	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+		if errors.Is(err, store.ErrStaleEmbeddedFence) {
+			return BackgroundBashJob{}, ErrBackgroundBashNotFound
+		}
+		return BackgroundBashJob{}, err
+	}
+	job.Owner = ""
+	job.Command = ""
+	return job, nil
 }

@@ -68,7 +68,7 @@ func TestPromotionTDDManagedRoles(t *testing.T) {
 }
 
 // The faux model drives a real managed child through its registered bash and
-// wait tools. SQLite and process execution are real; no router is started.
+// get tools. SQLite and process execution are real; no router is started.
 func TestPromotionTDDSubagentExecutor(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("promotion is Linux-only")
@@ -91,7 +91,7 @@ func TestPromotionTDDSubagentExecutor(t *testing.T) {
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
 	command := fmt.Sprintf("echo $$ >> %q; echo before; while [ ! -f %q ]; do sleep 0.05; done; echo $$ > %q; echo after", starts, release, finished)
 	promoted := make(chan ai.ToolResultMessage, 1)
-	waited := make(chan ai.ToolResultMessage, 1)
+	observed := make(chan ai.ToolResultMessage, 1)
 	proceed := make(chan string, 1)
 	reg.SetResponses([]providers.FauxResponseStep{
 		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
@@ -105,12 +105,12 @@ func TestPromotionTDDSubagentExecutor(t *testing.T) {
 				}
 			}
 			id := <-proceed
-			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("wait_background_bash_job", map[string]any{"job_id": id}, "child-wait")}, ai.StopToolUse)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("get_background_bash_job", map[string]any{"job_id": id}, "child-get")}, ai.StopToolUse)
 		},
 		func(req ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 			for _, msg := range req.Messages {
-				if r, ok := msg.(ai.ToolResultMessage); ok && r.ToolCallID == "child-wait" {
-					waited <- r
+				if r, ok := msg.(ai.ToolResultMessage); ok && r.ToolCallID == "child-get" {
+					observed <- r
 					break
 				}
 			}
@@ -152,11 +152,15 @@ func TestPromotionTDDSubagentExecutor(t *testing.T) {
 	_, err = jobs.Get(backgroundBashOwnerKey(parentOwner), payload.JobID)
 	require.Error(t, err, "parent must not access child job")
 	require.NoError(t, os.WriteFile(release, nil, 0600))
+	require.Eventually(t, func() bool {
+		j, e := jobs.Get(backgroundBashOwnerKey(child), payload.JobID)
+		return e == nil && j.Status == "succeeded"
+	}, 10*time.Second, 20*time.Millisecond)
 	proceed <- payload.JobID
 	select {
-	case result = <-waited:
+	case result = <-observed:
 	case <-time.After(10 * time.Second):
-		t.Fatal("child wait did not return")
+		t.Fatal("child get did not return")
 	}
 	require.False(t, result.IsError, "%+v", result)
 	require.Len(t, result.Content, 1)

@@ -45,7 +45,7 @@ test("managed owners cannot get or kill each other's background jobs", async ({ 
       await page.locator(`[data-agent-id="${owners[i]}"]`).click();
       const widget = page.getByRole("region", { name: "Background shell jobs" });
       await widget.getByRole("button", { name: /shell jobs/i }).click();
-      await expect(widget.locator("li").filter({ hasText: jobs[i] })).toContainText("running");
+      await expect(widget.locator(".background-bash-job-list li").first()).toContainText("running");
       await expect(widget).not.toContainText(jobs[1 - i]);
       await page.keyboard.press("Escape");
     }

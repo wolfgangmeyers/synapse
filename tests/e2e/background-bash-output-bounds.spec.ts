@@ -25,6 +25,7 @@ test("large job output is truncated and unknown jobs are rejected", async ({ pag
     const job = JSON.parse(launch.content[0].text);
     expect(typeof job.job_id).toBe("string");
     await page.getByRole("region", { name: "Background shell jobs" }).getByRole("button", { name: /shell jobs/i }).click();
+    await page.getByRole("dialog").getByLabel("Filter:").selectOption("completed");
     await expect(page.getByRole("region", { name: "Background shell jobs" })).toContainText("succeeded", { timeout: 10_000 });
     await page.getByRole("button", { name: "Close dialog" }).click();
     await f.configure({ turns_by_input: [{ contains: "Inspect output job", steps: [
