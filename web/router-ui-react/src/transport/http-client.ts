@@ -581,6 +581,12 @@ export interface GitSyncPushResponse {
   count?: number;
 }
 
+export interface WorkflowJournalRun { id: string; workflow_id: string; workflow_name: string; status: "active" | "terminal"; started_at: string; outcome?: string; }
+export interface WorkflowJournalEvent { id: string; sequence: number; kind: string; occurred_at: string; workflow_id: string; workflow_name: string; state_id: string; state_name: string; reason?: string; source?: string; text?: string; target_event_id?: string; duration_ms?: number | null; }
+export interface WorkflowJournalDetail { state_totals: { workflow_id: string; workflow_name: string; state_id: string; state_name: string; duration_ms: number }[]; run: WorkflowJournalRun; events: WorkflowJournalEvent[]; current_visit?: WorkflowJournalEvent | null; partial: boolean; cutoff_sequence?: number; next_cursor?: string; observed_at?: string; }
+export interface WorkflowJournalRunPage { runs: WorkflowJournalRun[]; next_cursor?: string; }
+export interface WorkflowJournalFilters { status?: string; workflow_id?: string; cursor?: string; }
+
 export interface RouterHttpClient {
   readonly routerUrl: string;
   request(path: string, init?: RequestInit): Promise<unknown>;
@@ -681,6 +687,9 @@ export interface RouterHttpClient {
   pullGitSync(target: string): Promise<GitSyncPullResponse>;
   pushGitSync(target: string): Promise<GitSyncPushResponse>;
   getKBFile(path?: string): Promise<string>;
+  workflowJournalRuns(agentId: string, filters?: WorkflowJournalFilters): Promise<WorkflowJournalRunPage>;
+  workflowJournalDetail(agentId: string, runId: string, cursor?: string): Promise<WorkflowJournalDetail>;
+  deleteWorkflowJournalRun(agentId: string, runId: string): Promise<void>;
   progressHistory(agentId: string): Promise<ProgressHistoryEntry[]>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
@@ -1123,6 +1132,20 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         throw new HttpRequestError(res.status, "kb_fetch_failed", "Failed to fetch KB file", await res.text());
       }
       return await res.text();
+    },
+    workflowJournalRuns: async (agentId, filters = {}) => {
+      const query = new URLSearchParams();
+      if (filters.status) query.set("status", filters.status);
+      if (filters.workflow_id) query.set("workflow_id", filters.workflow_id);
+      if (filters.cursor) query.set("cursor", filters.cursor);
+      return await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-journal${query.size ? `?${query}` : ""}`, { credentials: "omit" }) as WorkflowJournalRunPage;
+    },
+    workflowJournalDetail: async (agentId, runId, cursor) => {
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      return await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-journal/${encodeURIComponent(runId)}${query}`, { credentials: "omit" }) as WorkflowJournalDetail;
+    },
+    deleteWorkflowJournalRun: async (agentId, runId) => {
+      await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-journal/${encodeURIComponent(runId)}`, { method: "DELETE", credentials: "omit" });
     },
     progressHistory: async (agentId: string): Promise<ProgressHistoryEntry[]> => {
       const res = await request(`/v1/agents/${encodeURIComponent(agentId)}/progress/history`, { method: "GET", credentials: "omit" });

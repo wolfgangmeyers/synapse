@@ -45,6 +45,8 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	agentID := "agent-" + uuid.NewString()
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,'/tmp','openai-codex','gpt-5','running','running','idle','embedded','session-1',1,'gen-1',1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, agentID, "workflow-agent")
 	require.NoError(t, err)
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES(?,?)`, agentID, "2026-01-01T00:00:00Z")
+	require.NoError(t, err)
 
 	// Create a workflow state
 	ws, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
@@ -202,6 +204,23 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.Len(t, rems, 1)
 	require.Equal(t, agentID, rems[0].Target)
 	require.Equal(t, "Please complete the code review checklist.", rems[0].Body)
+
+	// A failed replacement must leave the current workflow's reminders intact.
+	_, err = rawDB.ExecContext(ctx, `CREATE TRIGGER reject_journal_activation BEFORE INSERT ON workflow_journal_runs BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END`)
+	require.NoError(t, err)
+	failedReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(activateWithRemBody))
+	require.NoError(t, err)
+	failedReq.Header.Set("X-Request-ID", uuid.NewString())
+	failedReq.Header.Set("Content-Type", "application/json")
+	failedRes, err := client.Do(failedReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusInternalServerError, failedRes.StatusCode)
+	failedRes.Body.Close()
+	rems, err = durable.Reminders(ctx)
+	require.NoError(t, err)
+	require.Len(t, rems, 1)
+	_, err = rawDB.ExecContext(ctx, `DROP TRIGGER reject_journal_activation`)
+	require.NoError(t, err)
 
 	// Deactivate and verify reminder was cleaned up
 	deactReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(deactivateBody))

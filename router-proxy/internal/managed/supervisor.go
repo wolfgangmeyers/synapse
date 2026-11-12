@@ -50,6 +50,7 @@ type LaunchRequest struct {
 	WorktreeBranch     string
 	AllowInlineTools   bool
 	IsBackground       bool
+	backgroundWorkflow *backgroundWorkflowBinding
 }
 type LaunchResult struct {
 	Agent    *store.ManagedAgentRecord
@@ -974,6 +975,9 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 	defer lane.serial.Unlock()
 	if parent != nil {
 		err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
+	} else if request.backgroundWorkflow != nil {
+		b := request.backgroundWorkflow
+		err = m.store.ReserveManagedBackgroundWorkflow(ctx, agent, op, m.config.Limits.MaxAgents, b.workflowID, b.stateID, b.variables)
 	} else {
 		err = m.store.ReserveManagedEmbeddedLaunch(ctx, agent, op, m.config.Limits.MaxAgents, embeddedRole)
 	}

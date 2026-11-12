@@ -190,6 +190,27 @@ func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
 		}
 	}()
 	defer func() { <-receiptDone }()
+	// Journal cleanup is independent of lifecycle and conversation sweeps.
+	journalDone := make(chan struct{})
+	go func() {
+		defer close(journalDone)
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				delay := time.Minute
+				if err := r.store.SweepWorkflowJournal(ctx); err != nil && ctx.Err() == nil {
+					r.emitEvent(RouterErrorEvent("workflow_journal_cleanup_failed", ""))
+					delay = time.Second
+				}
+				timer.Reset(delay)
+			}
+		}
+	}()
+	defer func() { <-journalDone }()
 	ticker := time.NewTicker(r.sweepInterval)
 	defer ticker.Stop()
 	for {

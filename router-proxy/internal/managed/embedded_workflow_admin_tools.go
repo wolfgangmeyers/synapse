@@ -406,11 +406,6 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 				return agent.AgentToolResult{}, errors.New("invalid action, must be 'activate' or 'deactivate'")
 			}
 
-			targetAgent, err := m.store.ManagedAgent(ctx, agentID)
-			if err != nil {
-				return agent.AgentToolResult{}, err
-			}
-
 			switch action {
 			case "activate":
 				rawWfID, _ := args["workflow_id"].(string)
@@ -425,52 +420,36 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 					return agent.AgentToolResult{}, errors.New("workflow_id or workflow_state_id is required for activate")
 				}
 
-				var wf *store.Workflow
-				if rawWfID != "" {
-					wf, err = m.store.FindWorkflowByIDOrName(ctx, rawWfID)
-					if err != nil {
-						return agent.AgentToolResult{}, err
-					}
-					if wf == nil {
-						return agent.AgentToolResult{}, fmt.Errorf("workflow %q not found", rawWfID)
-					}
-					if wfStateID == "" {
-						if wf.EntryStateID == nil || strings.TrimSpace(*wf.EntryStateID) == "" {
-							return agent.AgentToolResult{}, errors.New("workflow has no entry state")
-						}
-						wfStateID = strings.TrimSpace(*wf.EntryStateID)
-					}
-				}
-
-				wfState, err := m.store.GetWorkflowState(ctx, wfStateID)
-				if err != nil || wfState == nil {
-					return agent.AgentToolResult{}, fmt.Errorf("workflow state %q not found", wfStateID)
-				}
-
-				var workflowID *string
-				if wf != nil {
-					workflowID = &wf.ID
-				} else if wfState.WorkflowID != nil && strings.TrimSpace(*wfState.WorkflowID) != "" {
-					workflowID = wfState.WorkflowID
-				}
-
 				variables := make(map[string]string)
-				if rawVars, ok := args["variables"].(map[string]any); ok && rawVars != nil {
+				if rawVars, ok := args["variables"].(map[string]any); ok {
 					for k, v := range rawVars {
-						if strVal, isStr := v.(string); isStr {
-							variables[k] = strVal
+						if value, ok := v.(string); ok {
+							variables[k] = value
 						} else {
 							variables[k] = fmt.Sprintf("%v", v)
 						}
 					}
 				}
+				activation, replay, err := m.store.ActivateWorkflow(ctx, agentID, embeddedWorkerRequestID(owner.binding, callID), args, store.WorkflowActivationRequest{Action: action, WorkflowID: rawWfID, StateID: wfStateID, Variables: variables, ResolveName: true})
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				workflowID, wfState := activation.WorkflowID, activation.State
+				if replay {
+					var stateID, stateName any
+					if wfState != nil {
+						stateID, stateName = wfState.ID, wfState.Name
+					}
+					respBytes, err := json.Marshal(map[string]any{"status": "ok", "agent_id": agentID, "active_workflow_id": workflowID, "active_workflow_state_id": stateID, "active_workflow_state": stateName, "variables": activation.Variables})
+					if err != nil {
+						return agent.AgentToolResult{}, err
+					}
+					return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+				}
 
+				targetAgent, _ := m.store.ManagedAgent(ctx, agentID)
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, agentID)
 				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, agentID)
-
-				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, workflowID, &wfState.ID, variables); err != nil {
-					return agent.AgentToolResult{}, fmt.Errorf("failed to set active workflow: %w", err)
-				}
 
 				// Activate implicit workflow completion goal
 				wfName := "active"
@@ -500,7 +479,7 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 				_ = m.SyncEmbeddedWorkflowTools(ctx, agentID)
 
 				// Inject guidance prompt if agent is embedded and running
-				if targetAgent.Runtime == "embedded" && targetAgent.LifecycleState == "running" {
+				if targetAgent != nil && targetAgent.Runtime == "embedded" && targetAgent.LifecycleState == "running" {
 					var sb strings.Builder
 					sb.WriteString(fmt.Sprintf("[Workflow Activated: %s]\n", wfState.Name))
 					if strings.TrimSpace(wfState.Description) != "" {
@@ -559,11 +538,20 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 				return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
 
 			case "deactivate":
+				_, replay, err := m.store.ActivateWorkflow(ctx, agentID, embeddedWorkerRequestID(owner.binding, callID), args, store.WorkflowActivationRequest{Action: action})
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if replay {
+					respBytes, err := json.Marshal(map[string]any{"status": "ok", "agent_id": agentID, "active_workflow_id": nil, "active_workflow_state_id": nil})
+					if err != nil {
+						return agent.AgentToolResult{}, err
+					}
+					return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+				}
+
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, agentID)
 				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, agentID)
-				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, nil, nil, nil); err != nil {
-					return agent.AgentToolResult{}, fmt.Errorf("failed to deactivate workflow: %w", err)
-				}
 				_ = m.SyncEmbeddedWorkflowTools(ctx, agentID)
 
 				m.retireEmbeddedGoalTimer(agentID)

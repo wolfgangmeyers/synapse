@@ -5811,11 +5811,6 @@ dialog.kb-dialog[open] {
   overflow: hidden !important;
 }
 
-/* display:flex above overrides the UA display:none on closed dialogs. */
-.subagent-viewer-dialog:not([open]) {
-  display: none;
-}
-
 .subagent-viewer-dialog .dialog-shell {
   height: 100%;
   max-height: 100%;
@@ -7753,3 +7748,19 @@ select.form-control option,
 .background-bash-job-list { max-height: 60vh; overflow: auto; overflow-wrap: anywhere; list-style: none; margin: 0; padding: 0; }
 .background-bash-job-list .subagent-card { width: 100%; text-align: left; color: var(--text); }
 .background-bash-job-list pre { max-height: 40vh; }
+
+.workflow-journal-dialog { width: min(1000px, 95vw); max-height: 90vh; overflow: auto; }
+.workflow-journal-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.workflow-journal-filters label { display: grid; gap: 4px; }
+.workflow-journal-layout { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); gap: 24px; }
+.workflow-journal-runs, .workflow-journal-chart { list-style: none; padding: 0; }
+.workflow-journal-runs button { width: 100%; text-align: left; padding: 8px; }
+.workflow-journal-runs button[aria-pressed="true"] { border-color: #59b8ff; }
+.workflow-journal-detail-heading { display: flex; align-items: center; justify-content: space-between; }
+.workflow-journal-chart li { display: grid; grid-template-columns: 1fr auto; gap: 4px; margin-bottom: 8px; }
+.workflow-journal-bar { grid-column: 1 / -1; height: 5px; background: #45afff; box-shadow: 0 0 8px #238cff; }
+.workflow-journal-timeline { max-height: 300px; overflow-y: auto; border-left: 1px solid #398bca; margin-left: 8px; padding-left: 20px; }
+.workflow-journal-timeline li { position: relative; padding: 8px; margin: 10px 0; background: rgba(36, 102, 155, .12); border: 1px solid rgba(92, 181, 255, .3); border-radius: 8px; overflow-wrap: anywhere; }
+.workflow-journal-timeline li::marker { color: #54baff; }
+.workflow-journal-timeline summary { cursor: pointer; color: #9ed5ff; }
+@media (max-width: 650px) { .workflow-journal-layout { grid-template-columns: 1fr; } .workflow-journal-dialog { width: 96vw; } }

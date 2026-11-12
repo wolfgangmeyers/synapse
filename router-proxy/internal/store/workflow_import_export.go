@@ -103,6 +103,10 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 
 	// 2. Perform replacement in an immediate transaction
 	return s.runImmediate(ctx, func() error {
+		before, err := s.adminBindingsTx(ctx)
+		if err != nil {
+			return err
+		}
 		// Clean up existing workflows and states
 		// Deleting workflow_states explicitly first prevents any foreign key or constraint issues
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM workflow_states`); err != nil {
@@ -110,6 +114,10 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM workflows`); err != nil {
 			return fmt.Errorf("delete workflows: %w", err)
+		}
+
+		if err := s.journalAdminBindingsChangedTx(ctx, before); err != nil {
+			return err
 		}
 
 		now := formatTimestamp(s.clock.Now())

@@ -354,8 +354,12 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 func (s *Store) DeleteWorkflow(ctx context.Context, id string) (bool, error) {
 	var deleted bool
 	err := s.runImmediate(ctx, func() error {
+		before, err := s.adminBindingsTx(ctx)
+		if err != nil {
+			return err
+		}
 		// Explicitly delete child states to be certain child states are cleaned up regardless of foreign key pragmas
-		_, err := s.db.ExecContext(ctx, `DELETE FROM workflow_states WHERE workflow_id = ?`, id)
+		_, err = s.db.ExecContext(ctx, `DELETE FROM workflow_states WHERE workflow_id = ?`, id)
 		if err != nil {
 			return err
 		}
@@ -369,6 +373,9 @@ func (s *Store) DeleteWorkflow(ctx context.Context, id string) (bool, error) {
 			return err
 		}
 		deleted = rowsAff > 0
+		if deleted {
+			return s.journalAdminBindingsChangedTx(ctx, before)
+		}
 		return nil
 	})
 	return deleted, err

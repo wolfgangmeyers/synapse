@@ -35,6 +35,16 @@ func (s *Store) eligibleWorkflowPredecessor(ctx context.Context, state *Workflow
 func (s *Store) AuthorizeWorkflowTransition(ctx context.Context, agentID string, generation int64, from, input string) (*WorkflowState, error) {
 	var target *WorkflowState
 	err := s.runImmediate(ctx, func() error {
+		var err error
+		target, err = s.authorizeWorkflowTransitionTx(ctx, agentID, generation, from, input)
+		return err
+	})
+	return target, err
+}
+
+func (s *Store) authorizeWorkflowTransitionTx(ctx context.Context, agentID string, generation int64, from, input string) (*WorkflowState, error) {
+	var target *WorkflowState
+	err := func() error {
 		var current, workflow, predecessor sql.NullString
 		var actual int64
 		if err := s.db.QueryRowContext(ctx, `SELECT active_workflow_state_id, active_workflow_id, workflow_predecessor_state_id, workflow_binding_generation FROM managed_agents WHERE agent_id=?`, agentID).Scan(&current, &workflow, &predecessor, &actual); err != nil {
@@ -56,6 +66,7 @@ func (s *Store) AuthorizeWorkflowTransition(ctx context.Context, agentID string,
 		}
 		// Explicit edges take priority, including cross-workflow and legacy self edges.
 		var allowed []string
+		authorization := "explicit"
 		seen := make(map[string]bool)
 		for _, edge := range state.Transitions {
 			candidate, readErr := s.GetWorkflowState(ctx, edge.TargetStateID)
@@ -87,6 +98,7 @@ func (s *Store) AuthorizeWorkflowTransition(ctx context.Context, agentID string,
 				}
 				if previous.ID == input || strings.EqualFold(previous.Name, input) {
 					target = previous
+					authorization = "implicit_return"
 				}
 			}
 		}
@@ -102,15 +114,18 @@ func (s *Store) AuthorizeWorkflowTransition(ctx context.Context, agentID string,
 		if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET workflow_predecessor_state_id=? WHERE agent_id=?`, from, agentID); err != nil {
 			return err
 		}
+		if err := s.journalVisitTx(ctx, agentID, target.ID, "visit"); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE workflow_journal_events SET source=? WHERE id=(SELECT current_visit_id FROM workflow_journal_runs WHERE agent_id=? AND status='active')`, authorization, agentID); err != nil {
+			return err
+		}
 		if err := s.retireWorkflowSnoozeTx(ctx, agentID, false); err != nil {
 			return err
 		}
 		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return target, nil
+	}()
+	return target, err
 }
 
 // WorkflowStateForGuidance adds the currently eligible predecessor without changing the definition.

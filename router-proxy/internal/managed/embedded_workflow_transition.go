@@ -104,11 +104,33 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 
 			action, _ := args["action"].(string)
 			reasonStr, _ := args["reason"].(string)
+			if len(reasonStr) > 4096 {
+				return agent.AgentToolResult{}, errors.New("reason exceeds 4096 UTF-8 bytes")
+			}
 
-			// Reject subagent callers
+			if action != "transition" && action != "exit" {
+				return agent.AgentToolResult{}, errors.New("invalid action: must be 'transition' or 'exit'")
+			}
+			targetInput, _ := args["target_state"].(string)
+			targetInput = strings.TrimSpace(targetInput)
+			if action == "transition" && targetInput == "" {
+				return agent.AgentToolResult{}, errors.New("target_state is required for 'transition' action")
+			}
+			// Admission must precede receipt replay: a subagent must not use a
+			// previously issued operation ID to bypass transition ownership.
 			agentRec, agentErr := m.store.ManagedAgent(ctx, owner.binding.AgentID)
 			if agentErr == nil && agentRec != nil && agentRec.ParentAgentID != "" {
 				return agent.AgentToolResult{}, errors.New("subagents cannot invoke workflow state transitions")
+			}
+
+			prior, replayed, replayErr := m.store.ReplayWorkflowJournalTransition(ctx, owner.binding.AgentID, id, action, targetInput, reasonStr)
+			if replayErr != nil {
+				return agent.AgentToolResult{}, replayErr
+			}
+			if replayed {
+				// Successful transition/exit receipts always contain the exact response
+				// rendered before commit. Never rebuild it from mutable definitions.
+				return agent.AgentToolResult{Content: []ai.Content{ai.TextContent{Text: prior.Response}}}, nil
 			}
 
 			if action != "transition" && action != "exit" {
@@ -122,12 +144,15 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 			if m.workflowTransitionCapturedTestHook != nil {
 				m.workflowTransitionCapturedTestHook()
 			}
-			if snapshot.StateID == "" {
-				return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
-			}
-			currentState, err := m.store.GetWorkflowState(ctx, snapshot.StateID)
-			if err != nil || currentState == nil {
-				return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
+			currentState := &store.WorkflowState{ID: snapshot.StateID}
+			if snapshot.StateID != "" {
+				state, stateErr := m.store.GetWorkflowState(ctx, snapshot.StateID)
+				if stateErr != nil {
+					return agent.AgentToolResult{}, stateErr
+				}
+				if state != nil {
+					currentState = state
+				}
 			}
 
 			var workflowVars map[string]string
@@ -143,13 +168,31 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					return agent.AgentToolResult{}, errors.New("target_state is required for 'transition' action")
 				}
 
-				targetState, err := m.store.AuthorizeWorkflowTransition(ctx, owner.binding.AgentID, snapshot.Generation, currentState.ID, targetInput)
+				journal, replay, err := m.store.TransitionWorkflowJournal(ctx, owner.binding.AgentID, id, snapshot.Generation, currentState.ID, targetInput, reasonStr, func(r store.WorkflowJournalMutationResult) (string, error) {
+					guidanceState, err := m.store.WorkflowStateForGuidance(ctx, owner.binding.AgentID, r.Target)
+					if err != nil {
+						return "", err
+					}
+					guidance := formatWorkflowStateGuidance(ctx, m.store, guidanceState, workflowVars)
+					return fmt.Sprintf("Successfully transitioned to workflow state: %s.\n\n%s%s", r.Target.Name, guidance, workflowJournalPrompt(r)), nil
+				})
 				if err != nil {
 					var rejection *store.WorkflowTransitionRejection
 					if errors.As(err, &rejection) {
 						return agent.AgentToolResult{}, err
 					}
+					if snapshot.StateID == "" && err.Error() == "workflow binding changed" {
+						return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
+					}
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
+				}
+
+				targetState := journal.Target
+				if targetState == nil {
+					return agent.AgentToolResult{}, errors.New("workflow transition returned no target state")
+				}
+				if replay {
+					return agent.AgentToolResult{Content: []ai.Content{ai.TextContent{Text: journal.Response}}}, nil
 				}
 
 				// Effects only run after the authorized durable transition succeeds.
@@ -192,26 +235,24 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					m.publishCompleteHistory(entry)
 				}
 
-				// Construct synchronous response with the new state's guidance
-				guidanceState, guidanceErr := m.store.WorkflowStateForGuidance(ctx, owner.binding.AgentID, targetState)
-				if guidanceErr != nil {
-					guidanceState = targetState
-				}
-				guidance := formatWorkflowStateGuidance(ctx, m.store, guidanceState, workflowVars)
-				resultText := fmt.Sprintf("Successfully transitioned to workflow state: %s.\n\n%s", targetState.Name, guidance)
-				return agent.AgentToolResult{
-					Content: []ai.Content{ai.TextContent{Text: resultText}},
-				}, nil
+				return agent.AgentToolResult{Content: []ai.Content{ai.TextContent{Text: journal.Response}}}, nil
 
 			case "exit":
-				if !currentState.AllowExit {
-					return agent.AgentToolResult{}, fmt.Errorf("workflow exit is not permitted from state %q (locked state; must transition to an exit-eligible state first)", currentState.Name)
-				}
-				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
-				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
-				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
+				journal, replay, err := m.store.ExitWorkflowJournal(ctx, owner.binding.AgentID, id, snapshot.Generation, currentState.ID, reasonStr, func(r store.WorkflowJournalMutationResult) (string, error) {
+					return fmt.Sprintf("Successfully exited workflow state %q. The agent is now in unrestricted default operation.", r.Target.Name) + workflowJournalPrompt(r), nil
+				})
+				if err != nil {
+					if snapshot.StateID == "" && err.Error() == "workflow binding changed" {
+						return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
+					}
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}
+				if replay {
+					return agent.AgentToolResult{Content: []ai.Content{ai.TextContent{Text: journal.Response}}}, nil
+				}
+
+				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
+				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
 				m.retireEmbeddedGoalTimer(owner.binding.AgentID)
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
@@ -244,7 +285,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					m.publishCompleteHistory(entry)
 				}
 
-				resultText := fmt.Sprintf("Successfully exited workflow state %q. The agent is now in unrestricted default operation.", currentState.Name)
+				resultText := journal.Response
 				return agent.AgentToolResult{
 					Content: []ai.Content{ai.TextContent{Text: resultText}},
 				}, nil
@@ -389,4 +430,8 @@ func (m *Manager) SyncEmbeddedAllActiveLanes(ctx context.Context) error {
 		_ = m.SyncEmbeddedAgentTools(ctx, id)
 	}
 	return nil
+}
+
+func workflowJournalPrompt(r store.WorkflowJournalMutationResult) string {
+	return fmt.Sprintf("\n\nUse workflow_journal_note with source=prompted, run_id=%q and target_event_id=%q to add a concise human-facing entry about the outcome, important decisions, obstacles and next steps when relevant. Use plain language; avoid jargon, routine noise and fabricated facts.", r.RunID, r.EventID)
 }

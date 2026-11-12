@@ -9,14 +9,19 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
+type backgroundWorkflowBinding struct {
+	workflowID, stateID string
+	variables           map[string]string
+}
+
 // LaunchBackgroundWorkflow launches an embedded background workflow worker.
 // It:
 // 1. Fetches workflow definition from the store.
 // 2. Validates required variables using store.ValidateWorkflowVariables.
 // 3. Generates a deterministic agent ID (bg-wf-<workflowID>-<timestamp>).
 // 4. Interpolates the workflow's entry state prompt/instructions with the input variables.
-// 5. Launches the agent as a managed agent with IsBackground: true and initial instructions.
-// 6. Sets the initial active workflow state and variables on the agent.
+// 5. Atomically reserves the agent with its workflow binding and journal.
+// 6. Starts the managed background worker with the initial instructions.
 func (m *Manager) LaunchBackgroundWorkflow(
 	ctx context.Context,
 	workflowID string,
@@ -146,6 +151,7 @@ func (m *Manager) LaunchBackgroundWorkflow(
 		RequestID:          requestID,
 		IsBackground:       true,
 		AllowInlineTools:   true,
+		backgroundWorkflow: &backgroundWorkflowBinding{workflowID: workflowID, stateID: entryState.ID, variables: inputVars},
 	}
 
 	launchRes, err := m.Launch(ctx, launchReq)
@@ -154,11 +160,6 @@ func (m *Manager) LaunchBackgroundWorkflow(
 	}
 
 	agentRec := launchRes.Agent
-
-	// Bind active workflow and variables
-	if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, &workflowID, &entryState.ID, inputVars); err != nil {
-		return nil, fmt.Errorf("failed to set active workflow state on launched agent: %w", err)
-	}
 
 	// Activate implicit workflow completion goal
 	wfName := "active"

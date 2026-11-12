@@ -578,6 +578,11 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 					return err
 				}
 			}
+			if migration.ID == "132_workflow_journal" {
+				if err := s.migrateWorkflowJournalTx(ctx); err != nil {
+					return err
+				}
+			}
 			if migration.ID == "112_conversation_timeline" {
 				if err := s.migrateToConversationTimelineTx(ctx); err != nil {
 					return err
