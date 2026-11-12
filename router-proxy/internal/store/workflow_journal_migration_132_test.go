@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,6 +65,57 @@ func TestWorkflowJournalMigration132ActiveBindingRestart(t *testing.T) {
 		}
 		require.NoError(t, upgraded.Close())
 		require.NoError(t, clock.Advance(time.Minute))
+	}
+}
+
+func TestWorkflowJournalMigration132NameCollision(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range []string{"legacy", "compatible", "unknown"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "router.db")
+			migrations := DefaultMigrations()
+			before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "132_workflow_journal")]})
+			require.NoError(t, err)
+			var create string
+			switch kind {
+			case "legacy":
+				create = `CREATE TABLE workflow_journal_events (run_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, state_id TEXT, entry_id TEXT, exit TEXT, note TEXT, at TEXT NOT NULL); INSERT INTO workflow_journal_events(run_id,sequence,type,note,at) VALUES('old',1,'run_launched','saved','2026-01-01');`
+			case "compatible":
+				create = `CREATE TABLE workflow_journal_events (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,occurred_at TEXT NOT NULL,workflow_id TEXT NOT NULL DEFAULT '',workflow_name TEXT NOT NULL DEFAULT '',state_id TEXT NOT NULL DEFAULT '',state_name TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT '',text TEXT NOT NULL DEFAULT '',target_event_id TEXT NOT NULL DEFAULT '',UNIQUE(run_id,sequence));`
+			case "unknown":
+				create = `CREATE TABLE workflow_journal_events (mystery TEXT); INSERT INTO workflow_journal_events VALUES('saved');`
+			}
+			_, err = before.db.ExecContext(ctx, create)
+			require.NoError(t, err)
+			require.NoError(t, before.Close())
+			after, err := Open(ctx, path, Options{})
+			if kind == "unknown" {
+				require.ErrorContains(t, err, "unknown schema")
+				// Failed migration leaves both the original table and ledger unchanged.
+				raw, e := sql.Open("sqlite", path)
+				require.NoError(t, e)
+				defer raw.Close()
+				var saved string
+				require.NoError(t, raw.QueryRowContext(ctx, `SELECT mystery FROM workflow_journal_events`).Scan(&saved))
+				require.Equal(t, "saved", saved)
+				var recorded int
+				require.NoError(t, raw.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE id='132_workflow_journal'`).Scan(&recorded))
+				require.Zero(t, recorded)
+				return
+			}
+			require.NoError(t, err)
+			defer after.Close()
+			var recorded int
+			require.NoError(t, after.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE id='132_workflow_journal'`).Scan(&recorded))
+			require.Equal(t, 1, recorded)
+			if kind == "legacy" {
+				var note string
+				require.NoError(t, after.db.QueryRowContext(ctx, `SELECT note FROM workflow_journal_events_pre132 WHERE run_id='old'`).Scan(&note))
+				require.Equal(t, "saved", note)
+			}
+			var column string
+			require.NoError(t, after.db.QueryRowContext(ctx, `SELECT name FROM pragma_table_info('workflow_journal_events') WHERE name='kind'`).Scan(&column))
+		})
 	}
 }
 
