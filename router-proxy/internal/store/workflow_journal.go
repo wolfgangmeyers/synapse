@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -126,6 +127,64 @@ func (s *Store) journalSweepTx(ctx context.Context) error {
 	_, err = s.db.ExecContext(ctx, `DELETE FROM workflow_journal_receipts WHERE expires_at<=?`, cutoff)
 	return err
 }
+
+// prepareWorkflowJournalMigration132Tx keeps the old workflow runtime's event
+// table intact. It used the same name but a different schema from migration 132.
+// Called inside the migration's transaction so a failed upgrade undoes the rename.
+func (s *Store) prepareWorkflowJournalMigration132Tx(ctx context.Context) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='workflow_journal_events'`).Scan(&exists); err != nil || exists == 0 {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(workflow_journal_events)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var number, notNull, primaryKey int
+		var name, kind string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&number, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	newColumns := []string{"id", "run_id", "sequence", "kind", "occurred_at", "workflow_id", "workflow_name", "state_id", "state_name", "reason", "source", "text", "target_event_id"}
+	if len(columns) == len(newColumns) {
+		compatible := true
+		for _, column := range newColumns {
+			compatible = compatible && columns[column]
+		}
+		if compatible {
+			return nil // Already the new journal schema; CREATE IF NOT EXISTS is safe.
+		}
+	}
+	legacy := []string{"run_id", "sequence", "type", "state_id", "entry_id", "exit", "note", "at"}
+	if len(columns) != len(legacy) {
+		return fmt.Errorf("workflow_journal_events has an unknown schema; refusing to overwrite it")
+	}
+	for _, column := range legacy {
+		if !columns[column] {
+			return fmt.Errorf("workflow_journal_events has an unknown schema; refusing to overwrite it")
+		}
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name='workflow_journal_events_pre132'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 0 {
+		return fmt.Errorf("workflow_journal_events_pre132 already exists; refusing to overwrite it")
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE workflow_journal_events RENAME TO workflow_journal_events_pre132`)
+	return err
+}
+
 func (s *Store) migrateWorkflowJournalTx(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT agent_id,COALESCE(active_workflow_state_id,'') FROM managed_agents WHERE active_workflow_state_id IS NOT NULL OR active_workflow_id IS NOT NULL`)
 	if err != nil {

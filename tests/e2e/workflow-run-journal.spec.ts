@@ -1,4 +1,10 @@
 import { expect, test } from "@playwright/test";
+import { execFile } from "node:child_process";
+import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
+import { setupE2EHarness } from "./harness";
 import { createRunningWorkflow, userTurn, workflowHarness, type WorkflowHarness } from "./workflow-implicit-goals-harness";
 
 // WJ-01/02/03: only the external LLM is scripted; the browser, proxy, router,
@@ -368,5 +374,54 @@ test("scheduled launch journal survives router restart", async ({ page }) => {
     expect(JSON.stringify(await f.api(`/v1/managed-agents/${agent}/workflow-journal/${run}`))).toContain(workflow.id);
     await f.advance(1000);
     expect(runs()).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+test("upgrades a legacy journal table without losing rows", async ({ page }) => {
+  test.setTimeout(120_000);
+  const f = await setupE2EHarness({ useProxy: true });
+  const repo = resolve(import.meta.dirname, "../..");
+  const exec = promisify(execFile);
+  const inspect = <T>(fn: (db: DatabaseSync) => T): T => {
+    const db = new DatabaseSync(f.router.databasePath, { readOnly: true });
+    try { return fn(db); } finally { db.close(); }
+  };
+  try {
+    await f.router.restart(async path => {
+      for (const suffix of ["", "-wal", "-shm"]) await rm(path + suffix, { force: true });
+      await exec("go", ["run", "./internal/store/testdata/journal-migration", path], { cwd: resolve(repo, "router-proxy") });
+      const db = new DatabaseSync(path);
+      try {
+        db.exec(`CREATE TABLE workflow_runs (run_id TEXT PRIMARY KEY);
+          INSERT INTO workflow_runs(run_id) VALUES('old');
+          CREATE TABLE workflow_journal_events (
+          run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL, type TEXT NOT NULL, state_id TEXT, entry_id TEXT,
+          exit TEXT, note TEXT, at TEXT NOT NULL, PRIMARY KEY(run_id,sequence));
+          INSERT INTO workflow_journal_events(run_id,sequence,type,note,at)
+          VALUES('old',1,'run_launched','preserved','2026-01-01T00:00:00Z');`);
+      } finally { db.close(); }
+    });
+    const check = () => inspect(db => ({
+      old: db.prepare("SELECT note FROM workflow_journal_events_pre132 WHERE run_id='old'").get()?.note,
+      migrated: db.prepare("SELECT count(*) AS n FROM schema_migrations WHERE id='132_workflow_journal'").get()?.n,
+      column: db.prepare("SELECT name FROM pragma_table_info('workflow_journal_events') WHERE name='kind'").get()?.name,
+    }));
+    expect(check()).toEqual({ old: "preserved", migrated: 1, column: "kind" });
+    await page.goto(f.frontend.url);
+    const observed = await page.evaluate(async url => {
+      const status = (await fetch(url + "/v1/health", { credentials: "omit" })).status;
+      const socket = await new Promise<string>((resolve, reject) => {
+        const ws = new WebSocket(url.replace(/^http/, "ws") + "/v1/agents");
+        const timer = setTimeout(() => { ws.close(); reject(Error("WebSocket timed out")); }, 5000);
+        ws.onerror = () => { clearTimeout(timer); reject(Error("WebSocket failed")); };
+        ws.onopen = () => ws.send(JSON.stringify({ version: "v1", frame_id: "journal-upgrade", type: "register", agent_id: "journal-browser", instance_id: "journal-instance", agent_role: "agent", client_type: "test", ack_confirmation: "correlated_v1", conversation_sync: "v1", delivery_receipts: "delivery_items_v1" }));
+        ws.onmessage = event => { if (JSON.parse(event.data).type === "registered") { clearTimeout(timer); ws.close(); resolve("registered"); } };
+      });
+      return { status, socket };
+    }, f.proxy!.url);
+    expect(observed).toEqual({ status: 200, socket: "registered" });
+    await f.router.restart();
+    expect(check()).toEqual({ old: "preserved", migrated: 1, column: "kind" });
   } finally { await f.close(); }
 });

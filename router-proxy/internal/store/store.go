@@ -564,6 +564,11 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+			if migration.ID == "132_workflow_journal" {
+				if err := s.prepareWorkflowJournalMigration132Tx(ctx); err != nil {
+					return fmt.Errorf("prepare migration %s: %w", migration.ID, err)
+				}
+			}
 			if _, err := s.db.ExecContext(ctx, migration.SQL); err != nil {
 				return fmt.Errorf("apply migration %s: %w", migration.ID, err)
 			}
