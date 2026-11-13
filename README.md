@@ -1,4 +1,4 @@
-# mecha-developer
+# Synapse
 
 Personal dev-tooling skills for AI coding agents — supervisor, worker, watchdog, mailbox, reminders, install, decompose, subagent-orchestration, kb, voice, augment-persona, generate-persona, worktree, workflows, test-coverage.
 

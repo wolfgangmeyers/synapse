@@ -1,4 +1,4 @@
-# mecha-developer
+# Synapse
 
 This repo holds dev-tooling skills for Wolfgang's AI agent workflow. Skills live in `.claude/skills/<name>/SKILL.md`.
 
