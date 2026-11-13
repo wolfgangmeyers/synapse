@@ -9,7 +9,7 @@ Status: Draft; Implementation in progress, acceptance pending · Date: 2026-10-2
 
 Boundary prerequisite: [runtime-engine-boundary.spec.md](runtime-engine-boundary.spec.md) (Draft). Extract a narrow, behavior-preserving Pi adapter first. Reuse internal persistence types where practical; normalized events are optional targeted cleanup, not a generic engine framework. Wolfgang has authorized implementation; required E2E acceptance remains pending. The goal is near-identical UI with the explicit engine differences below, not exact protocol parity.
 
-Implementation sequencing: [CLAUDE_CODE_ADAPTER_PLAN.md](../../CLAUDE_CODE_ADAPTER_PLAN.md) (Implementation in progress; current evidence and gaps).
+Implementation sequencing and recorded evidence: [Claude worker plan](claude-code-workers-plan.md).
 
 **Planned supersession:** [Claude router defaults](claude-router-default.spec.md) supersedes this document’s Pi-only root/default and evaluator restrictions, including CC-001, CC-010 and CC-013, once implemented and accepted. Those passages describe the earlier worker contract, not the new target. Unset automatic default selection remains Pi-only. The legacy launcher mentioned below is separate from this repository; its continued use or retirement requires the inventory and migration in CD-011. This specification remains Draft.
 
@@ -358,7 +358,7 @@ Still to verify:
 
 Implementation is authorized and in progress. Pi seam/shared authority/reset store/coordinator and Claude process/UI/catalog work are implemented with partial focused validation. Reported real catalog-admission browser evidence: `tests/e2e/claude-catalog-admission.spec.ts`, **1 passed**. Supporting scoped UI tests and typecheck passed. These checks do not prove the full Claude lifecycle.
 
-Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the new CC-019 are not accepted**, and this specification remains **Draft**. Target acceptance suite: `tests/e2e/claude-code-workers.spec.ts` (planned), with per-AC mapping in plan §13–14. It must exercise headless browser, REST, router-proxy, WebSocket and SQLite with deterministic local Claude/evaluator mocks. Go/Vitest checks support but do not replace that matrix. See the [root implementation status](../../CLAUDE_CODE_ADAPTER_PLAN.md#current-implementation-evidence) for the compact evidence summary. No builds or tests were run for this documentation reconciliation.
+Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the new CC-019 are not accepted**, and this specification remains **Draft**. Target acceptance suite: `tests/e2e/claude-code-workers.spec.ts` (planned), with scenario mapping in spec §11 and supporting summaries in [plan §13](claude-code-workers-plan.md#13-test-strategy). It must exercise headless browser, REST, router-proxy, WebSocket and SQLite with deterministic local Claude/evaluator mocks. Go/Vitest checks support but do not replace that matrix. See the [recorded implementation evidence](claude-code-workers-plan.md#recorded-implementation-evidence) for the compact evidence summary. No builds or tests were run for this documentation reconciliation.
 
 
 ## 9. Core Invariants
