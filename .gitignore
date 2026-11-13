@@ -47,4 +47,9 @@ test-results/
 .config/
 go/
 .mecha-developer/
+
+# Ephemeral root planning documents
+/PLAN.md
+/PRD.md
+/SPEC.md
 *.jpg
