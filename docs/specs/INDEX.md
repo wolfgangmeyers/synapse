@@ -158,6 +158,12 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 
 - [Tool permissions popups](tool-permissions-popup.spec.md)
 
+- [Web UI Oxanium typography](ui-typography-oxanium.spec.md)
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-UI-TYPE-001` | Local Oxanium typography and readable fallbacks | `AgentManagement` | [`ui-typography-oxanium.spec.md`](./ui-typography-oxanium.spec.md) | `tests/e2e/ui-typography-oxanium.spec.ts` | `Active` |
+
 ## Sidebar Branding
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
