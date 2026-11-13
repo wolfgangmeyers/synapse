@@ -35,6 +35,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-ACTIVITY-DIALOG-001` | Activity dialog visibility | `AgentManagement` | [`activity-dialog-visibility.spec.md`](./activity-dialog-visibility.spec.md) | `tests/e2e/activity-dialog-visibility.spec.ts` | `Active` |
 | `SPEC-BB-WIDGET-001` | Background shell widget and retained output | `AgentManagement` | [`background-bash-widget.spec.md`](./background-bash-widget.spec.md) | `tests/e2e/background-bash-widget.spec.ts` (pending) | `Draft` |
 | `SPEC-BB-PLATFORM` | Background bash unsupported platforms | `AgentManagement` | [`background-bash-platform-limitation.spec.md`](./background-bash-platform-limitation.spec.md) | Build-tagged Go tests; cross-platform E2E pending | `Draft` |
 | `SPEC-RESET-OWNER-HANDLES` | Reset owner-bound handles and transaction outcomes | `AgentManagement` | [`reset-owner-handles.spec.md`](./reset-owner-handles.spec.md) | Go regression tests; complete E2E mapping pending | `Draft` |
