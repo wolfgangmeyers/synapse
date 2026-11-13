@@ -6,9 +6,9 @@ All frontend engineers, subagents, and contributors modifying the Web UI must fo
 
 ---
 
-## 1. Dark Glassmorphic Design System
+This UI uses the bundled Oxanium typeface for interface typography. It is loaded from `/fonts/Oxanium-Regular.ttf` with `font-display: swap` and system sans-serif fallback. Body copy retains its existing 16px size, 1.45 line-height and palette for legibility; monospace code, paths and preformatted values continue to use the `--font-mono` stack. The font is licensed under the SIL Open Font License, included with the asset at `web/router-ui-react/public/fonts/OFL.txt`; no external font service is needed.
 
-The Mecha Web UI uses a dark cyberpunk glassmorphism aesthetic characterized by layered translucent surfaces, heavy backdrop blur, subtle luminous borders, and high-contrast neon accents.
+## 1. Dark Glassmorphic Design System a dark cyberpunk glassmorphism aesthetic characterized by layered translucent surfaces, heavy backdrop blur, subtle luminous borders, and high-contrast neon accents.
 
 ### Palette & Tone Mapping
 - **Base Canvas & Dark Indigo/Slate**:
