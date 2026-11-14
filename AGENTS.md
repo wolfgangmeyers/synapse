@@ -140,6 +140,8 @@ Wolfgang has authorized all ordinary scoped work in the current task. A concrete
 
 ## Automated testing policy
 
+Do not add tests that verify removed functionality is absent. Remove such tests when found, while preserving positive coverage for functionality that remains.
+
 Prioritize behavioral functional tests that put as many system-owned components and boundaries together as practical, with dependencies mocked as necessary, and prove the software works. Automated tests must not call LLMs or external services; replace those dependencies with deterministic mocks at the external boundary. Tests must satisfy and map every applicable requirement. Isolated unit tests are supporting evidence, not sufficient when an owned cross-component path can be exercised.
 
 ## Behavioral Functional Testing Standard

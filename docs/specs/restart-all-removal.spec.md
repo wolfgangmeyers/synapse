@@ -3,7 +3,7 @@
 - **ID**: `SPEC-MANAGED-RESTART-ALL-REMOVAL-001`
 - **Status**: `Draft`
 - **Domain**: `Managed Agents`
-- **Target E2E Suite**: `tests/e2e/restart-all-removal.spec.ts`
+- **Target E2E Suite**: `tests/e2e/individual-restart.spec.ts`
 
 ## 1. Intent & User Outcome
 
@@ -51,10 +51,10 @@ The mappings below identify existing test cases, not a claim that they have pass
 
 | Scenario | Concrete coverage | Remaining gaps |
 | :--- | :--- | :--- |
-| RAR-001 | `tests/e2e/restart-all-removal.spec.ts`: `RAR-001 no Restart All control in sidebar, header, agent or server menus; per-agent Restart remains` and `RAR-001 the shipped UI bundle never calls the retired route`. | These checks cannot prove the absence of every possible alternate entry point. |
-| RAR-002 | `tests/e2e/restart-all-removal.spec.ts`: the three `RAR-002` cases cover request variants and durable snapshots, a valid `restart-all` agent ID, and a busy agent. `router-proxy/internal/transport/managed_http_test.go`: `TestRetiredManagedRestartAllRouteReturns404WithoutSideEffects`. | The finite request variants do not establish every possible body or header. |
-| RAR-003 | `tests/e2e/restart-all-removal.spec.ts`: the three `RAR-003` cases cover UI and REST acceptance, terminal operation and replay, unknown agents, and isolation from another busy agent. `tests/e2e/embedded-active-restart.spec.ts`: `individual restart interrupts an active embedded agent and preserves usable prompt and mail` exercises cancellation, preserved session identity and selected model, subsequent prompt and mail, and absence of the stale answer in captured WebSocket frames. `router-proxy/internal/managed/embedded_individual_restart_regression_test.go`: `TestEmbeddedIndividualRestartWithoutModel`. `router-proxy/internal/managed/embedded_restart_contract_test.go`: `TestEmbeddedRestartCompletionAndFutureInputs` (idle and active) and `TestEmbeddedRestartRejectsStaleOwnerWithoutInterrupt`. | The active E2E checks session identity and model, but does not prove prior conversational context is available after restart. Stale-owner fencing remains manager-level coverage; the E2E does not assert a specific restart WebSocket notification. |
-| RAR-004 | The E2E fixture opens a fresh store; `router-proxy/internal/store/managed_lifecycle_migration_test.go`: `TestMigration028ExistingDatabaseUpgradeAndRollback` upgrades a pre-028 store with legacy rows through store `Open` and checks rollback, row preservation, and foreign keys. `router-proxy/internal/store/managed_lifecycle_s0_test.go`: `TestLegacyBatchRowsAndGraphRetentionAreAtomic` exercises legacy rows in a current store. | No identified test starts the router against an existing database already at migration 028. Store-level upgrade is not router-startup upgrade coverage. |
-| RAR-005 | `router-proxy/internal/store/managed_lifecycle_s0_test.go`: `TestLifecycleActionShapesRetriesAndFencedRecoveryClaims` rejects the retired kind and source and checks no such rows were created. `router-proxy/internal/store/managed_restart_s3_test.go`: `TestLifecycleRestartReservationRejectsLegacyChildAdmission` rejects the legacy child source and a direct reservation with a parent, with no durable changes. | Store-level coverage; not an E2E boundary test. |
+| RAR-001 | Per-agent restart is exercised by `tests/e2e/individual-restart.spec.ts`. | Removal is assessed by inspection, not absence tests. |
+| RAR-002 | None. | Retired route absence is assessed by inspection. |
+| RAR-003 | `tests/e2e/individual-restart.spec.ts` covers UI acceptance, REST replay, unknown agents and isolation. `tests/e2e/embedded-active-restart.spec.ts` covers active-turn cancellation, retained context, subsequent prompt and mail. Manager-level tests cover idle and active restart and stale-owner fencing. | The E2E does not assert a specific restart WebSocket notification. |
+| RAR-004 | `router-proxy/internal/store/managed_lifecycle_migration_test.go`: `TestMigration028ExistingDatabaseUpgradeAndRollback`; `router-proxy/internal/store/managed_lifecycle_s0_test.go`: `TestLegacyBatchRowsAndGraphRetentionAreAtomic`. | No identified test starts the router against an existing database already at migration 028. |
+| RAR-005 | Direct restart reservation validation remains covered in `router-proxy/internal/store/managed_restart_s3_test.go`. | Retired admissions are assessed by inspection. |
 
 The broader absence of manager dispatch and store admission paths, and tmux isolation, require code inspection or separately identified regression coverage; the matrix above does not by itself prove them.

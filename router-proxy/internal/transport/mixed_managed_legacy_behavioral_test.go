@@ -132,7 +132,7 @@ func mixedPostMessage(t *testing.T, base, id, from, to, body string, headers map
 	return response.StatusCode, result
 }
 
-func TestMixedManagedLegacyRoutingAndRetiredRestartAllIsolation(t *testing.T) {
+func TestMixedManagedLegacyRouting(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	home := t.TempDir()
@@ -273,36 +273,12 @@ func TestMixedManagedLegacyRoutingAndRetiredRestartAllIsolation(t *testing.T) {
 	require.Equal(t, "error", forged["type"])
 	require.Equal(t, "lease_not_active", forged["code"])
 
-	// The retired Restart All route is a plain 404 on the same real router and
-	// store. The managed agent is untouched and the live legacy protocol client
-	// sees no signal or request; the tmux-backed lease remains usable.
-	managedBeforeRetired, err := durable.ManagedAgent(ctx, "managed-agent")
-	require.NoError(t, err)
-	restartRequest, err := http.NewRequest(http.MethodPost, httpURL+"/v1/managed-agents/restart-all", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	restartRequest.Header.Set("Content-Type", "application/json")
-	restartRequest.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174002")
-	restartResponse, err := http.DefaultClient.Do(restartRequest)
-	require.NoError(t, err)
-	defer restartResponse.Body.Close()
-	require.Equal(t, http.StatusNotFound, restartResponse.StatusCode)
-	managedAfterRetired, err := durable.ManagedAgent(ctx, "managed-agent")
-	require.NoError(t, err)
-	require.Equal(t, managedBeforeRetired.LifecycleState, managedAfterRetired.LifecycleState)
-	require.NotEqual(t, "restarting", managedAfterRetired.LifecycleState)
-	require.Equal(t, managedBeforeRetired.RuntimeGeneration, managedAfterRetired.RuntimeGeneration)
-
 	// The managed name supervisor has no special authority: this live legacy
 	// registration is the canonical recipient and still owns its lease.
 	mixedWriteJSON(t, legacy, map[string]any{"version": "v1", "frame_id": "legacy-ping", "type": "ping"})
 	pong := mixedReadJSON(t, legacy)
 	require.Equal(t, "pong", pong["type"])
-	// Read deadlines are terminal for this client, so this is the final
-	// protocol assertion. The retired Restart All request must not emit a control frame to legacy.
-	readCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, _, readErr := legacy.Read(readCtx)
-	cancel()
-	require.Error(t, readErr, "The retired Restart All request must not emit a control frame to legacy")
+
 }
 
 func managedFence(agent *store.ManagedAgentRecord) store.ManagedRuntimeFence {

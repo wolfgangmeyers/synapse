@@ -159,19 +159,6 @@ func TestLifecycleActionShapesRetriesAndFencedRecoveryClaims(t *testing.T) {
 	termination.TerminalCode, termination.TerminalMessage, termination.Retryable = "TERMINATED", "managed agent terminated", false
 	termination.Operation.State = "terminal"
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, termination))
-	// Restart All is retired: neither its parent kind nor its child source
-	// can be admitted, and nothing is written for the rejected attempts.
-	retiredParent := lifecycleActionInput(lifecycleUUID(6), "", "restart_all", "direct", ManagedRuntimeFence{})
-	require.ErrorContains(t, store.CreateManagedLifecycleAction(ctx, retiredParent), "kind is invalid")
-	retiredChild := lifecycleActionInput(lifecycleUUID(7), agent.AgentID, "restart", "restart_all_child", source)
-	retiredChild.ParentActionID = directRestart.ActionID
-	require.ErrorContains(t, store.CreateManagedLifecycleAction(ctx, retiredChild), "source is invalid")
-	directWithParent := lifecycleActionInput(lifecycleUUID(8), agent.AgentID, "restart", "direct", source)
-	directWithParent.ParentActionID = directRestart.ActionID
-	require.Error(t, store.CreateManagedLifecycleAction(ctx, directWithParent))
-	var retiredRows int
-	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_actions WHERE kind='restart_all' OR source='restart_all_child' OR action_id IN (?,?,?)`, retiredParent.ActionID, retiredChild.ActionID, directWithParent.ActionID).Scan(&retiredRows))
-	require.Zero(t, retiredRows)
 
 	invalid := lifecycleActionInput(lifecycleUUID(10), agent.AgentID, "restart", "direct", source)
 	invalid.SourceFence = nil

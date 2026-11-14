@@ -978,37 +978,3 @@ func TestManagedAgentInterruptAndSubagentStopHTTP(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, res.StatusCode)
 	}
 }
-
-func TestRetiredManagedRestartAllRouteReturns404WithoutSideEffects(t *testing.T) {
-	server, durable, dbPath := newManagedHTTPTestServerWithPath(t)
-	db, err := sql.Open("sqlite", dbPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	countRows := func() (int, int, int) {
-		var actions, items, operations int
-		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_actions`).Scan(&actions))
-		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_batch_items`).Scan(&items))
-		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_http_operations`).Scan(&operations))
-		return actions, items, operations
-	}
-	beforeActions, beforeItems, beforeOperations := countRows()
-	requestID := "123e4567-e89b-42d3-a456-426614174090"
-	for _, method := range []string{http.MethodPost} {
-		for _, body := range []string{`{}`, `{"unexpected":true}`, ``} {
-			req, err := http.NewRequest(method, server.URL+"/v1/managed-agents/restart-all", strings.NewReader(body))
-			require.NoError(t, err)
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Request-ID", requestID)
-			response, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
-			require.NoError(t, response.Body.Close())
-			require.Equal(t, http.StatusNotFound, response.StatusCode, "%s body %q", method, body)
-		}
-	}
-	afterActions, afterItems, afterOperations := countRows()
-	require.Equal(t, beforeActions, afterActions)
-	require.Equal(t, beforeItems, afterItems)
-	require.Equal(t, beforeOperations, afterOperations)
-	_, err = durable.FindManagedOperation(context.Background(), http.MethodPost, requestID)
-	require.ErrorIs(t, err, sql.ErrNoRows)
-}

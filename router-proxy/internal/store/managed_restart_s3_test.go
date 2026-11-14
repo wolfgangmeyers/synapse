@@ -245,9 +245,8 @@ func TestLifecycleRestartPreparationFailureRestoresSourceProjection(t *testing.T
 	require.Equal(t, "terminal", op.State)
 }
 
-func TestLifecycleRestartReservationRejectsLegacyChildAdmission(t *testing.T) {
+func TestLifecycleRestartReservationRejectsDirectWithParent(t *testing.T) {
 	for _, tc := range []struct{ name, source, parent string }{
-		{"legacy source", "restart_all_child", lifecycleUUID(800)},
 		{"direct with parent", "direct", lifecycleUUID(800)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

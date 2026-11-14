@@ -123,7 +123,6 @@ func TestContractManifestManagedLifecycleRoutes(t *testing.T) {
 			require.True(t, route.Managed)
 		}
 	}
-	require.False(t, found["/v1/managed-agents/restart-all"], "Restart All route is retired")
 	require.True(t, found["/v1/managed-agents/{agent_id}/restart"])
 	require.True(t, found["/v1/managed-agents/{id}/reset"])
 	require.True(t, found["/v1/managed-agents/archive/{archive_key}"])
@@ -157,17 +156,6 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	require.Equal(t, "cors_verified", outcomes.Status)
 	require.NotEmpty(t, outcomes.Cases)
 	require.NotEmpty(t, outcomes.RouteOutcomes)
-	retiredPathReferenced := false
-	for _, raw := range outcomes.RouteOutcomes {
-		var outcome struct {
-			Path string `json:"path"`
-		}
-		require.NoError(t, json.Unmarshal(raw, &outcome))
-		if outcome.Path == "/v1/managed-agents/restart-all" {
-			retiredPathReferenced = true
-		}
-	}
-	require.False(t, retiredPathReferenced, "Restart All outcome is retired")
 	for _, outcomeCase := range outcomes.Cases {
 		require.NotEmpty(t, outcomeCase.ID)
 		require.Equal(t, "verified", outcomeCase.Status)
