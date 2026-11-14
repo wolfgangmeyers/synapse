@@ -232,6 +232,7 @@ export async function startIsolatedRouter(options: {
   embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string; omitGoogle?: boolean };
   codexCredentialPath?: string;
   fakeEmbeddedCatalog?: boolean;
+  restartCodexConsumerFixture?: boolean;
   backgroundExpiryInterval?: string;
   rootControlFixture?: boolean;
   piReviewBarrier?: boolean;
@@ -365,13 +366,15 @@ export async function startIsolatedRouter(options: {
         const filtered = lines.filter(line => !providers.some(provider => line.includes("available: true") && line.includes(`provider: "${provider}"`))).join("\n");
         await writeFile(fixturePath, filtered);
       }
-      await copyFile(join(options.repoRoot, "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
+      await copyFile(join(options.repoRoot, options.restartCodexConsumerFixture ? "tests/e2e/restart-codex-consumer.mjs" : "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
+      if (!options.restartCodexConsumerFixture) {
       // Worktrees do not share installed packages. An explicit dependency path
       // supports isolated checkouts without inheriting Node's loader environment.
       const dependencies = resolve(process.env.MECHA_E2E_AUTH_NODE_MODULES || join(options.repoRoot, "auth-helper/node_modules"));
       try { await access(join(dependencies, "@earendil-works/pi-coding-agent/package.json")); }
       catch { throw new Error("E2E auth-helper dependencies unavailable; run npm ci --prefix auth-helper or set MECHA_E2E_AUTH_NODE_MODULES"); }
       await symlink(dependencies, join(fixtureAuth, "node_modules"), "dir");
+      }
       const helperIndex = args.indexOf("--managed-auth-helper");
       args[helperIndex + 1] = join(fixtureAuth, "index.mjs");
       // Keep the manifest within the disposable fixture runtime root.

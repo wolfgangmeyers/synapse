@@ -160,7 +160,13 @@ func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
 
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	durable, _ := storetest.OpenTestStore(t)
+	server, durable, _ := newManagedHTTPTestServerWithPath(t)
+	return server, durable
+}
+
+func newManagedHTTPTestServerWithPath(t *testing.T) (*httptest.Server, *store.Store, string) {
+	t.Helper()
+	durable, dbPath := storetest.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
@@ -169,7 +175,7 @@ func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	require.NoError(t, err)
 	server := httptest.NewServer(router)
 	t.Cleanup(func() { server.Close(); _ = router.Close(context.Background()); _ = durable.Close() })
-	return server, durable
+	return server, durable, dbPath
 }
 
 type providerAuthHTTPRun struct {
@@ -716,95 +722,6 @@ func TestManagedResetHTTPContract(t *testing.T) {
 	assertError(request(valid, `{}`), http.StatusNotFound, "AGENT_NOT_FOUND", valid)
 }
 
-func TestManagedRestartAllHTTPContractStoresAndReplaysOneBatchResponse(t *testing.T) {
-	server, durable := newManagedHTTPTestServer(t)
-	requestID := "123e4567-e89b-42d3-a456-426614174090"
-	request := func(method, id, body string) (*http.Response, []byte) {
-		req, err := http.NewRequest(method, server.URL+"/v1/managed-agents/restart-all", strings.NewReader(body))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-		if id != "" {
-			req.Header.Set("X-Request-ID", id)
-		}
-		response, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		payload, err := io.ReadAll(response.Body)
-		require.NoError(t, err)
-		require.NoError(t, response.Body.Close())
-		return response, payload
-	}
-	first, firstBody := request(http.MethodPost, requestID, `{}`)
-	require.Equal(t, http.StatusAccepted, first.StatusCode)
-	require.Equal(t, "no-store", first.Header.Get("Cache-Control"))
-	require.Equal(t, requestID, first.Header.Get("X-Request-ID"))
-	require.Equal(t, "application/json; charset=utf-8", first.Header.Get("Content-Type"))
-	var response struct {
-		OperationID string `json:"operation_id"`
-		Agents      []any  `json:"agents"`
-	}
-	require.NoError(t, json.Unmarshal(firstBody, &response))
-	require.Equal(t, requestID, response.OperationID)
-	require.Empty(t, response.Agents)
-	replay, replayBody := request(http.MethodPost, requestID, `{}`)
-	require.Equal(t, first.StatusCode, replay.StatusCode)
-	require.Equal(t, firstBody, replayBody)
-
-	invalid, _ := request(http.MethodPost, "123e4567-e89b-42d3-a456-426614174091", `{"unexpected":true}`)
-	require.Equal(t, http.StatusBadRequest, invalid.StatusCode)
-	wrongMethod, _ := request(http.MethodGet, "", ``)
-	require.Equal(t, http.StatusNotFound, wrongMethod.StatusCode)
-	stored, err := durable.FindManagedOperation(context.Background(), http.MethodPost, requestID)
-	require.NoError(t, err)
-	require.Equal(t, firstBody, stored.ResponseBody)
-	_, err = durable.FindManagedOperation(context.Background(), http.MethodPost, "123e4567-e89b-42d3-a456-426614174091")
-	require.ErrorIs(t, err, sql.ErrNoRows)
-}
-
-func TestManagedRestartAllHTTPRejectsEveryStrictRequestBoundary(t *testing.T) {
-	server, _ := newManagedHTTPTestServer(t)
-	requestID := "123e4567-e89b-42d3-a456-426614174092"
-	request := func(id, contentType, body string) (int, string) {
-		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents/restart-all", strings.NewReader(body))
-		require.NoError(t, err)
-		if id != "" {
-			req.Header.Set("X-Request-ID", id)
-		}
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		response, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer response.Body.Close()
-		var payload struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		require.NoError(t, json.NewDecoder(response.Body).Decode(&payload))
-		return response.StatusCode, payload.Error.Code
-	}
-	for _, testCase := range []struct {
-		name, id, contentType, body, code string
-		status                            int
-	}{
-		{name: "missing request ID", contentType: "application/json", body: `{}`, status: http.StatusBadRequest, code: "MISSING_REQUEST_ID"},
-		{name: "invalid request ID", id: "invalid", contentType: "application/json", body: `{}`, status: http.StatusBadRequest, code: "INVALID_REQUEST_ID"},
-		{name: "non JSON content type", id: requestID, contentType: "text/plain", body: `{}`, status: http.StatusBadRequest, code: "INVALID_JSON"},
-		{name: "malformed JSON", id: requestID, contentType: "application/json", body: `{`, status: http.StatusBadRequest, code: "INVALID_JSON"},
-		{name: "duplicate key", id: requestID, contentType: "application/json", body: `{"x":1,"x":2}`, status: http.StatusBadRequest, code: "INVALID_JSON"},
-		{name: "non object", id: requestID, contentType: "application/json", body: `[]`, status: http.StatusBadRequest, code: "INVALID_JSON"},
-		{name: "trailing JSON", id: requestID, contentType: "application/json", body: `{} {}`, status: http.StatusBadRequest, code: "INVALID_JSON"},
-		{name: "unknown field", id: requestID, contentType: "application/json", body: `{"x":1}`, status: http.StatusBadRequest, code: "UNKNOWN_FIELD"},
-		{name: "over limit", id: requestID, contentType: "application/json", body: strings.Repeat(" ", 64*1024+1), status: http.StatusRequestEntityTooLarge, code: "PAYLOAD_TOO_LARGE"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			status, code := request(testCase.id, testCase.contentType, testCase.body)
-			require.Equal(t, testCase.status, status)
-			require.Equal(t, testCase.code, code)
-		})
-	}
-}
-
 func TestQuietHistoryRequiresConsumedManagedMailSendAuthorization(t *testing.T) {
 	server, durable := newManagedHTTPTestServer(t)
 	require.NoError(t, durable.SetCanonicalQuietRecipient(context.Background(), "supervisor"))
@@ -915,23 +832,6 @@ func TestManagedHistoryHTTPPreservesPresentEmptyMessageDetailsAndOmitsLegacyNull
 	require.NotContains(t, byID[legacy.ID], "sender_identity")
 }
 
-func TestManagedRestartAllMissingManagerReturnsSafeInternalError(t *testing.T) {
-	router := &Router{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/managed-agents/restart-all", strings.NewReader(`{}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174093")
-	response := httptest.NewRecorder()
-	require.True(t, router.handleManagedHTTP(response, req))
-	require.Equal(t, http.StatusInternalServerError, response.Code)
-	var payload struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
-	require.Equal(t, "INTERNAL", payload.Error.Code)
-}
-
 func TestManagedLaunchErrorsDescribeNameCollisionsForEveryReservationLayer(t *testing.T) {
 	for _, launchErr := range []error{
 		&store.ManagedNameConflictError{Name: "alpha"},
@@ -997,20 +897,6 @@ func TestManagedLaunchErrorsDescribeGitWorktreeErrors(t *testing.T) {
 			require.Equal(t, tc.expectedMessage, candidate.message)
 		})
 	}
-}
-
-func TestManagedRestartAllErrorStaysWithinTheSafeRouteContract(t *testing.T) {
-	idempotency := managedRestartAllError(&store.ManagedIdempotencyConflictError{})
-	candidate, ok := idempotency.(*managedHTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusConflict, candidate.status)
-	require.Equal(t, "IDEMPOTENCY_CONFLICT", candidate.code)
-	internal := managedRestartAllError(errors.New("private dispatch detail"))
-	candidate, ok = internal.(*managedHTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusInternalServerError, candidate.status)
-	require.Equal(t, "INTERNAL", candidate.code)
-	require.NotContains(t, candidate.message, "dispatch")
 }
 
 func TestModelsAndDefaultModelUseTheDirectManagedEnvelope(t *testing.T) {
@@ -1091,4 +977,38 @@ func TestManagedAgentInterruptAndSubagentStopHTTP(t *testing.T) {
 		defer res.Body.Close()
 		require.Equal(t, http.StatusInternalServerError, res.StatusCode)
 	}
+}
+
+func TestRetiredManagedRestartAllRouteReturns404WithoutSideEffects(t *testing.T) {
+	server, durable, dbPath := newManagedHTTPTestServerWithPath(t)
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	countRows := func() (int, int, int) {
+		var actions, items, operations int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_actions`).Scan(&actions))
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_batch_items`).Scan(&items))
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM managed_http_operations`).Scan(&operations))
+		return actions, items, operations
+	}
+	beforeActions, beforeItems, beforeOperations := countRows()
+	requestID := "123e4567-e89b-42d3-a456-426614174090"
+	for _, method := range []string{http.MethodPost} {
+		for _, body := range []string{`{}`, `{"unexpected":true}`, ``} {
+			req, err := http.NewRequest(method, server.URL+"/v1/managed-agents/restart-all", strings.NewReader(body))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Request-ID", requestID)
+			response, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			require.Equal(t, http.StatusNotFound, response.StatusCode, "%s body %q", method, body)
+		}
+	}
+	afterActions, afterItems, afterOperations := countRows()
+	require.Equal(t, beforeActions, afterActions)
+	require.Equal(t, beforeItems, afterItems)
+	require.Equal(t, beforeOperations, afterOperations)
+	_, err = durable.FindManagedOperation(context.Background(), http.MethodPost, requestID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
 }

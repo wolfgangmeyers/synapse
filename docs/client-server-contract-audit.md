@@ -179,7 +179,6 @@ Historical hypotheses only: UI usage is not proof an endpoint has no external, n
 | `/v1/messages/{id}/retry` (POST) | `http.go:routes` | Exposed in `http-client.ts:retryMessage()`, never used in UI | Remove from client |
 | `/v1/messages/{id}` (DELETE) | `http.go:routes` | Exposed in `http-client.ts:deleteMessage()`, never used in UI | Remove from client |
 | `/v1/managed-agents/{id}/router-log` | `router_log.go` | Both agent-scoped and global `/v1/router-log?query=...` exist | Keep `/v1/router-log` with query parameter; agent-specific route is redundant |
-| `/v1/managed-agents/restart-all` | `managed_http.go` | Bound to header button in UI | Keep |
 | `/v1/acceptance/` | `router.go` | Test harness hook | Ensure disabled in production builds |
 
 ---

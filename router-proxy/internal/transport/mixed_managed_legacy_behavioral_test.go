@@ -132,7 +132,7 @@ func mixedPostMessage(t *testing.T, base, id, from, to, body string, headers map
 	return response.StatusCode, result
 }
 
-func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
+func TestMixedManagedLegacyRoutingAndRetiredRestartAllIsolation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	home := t.TempDir()
@@ -153,7 +153,6 @@ func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
 	process := &managedTestProcess{identity: managed.ProcessIdentity{PID: 42001, StartMarker: "mixed-start", Incarnation: "mixed-incarnation"}, stopped: make(chan struct{})}
 	sessionID := ""
 	directRPC := &mixedDirectRPC{managedTestRPC: managedTestRPC{session: &sessionID, active: expectedManagedActiveToolsForTransportTest(manifest)}, prompted: make(chan store.ManagedDirectAttempt, 2)}
-	dispatched := make(chan []string, 1)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable,
 		Config: managed.Config{
@@ -164,10 +163,6 @@ func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
 		Manifest: manifest, ProcessFactory: mixedProcessFactory{process: process, session: &sessionID}, RPCFactory: mixedRPCFactory{rpc: directRPC},
 		CatalogSource:              managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true },
-		RestartAllDispatcher: func(_ context.Context, _ string, childIDs []string) error {
-			dispatched <- append([]string(nil), childIDs...)
-			return nil
-		},
 	})
 	require.NoError(t, err)
 
@@ -278,9 +273,11 @@ func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
 	require.Equal(t, "error", forged["type"])
 	require.Equal(t, "lease_not_active", forged["code"])
 
-	// Restart All is admitted from the same real router and store. Its durable
-	// batch contains the managed child only; the live legacy protocol client sees
-	// no signal or request, and the tmux-backed lease remains usable.
+	// The retired Restart All route is a plain 404 on the same real router and
+	// store. The managed agent is untouched and the live legacy protocol client
+	// sees no signal or request; the tmux-backed lease remains usable.
+	managedBeforeRetired, err := durable.ManagedAgent(ctx, "managed-agent")
+	require.NoError(t, err)
 	restartRequest, err := http.NewRequest(http.MethodPost, httpURL+"/v1/managed-agents/restart-all", strings.NewReader(`{}`))
 	require.NoError(t, err)
 	restartRequest.Header.Set("Content-Type", "application/json")
@@ -288,25 +285,12 @@ func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
 	restartResponse, err := http.DefaultClient.Do(restartRequest)
 	require.NoError(t, err)
 	defer restartResponse.Body.Close()
-	require.Equal(t, http.StatusAccepted, restartResponse.StatusCode)
-	var restartBody struct {
-		Agents []struct {
-			AgentID string `json:"agent_id"`
-			Status  string `json:"status"`
-		} `json:"agents"`
-	}
-	require.NoError(t, json.NewDecoder(restartResponse.Body).Decode(&restartBody))
-	require.Len(t, restartBody.Agents, 1)
-	require.Equal(t, "managed-agent", restartBody.Agents[0].AgentID)
-	select {
-	case childIDs := <-dispatched:
-		require.Len(t, childIDs, 1)
-	default:
-		t.Fatal("Restart All did not dispatch its committed managed child")
-	}
-	managedAfterRestart, err := durable.ManagedAgent(ctx, "managed-agent")
+	require.Equal(t, http.StatusNotFound, restartResponse.StatusCode)
+	managedAfterRetired, err := durable.ManagedAgent(ctx, "managed-agent")
 	require.NoError(t, err)
-	require.Equal(t, "restarting", managedAfterRestart.LifecycleState)
+	require.Equal(t, managedBeforeRetired.LifecycleState, managedAfterRetired.LifecycleState)
+	require.NotEqual(t, "restarting", managedAfterRetired.LifecycleState)
+	require.Equal(t, managedBeforeRetired.RuntimeGeneration, managedAfterRetired.RuntimeGeneration)
 
 	// The managed name supervisor has no special authority: this live legacy
 	// registration is the canonical recipient and still owns its lease.
@@ -314,11 +298,11 @@ func TestMixedManagedLegacyRoutingAndRestartAllIsolation(t *testing.T) {
 	pong := mixedReadJSON(t, legacy)
 	require.Equal(t, "pong", pong["type"])
 	// Read deadlines are terminal for this client, so this is the final
-	// protocol assertion. Restart All must not emit a control frame to legacy.
+	// protocol assertion. The retired Restart All request must not emit a control frame to legacy.
 	readCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	_, _, readErr := legacy.Read(readCtx)
 	cancel()
-	require.Error(t, readErr, "Restart All must not emit a control frame to legacy")
+	require.Error(t, readErr, "The retired Restart All request must not emit a control frame to legacy")
 }
 
 func managedFence(agent *store.ManagedAgentRecord) store.ManagedRuntimeFence {

@@ -32,15 +32,13 @@ func TestClaudeRestartReoffersMail(t *testing.T) {
 	f.m.startWG.Wait()
 	_, err := f.raw.Exec(`UPDATE managed_agents SET selected_model_provider=?, selected_model_id=? WHERE agent_id=?`, claudeCodeProvider, "sonnet", owner.binding.AgentID)
 	require.NoError(t, err)
-	saved, err := f.db.ManagedAgent(ctx, owner.binding.AgentID)
-	require.NoError(t, err)
 	lane := f.m.laneFor(owner.binding.AgentID)
 	barrier := &restartMailBarrier{entered: make(chan struct{}), release: make(chan struct{})}
 	lane.activeMu.Lock()
 	lane.activeSession = barrier
 	lane.activeMu.Unlock()
 	req := RestartRequest{AgentID: owner.binding.AgentID, Method: "POST", CanonicalPath: "/restart", RequestID: "restart-mail-regression", CanonicalBodyHash: "hash"}
-	_, err = f.m.reserveClaudeCodeRestart(ctx, req, saved)
+	_, err = f.m.reserveClaudeCodeRestart(ctx, req)
 	require.NoError(t, err)
 	select {
 	case <-barrier.entered:
@@ -82,10 +80,8 @@ func TestClaudeRestartReofferSkipsUncertainMail(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.db.ResolveMessageTarget(ctx, nextID)
 	require.NoError(t, err)
-	saved, err := f.db.ManagedAgent(ctx, owner.binding.AgentID)
-	require.NoError(t, err)
 	req := RestartRequest{AgentID: owner.binding.AgentID, Method: "POST", CanonicalPath: "/restart", RequestID: "restart-held", CanonicalBodyHash: "hash"}
-	_, err = f.m.reserveClaudeCodeRestart(ctx, req, saved)
+	_, err = f.m.reserveClaudeCodeRestart(ctx, req)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return f.count(t, `SELECT count(*) FROM embedded_acks WHERE message_id=?`, nextID) == 1 }, 5*time.Second, 10*time.Millisecond)
 	held, err := f.db.ClaudeMailHeld(ctx, heldID)
@@ -104,8 +100,6 @@ func TestClaudeRestartStopFailureDoesNotReoffer(t *testing.T) {
 	f.reg.SetResponses([]providers.FauxResponseStep{f.response("unexpected delivery")})
 	owner := f.launch(t, "")
 	f.m.startWG.Wait()
-	saved, err := f.db.ManagedAgent(ctx, owner.binding.AgentID)
-	require.NoError(t, err)
 	done := make(chan struct{})
 	close(done)
 	proc := &ClaudeCodeProcess{stdin: poolTestStdin{}, done: done, exited: done, closeDone: make(chan struct{}), waitErr: errClaudeCodeGroupUnconfirmed}
@@ -114,12 +108,12 @@ func TestClaudeRestartStopFailureDoesNotReoffer(t *testing.T) {
 	pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {process: proc}}
 	pool.mu.Unlock()
 	t.Cleanup(func() { pool.mu.Lock(); delete(pool.entries, owner.binding.AgentID); pool.mu.Unlock() })
-	_, err = f.raw.Exec(`CREATE TRIGGER reject_owner_failure BEFORE UPDATE ON managed_agents BEGIN SELECT RAISE(ABORT, 'failure recording rejected'); END`)
+	_, err := f.raw.Exec(`CREATE TRIGGER reject_owner_failure BEFORE UPDATE ON managed_agents BEGIN SELECT RAISE(ABORT, 'failure recording rejected'); END`)
 	require.NoError(t, err)
 	id := "e8888888-8888-4888-8888-888888888888"
 	f.enqueue(t, id)
 	req := RestartRequest{AgentID: owner.binding.AgentID, Method: "POST", CanonicalPath: "/restart", RequestID: "restart-stop-failed", CanonicalBodyHash: "hash"}
-	_, err = f.m.reserveClaudeCodeRestart(ctx, req, saved)
+	_, err = f.m.reserveClaudeCodeRestart(ctx, req)
 	require.NoError(t, err)
 	f.m.startWG.Wait()
 	lane := f.m.laneFor(owner.binding.AgentID)
@@ -148,7 +142,7 @@ func TestClaudeRestartReofferDoesNotWakeIdleGoal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "idle", saved.ActivityState)
 	req := RestartRequest{AgentID: owner.binding.AgentID, Method: "POST", CanonicalPath: "/restart", RequestID: "restart-idle-goal", CanonicalBodyHash: "hash"}
-	_, err = f.m.reserveClaudeCodeRestart(ctx, req, saved)
+	_, err = f.m.reserveClaudeCodeRestart(ctx, req)
 	require.NoError(t, err)
 	f.m.startWG.Wait()
 	require.Zero(t, f.calls.Load(), "restart mail reoffer must not start idle goal work")

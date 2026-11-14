@@ -189,23 +189,17 @@ func TestForeignKeysCannotBeDisabledAfterImmediateTransactionBegins(t *testing.T
 	require.NoError(t, err)
 }
 
-func TestLifecycleGraphRetainsExpiredChildWhenBatchParentIsUnexpired(t *testing.T) {
+func TestLifecycleGraphRetainsExpiredChildWhenLegacyBatchParentIsUnexpired(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
 	source := restartFenceFromAgent(&agent)
 	parentID, childID := lifecycleUUID(740), lifecycleUUID(741)
-	parent := lifecycleActionInput(parentID, "", "restart_all", "direct", ManagedRuntimeFence{})
-	parent.Operation = lifecycleOperation(parentID, "2999-01-01T00:00:00.000Z")
-	parent.State, parent.Stage = "succeeded", "complete"
-	parent.TerminalCode, parent.TerminalMessage = "BATCH_ADMITTED", "managed restart batch admitted"
-	parent.Operation.State = "terminal"
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, parent))
 	child := lifecycleActionInput(childID, agent.AgentID, "restart", "direct", source)
 	child.Operation = lifecycleOperation(childID, "2000-01-01T00:00:00.000Z")
 	child.State, child.Stage = "succeeded", "complete"
 	child.TerminalCode, child.TerminalMessage = "RESTARTED", "managed agent restarted"
 	child.Operation.State = "terminal"
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, child))
-	require.NoError(t, store.WriteManagedLifecycleBatchItems(ctx, parentID, []ManagedLifecycleBatchItem{{SnapshotPosition: 0, AgentID: agent.AgentID, Status: "coalesced", ChildActionID: childID, ChildOperationID: childID, CreatedAt: "2026-09-08T00:00:00.000Z"}}))
+	seedLegacyRestartAllBatch(t, store, parentID, "2999-01-01T00:00:00.000Z", []string{"0", agent.AgentID, "coalesced", childID})
 
 	result, err := store.Sweep(ctx, DefaultRetentionPolicy)
 	require.NoError(t, err)
@@ -263,20 +257,14 @@ func TestLifecycleGraphInjectedItemDeleteRestoresEveryRow(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
 	source := restartFenceFromAgent(&agent)
 	parentID, childID := lifecycleUUID(760), lifecycleUUID(761)
-	parent := lifecycleActionInput(parentID, "", "restart_all", "direct", ManagedRuntimeFence{})
-	parent.Operation = lifecycleOperation(parentID, "2000-01-01T00:00:00.000Z")
-	parent.State, parent.Stage = "succeeded", "complete"
-	parent.TerminalCode, parent.TerminalMessage = "BATCH_ADMITTED", "managed restart batch admitted"
-	parent.Operation.State = "terminal"
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, parent))
-	child := lifecycleActionInput(childID, agent.AgentID, "restart", "restart_all_child", source)
-	child.ParentActionID = parentID
+	child := lifecycleActionInput(childID, agent.AgentID, "restart", "direct", source)
 	child.Operation = lifecycleOperation(childID, "2000-01-01T00:00:00.000Z")
 	child.State, child.Stage = "succeeded", "complete"
 	child.TerminalCode, child.TerminalMessage = "RESTARTED", "managed agent restarted"
 	child.Operation.State = "terminal"
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, child))
-	require.NoError(t, store.WriteManagedLifecycleBatchItems(ctx, parentID, []ManagedLifecycleBatchItem{{SnapshotPosition: 0, AgentID: agent.AgentID, Status: "accepted", ChildActionID: childID, ChildOperationID: childID, CreatedAt: "2026-09-08T00:00:00.000Z"}}))
+	seedLegacyRestartAllBatch(t, store, parentID, "2000-01-01T00:00:00.000Z")
+	seedLegacyAcceptedChild(t, store, parentID, childID, agent.AgentID)
 	before := captureNamedTableRows(t, store.db, []string{"managed_lifecycle_actions", "managed_lifecycle_batch_items", "managed_http_operations"})
 	store.managedGraphFault = func(stage string) error {
 		if stage == "after_first_batch_item_delete" {
@@ -337,14 +325,13 @@ func migration027ShapeRows(t *testing.T, store *Store) {
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, termination))
 	directRestart := lifecycleActionInput(lifecycleUUID(812), restartAgent.AgentID, "restart", "direct", restartFenceFromAgent(restartAgent))
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, directRestart))
-	parent := lifecycleActionInput(lifecycleUUID(813), "", "restart_all", "direct", ManagedRuntimeFence{})
-	parent.State, parent.Stage = "succeeded", "complete"
-	parent.TerminalCode, parent.TerminalMessage = "BATCH_ADMITTED", "managed restart batch admitted"
-	parent.Operation.State = "terminal"
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, parent))
-	child := lifecycleActionInput(lifecycleUUID(814), childAgent.AgentID, "restart", "restart_all_child", restartFenceFromAgent(childAgent))
-	child.ParentActionID = parent.ActionID
+	// The retired restart_all rows can only be created by SQL now; they still
+	// satisfy the 027 schema shapes in databases that already hold them.
+	parentID := lifecycleUUID(813)
+	seedLegacyRestartAllBatch(t, store, parentID, "2999-01-01T00:00:00.000Z")
+	child := lifecycleActionInput(lifecycleUUID(814), childAgent.AgentID, "restart", "direct", restartFenceFromAgent(childAgent))
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, child))
+	seedLegacyAcceptedChild(t, store, parentID, child.ActionID, childAgent.AgentID)
 
 	resetSource := restartFenceFromAgent(retryResetAgent)
 	resetTarget := resetSource
@@ -374,7 +361,7 @@ func migration027ShapeRows(t *testing.T, store *Store) {
 	terminateRetry.PlannedTargetRuntimeGeneration, terminateRetry.RetryOf = "", terminatePredecessor.ActionID
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, terminateRetry))
 
-	for _, actionID := range []string{directRestart.ActionID, parent.ActionID, child.ActionID} {
+	for _, actionID := range []string{directRestart.ActionID, parentID, child.ActionID} {
 		_, err := store.db.Exec(`UPDATE managed_lifecycle_actions SET retry_of=? WHERE action_id=?`, resetPredecessor.ActionID, actionID)
 		require.Error(t, err)
 	}

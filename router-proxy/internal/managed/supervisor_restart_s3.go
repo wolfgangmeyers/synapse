@@ -947,7 +947,7 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 }
 
 // adoptLifecycleRestartBindingInLane transfers a live idle/launch binding to
-// a committed lifecycle restart. Restart All persists admission before its
+// a committed lifecycle restart. Direct restart persists admission before its
 // post-commit handoff, so the durable action is the authority for this narrow
 // binding update. The existing binding must still match the child's full
 // source fence and own a terminal predecessor; reset and other active work

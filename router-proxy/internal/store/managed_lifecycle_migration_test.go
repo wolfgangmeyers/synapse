@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -362,4 +363,50 @@ func TestMigration057WidensRestartRetryConstraintForExistingDatabases(t *testing
 	var retryRows int
 	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_lifecycle_actions WHERE retry_of=? AND kind='restart'`, predecessor.ActionID).Scan(&retryRows))
 	require.Equal(t, 1, retryRows)
+}
+
+func TestMigration028ExistingDatabaseUpgradeAndRollback(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "router.db")
+	migrations := DefaultMigrations()
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "028_managed_restart_all_batch_references")]})
+	require.NoError(t, err)
+	parent, child := lifecycleUUID(980), lifecycleUUID(981)
+	seedLegacyRestartAllBatch(t, before, parent, "2999-01-01T00:00:00.000Z", []string{"0", "missing-agent", "rejected", "NOT_READY"})
+	require.NoError(t, insertManagedOperation(ctx, before.db, lifecycleOperation(child, "2999-01-01T00:00:00.000Z")))
+	_, err = before.db.Exec(`INSERT INTO managed_lifecycle_actions (action_id,operation_id,agent_id,kind,source,parent_action_id,execution_owner,state,stage,planned_target_runtime_generation,terminal_code,terminal_message,retryable,completed_at,created_at,updated_at) VALUES (?,?,?,'restart','restart_all_child',?,'lifecycle','succeeded','complete','generation','RESTARTED','restarted',0,'2026-09-08','2026-09-08','2026-09-08')`, child, child, "legacy-agent", parent)
+	require.NoError(t, err)
+	_, err = before.db.Exec(`INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,child_action_id,child_operation_id,created_at) VALUES (?,1,'legacy-agent','accepted',?,?,'2026-09-08')`, parent, child, child)
+	require.NoError(t, err)
+	rows := captureNamedTableRows(t, before.db, []string{"managed_lifecycle_actions", "managed_lifecycle_batch_items", "managed_http_operations"})
+	var schema string
+	require.NoError(t, before.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='managed_lifecycle_batch_items'`).Scan(&schema))
+	before.managedRestartAllFault = func(stage string) error {
+		if stage == "migration_028_before_record" {
+			return fmt.Errorf("injected 028 failure")
+		}
+		return nil
+	}
+	require.ErrorContains(t, before.applyManagedRestartAllBatchReferencesMigration028(ctx, migrationByID(t, migrations, "028_managed_restart_all_batch_references")), "injected 028 failure")
+	require.Equal(t, rows, captureNamedTableRows(t, before.db, []string{"managed_lifecycle_actions", "managed_lifecycle_batch_items", "managed_http_operations"}))
+	var restored string
+	var count int
+	require.NoError(t, before.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='managed_lifecycle_batch_items'`).Scan(&restored))
+	require.Equal(t, schema, restored)
+	require.NoError(t, before.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='028_managed_restart_all_batch_references'`).Scan(&count))
+	require.Zero(t, count)
+	require.NoError(t, before.Close())
+	after, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	defer after.Close()
+	upgraded := captureNamedTableRows(t, after.db, []string{"managed_lifecycle_batch_items", "managed_http_operations"})
+	for _, table := range []string{"managed_lifecycle_batch_items", "managed_http_operations"} {
+		require.Equal(t, rows[table].Rows, upgraded[table].Rows)
+	}
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_actions WHERE action_id=? AND source='restart_all_child' AND parent_action_id=?`, child, parent).Scan(&count))
+	require.Equal(t, 1, count)
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='028_managed_restart_all_batch_references'`).Scan(&count))
+	require.Equal(t, 1, count)
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&count))
+	require.Zero(t, count)
 }

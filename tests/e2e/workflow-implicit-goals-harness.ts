@@ -56,6 +56,7 @@ export type WorkflowHarnessOptions = {
   expectedCodexModel?: string;
   expectedCodexModels?: string[];
   kbDir?: (home: string) => string;
+  restartCodexConsumerFixture?: boolean;
   capacityFixture?: boolean;
   mcpQueueFixture?: boolean;
   backgroundExpiryInterval?: string;
@@ -257,7 +258,7 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
-    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, capacityFixture: options.capacityFixture, mcpQueueFixture: options.mcpQueueFixture, piReviewBarrier: options.piReviewBarrier, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, backgroundCountRetentionFixture: options.backgroundCountRetentionFixture, embeddedRoot: options.embeddedRoot, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir, omitGoogle: options.omitGoogle } });
+    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, capacityFixture: options.capacityFixture, mcpQueueFixture: options.mcpQueueFixture, piReviewBarrier: options.piReviewBarrier, fakeEmbeddedCatalog: true, restartCodexConsumerFixture: options.restartCodexConsumerFixture, backgroundExpiryInterval: options.backgroundExpiryInterval, backgroundCountRetentionFixture: options.backgroundCountRetentionFixture, embeddedRoot: options.embeddedRoot, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir, omitGoogle: options.omitGoogle } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     await expect.poll(async () => {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }

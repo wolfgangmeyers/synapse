@@ -6,7 +6,6 @@
     {"method":"POST","path":"/v1/managed-agents"},
     {"method":"GET","path":"/v1/managed-directories"},
     {"method":"GET","path":"/v1/history"},
-    {"method":"POST","path":"/v1/managed-agents/restart-all"},
     {"method":"GET","path":"/v1/managed-agents/archive/{archive_key}"},
     {"method":"POST","path":"/v1/managed-agents/archive/{archive_key}"},
     {"method":"PUT","path":"/v1/managed-agents/archive/{archive_key}"},

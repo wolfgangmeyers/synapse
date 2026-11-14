@@ -56,14 +56,6 @@ type ManagedLifecycleRecoveryClaim struct {
 	Fence                                    ManagedRuntimeFence
 }
 
-// ManagedLifecycleBatchItem is one immutable Restart All snapshot item. S0
-// validates its graph links but does not enqueue a child executor.
-type ManagedLifecycleBatchItem struct {
-	SnapshotPosition                                 int
-	AgentID, Status, ChildActionID, ChildOperationID string
-	ErrorCode, ErrorMessage, CreatedAt               string
-}
-
 // ManagedControlRequestInput is the root-control ledger reservation shape.
 // Execution, append, and exact-entry reconciliation remain later-slice work.
 type ManagedControlRequestInput struct {
@@ -164,26 +156,18 @@ func validateLifecycleActionInput(input ManagedLifecycleActionInput) error {
 	if !isCanonicalLifecycleTimestamp(input.CreatedAt) || !isCanonicalLifecycleTimestamp(input.UpdatedAt) || !lifecycleStateStageValid(input.State, input.Stage) {
 		return errors.New("managed lifecycle action state is invalid")
 	}
-	if input.Kind != "restart" && input.Kind != "reset" && input.Kind != "terminate" && input.Kind != "restart_all" {
+	if input.Kind != "restart" && input.Kind != "reset" && input.Kind != "terminate" {
 		return errors.New("managed lifecycle action kind is invalid")
 	}
-	if input.Source != "direct" && input.Source != "restart_all_child" {
+	if input.Source != "direct" {
 		return errors.New("managed lifecycle action source is invalid")
 	}
-	if input.Kind == "restart_all" {
-		if input.AgentID != "" || input.Source != "direct" || input.ParentActionID != "" || input.SourceFence != nil || input.TargetFence != nil || input.PlannedTargetRuntimeGeneration != "" || input.RetryOf != "" {
-			return errors.New("managed restart-all action shape is invalid")
-		}
-	} else {
+	{
 		if !isLifecycleText(input.AgentID) {
 			return errors.New("managed lifecycle action agent is invalid")
 		}
-		if input.Source == "restart_all_child" {
-			if input.Kind != "restart" || input.ParentActionID == "" || !managedCanonicalUUIDRE.MatchString(input.ParentActionID) {
-				return errors.New("managed restart-all child action shape is invalid")
-			}
-		} else if input.ParentActionID != "" {
-			return errors.New("direct managed lifecycle action cannot have a parent")
+		if input.ParentActionID != "" {
+			return errors.New("managed lifecycle action cannot have a parent")
 		}
 		if input.Kind == "restart" || input.Kind == "reset" {
 			if input.SourceFence == nil || !validManagedRuntimeFence(*input.SourceFence) || input.SourceFence.AgentID != input.AgentID || !managedCanonicalUUIDRE.MatchString(input.PlannedTargetRuntimeGeneration) {
@@ -267,15 +251,6 @@ func (s *Store) CreateManagedLifecycleAction(ctx context.Context, input ManagedL
 			}
 			if agent != 1 {
 				return &ManagedAgentNotFoundError{AgentID: input.AgentID}
-			}
-		}
-		if input.ParentActionID != "" {
-			var kind string
-			if err := s.db.QueryRowContext(ctx, `SELECT kind FROM managed_lifecycle_actions WHERE action_id=?`, input.ParentActionID).Scan(&kind); err != nil || kind != "restart_all" {
-				if err != nil {
-					return err
-				}
-				return errors.New("managed lifecycle parent is invalid")
 			}
 		}
 		if input.RetryOf != "" {
@@ -684,57 +659,6 @@ func (s *Store) ClearManagedLifecycleRecoveryClaims(ctx context.Context) error {
 		// ProcessFactory.Start after a crash in the unbound-child window.
 		_, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET recovery_owner=NULL,recovery_claimed_at=NULL,updated_at=? WHERE execution_owner='lifecycle' AND state NOT IN ('succeeded','failed','cancelled','superseded') AND recovery_owner IS NOT NULL AND recovery_owner NOT LIKE 'restart-target-start:%'`, formatTimestamp(s.clock.Now()))
 		return err
-	})
-}
-
-// WriteManagedLifecycleBatchItems validates the durable parent/child graph.
-// Admission/execution scheduling is intentionally owned by a later slice.
-func (s *Store) WriteManagedLifecycleBatchItems(ctx context.Context, parentActionID string, items []ManagedLifecycleBatchItem) error {
-	if !managedCanonicalUUIDRE.MatchString(parentActionID) || len(items) > 32 {
-		return errors.New("managed lifecycle batch is invalid")
-	}
-	return s.runImmediate(ctx, func() error {
-		parent, err := managedLifecycleActionForTx(ctx, s.db, parentActionID)
-		if err != nil {
-			return err
-		}
-		if parent.Kind != "restart_all" || parent.AgentID != "" || parent.SourceFence != nil {
-			return errors.New("managed lifecycle batch parent is invalid")
-		}
-		seenPosition, seenAgent := make(map[int]bool), make(map[string]bool)
-		for _, item := range items {
-			if item.SnapshotPosition < 0 || item.SnapshotPosition > 31 || seenPosition[item.SnapshotPosition] || !isLifecycleText(item.AgentID) || seenAgent[item.AgentID] || !isCanonicalLifecycleTimestamp(item.CreatedAt) {
-				return errors.New("managed lifecycle batch item is invalid")
-			}
-			seenPosition[item.SnapshotPosition], seenAgent[item.AgentID] = true, true
-			switch item.Status {
-			case "accepted", "coalesced":
-				if !managedCanonicalUUIDRE.MatchString(item.ChildActionID) || item.ChildOperationID != item.ChildActionID || !managedCanonicalUUIDRE.MatchString(item.ChildOperationID) || item.ErrorCode != "" || item.ErrorMessage != "" {
-					return errors.New("managed lifecycle batch child is invalid")
-				}
-				child, childErr := managedLifecycleActionForTx(ctx, s.db, item.ChildActionID)
-				if childErr != nil || child.AgentID != item.AgentID || child.Kind != "restart" || child.OperationID != item.ChildOperationID {
-					if childErr != nil {
-						return childErr
-					}
-					return errors.New("managed lifecycle batch child does not match item")
-				}
-				if item.Status == "accepted" && (child.Source != "restart_all_child" || child.ParentActionID != parentActionID) {
-					return errors.New("accepted managed lifecycle batch child is not parent-owned")
-				}
-			case "rejected":
-				if item.ChildActionID != "" || item.ChildOperationID != "" || !isLifecycleText(item.ErrorCode) || item.ErrorMessage == "" || len([]byte(item.ErrorMessage)) > 1024 {
-					return errors.New("rejected managed lifecycle batch item is invalid")
-				}
-			default:
-				return errors.New("managed lifecycle batch status is invalid")
-			}
-			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,child_action_id,child_operation_id,error_code,error_message,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, parentActionID, item.SnapshotPosition, item.AgentID, item.Status, nullIfEmpty(item.ChildActionID), nullIfEmpty(item.ChildOperationID), nullIfEmpty(item.ErrorCode), nullIfEmpty(item.ErrorMessage), item.CreatedAt)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
 	})
 }
 

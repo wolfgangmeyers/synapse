@@ -113,18 +113,17 @@ func TestContractManifestManagedLifecycleRoutes(t *testing.T) {
 			Managed bool     `json:"managed"`
 		}
 		require.NoError(t, json.Unmarshal(raw, &route))
-		if route.Path == "/v1/managed-agents/restart-all" || route.Path == "/v1/managed-agents/{agent_id}/restart" || route.Path == "/v1/managed-agents/{id}/reset" {
-			found[route.Path] = true
+		found[route.Path] = true
+		if route.Path == "/v1/managed-agents/{agent_id}/restart" || route.Path == "/v1/managed-agents/{id}/reset" {
 			require.Equal(t, []string{"POST"}, route.Methods)
 			require.True(t, route.Managed)
 		}
 		if route.Path == "/v1/managed-agents/archive/{archive_key}" {
-			found[route.Path] = true
 			require.Equal(t, []string{"GET", "POST", "PUT", "DELETE"}, route.Methods)
 			require.True(t, route.Managed)
 		}
 	}
-	require.True(t, found["/v1/managed-agents/restart-all"])
+	require.False(t, found["/v1/managed-agents/restart-all"], "Restart All route is retired")
 	require.True(t, found["/v1/managed-agents/{agent_id}/restart"])
 	require.True(t, found["/v1/managed-agents/{id}/reset"])
 	require.True(t, found["/v1/managed-agents/archive/{archive_key}"])
@@ -158,17 +157,17 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	require.Equal(t, "cors_verified", outcomes.Status)
 	require.NotEmpty(t, outcomes.Cases)
 	require.NotEmpty(t, outcomes.RouteOutcomes)
-	foundRestartAllOutcome := false
+	retiredPathReferenced := false
 	for _, raw := range outcomes.RouteOutcomes {
 		var outcome struct {
 			Path string `json:"path"`
 		}
 		require.NoError(t, json.Unmarshal(raw, &outcome))
 		if outcome.Path == "/v1/managed-agents/restart-all" {
-			foundRestartAllOutcome = true
+			retiredPathReferenced = true
 		}
 	}
-	require.True(t, foundRestartAllOutcome)
+	require.False(t, retiredPathReferenced, "Restart All outcome is retired")
 	for _, outcomeCase := range outcomes.Cases {
 		require.NotEmpty(t, outcomeCase.ID)
 		require.Equal(t, "verified", outcomeCase.Status)

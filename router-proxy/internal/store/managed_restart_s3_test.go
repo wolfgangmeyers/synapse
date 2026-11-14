@@ -244,3 +244,20 @@ func TestLifecycleRestartPreparationFailureRestoresSourceProjection(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "terminal", op.State)
 }
+
+func TestLifecycleRestartReservationRejectsLegacyChildAdmission(t *testing.T) {
+	for _, tc := range []struct{ name, source, parent string }{
+		{"legacy source", "restart_all_child", lifecycleUUID(800)},
+		{"direct with parent", "direct", lifecycleUUID(800)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			durable, ctx, agent, launch := restartFixture(t)
+			reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(801))
+			reservation.Source, reservation.ParentActionID = tc.source, tc.parent
+			before := captureNamedTableRows(t, durable.db, []string{"managed_lifecycle_actions", "managed_http_operations", "managed_agents"})
+			_, err := durable.ReserveManagedLifecycleRestart(ctx, reservation)
+			require.ErrorContains(t, err, "reservation is invalid")
+			require.Equal(t, before, captureNamedTableRows(t, durable.db, []string{"managed_lifecycle_actions", "managed_http_operations", "managed_agents"}))
+		})
+	}
+}

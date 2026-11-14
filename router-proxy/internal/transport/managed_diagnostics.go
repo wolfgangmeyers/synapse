@@ -47,8 +47,6 @@ func managedOperationName(req *http.Request) string {
 		return "managed_agent_launch"
 	case path == "/v1/managed-agents":
 		return "managed_agent_list"
-	case path == "/v1/managed-agents/restart-all":
-		return "managed_agent_restart_all"
 	case strings.HasSuffix(path, "/restart"):
 		return "managed_agent_restart"
 	case strings.HasSuffix(path, "/reset"):
@@ -98,9 +96,6 @@ func managedDiagnosticAgentID(req *http.Request) string {
 		return ""
 	}
 	remainder := strings.TrimPrefix(req.URL.Path, prefix)
-	if remainder == "restart-all" {
-		return ""
-	}
 	id, _, _ := strings.Cut(remainder, "/")
 	if managedName(id) {
 		return id

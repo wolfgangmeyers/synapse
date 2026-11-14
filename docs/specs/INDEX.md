@@ -28,6 +28,7 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-PROVIDERS-ANTIGRAVITY-REMOVAL-001` | Remove Antigravity; preserve Gemini API-key, Vertex and Codex | `Settings` | [`antigravity-removal.spec.md`](./antigravity-removal.spec.md) | `tests/e2e/antigravity-removal.spec.ts` (planned) | `Draft` |
+| `SPEC-MANAGED-RESTART-ALL-REMOVAL-001` | Remove managed Restart All; preserve individual restart | `Managed Agents` | [`restart-all-removal.spec.md`](./restart-all-removal.spec.md) | `tests/e2e/restart-all-removal.spec.ts` (planned) | `Draft` |
 
 ## Agent Lifecycle & Execution Specifications
 
@@ -169,3 +170,5 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-UI-BRAND-001` | Synapse sidebar wordmark | `AgentManagement` | [`sidebar-brand.spec.md`](./sidebar-brand.spec.md) | `tests/e2e/sidebar-brand.spec.ts` | `Active` |
+
+- [Embedded restart concurrent replay](embedded-restart-replay-race.spec.md) — regression spec; unit coverage, E2E not added for this scoped fix.

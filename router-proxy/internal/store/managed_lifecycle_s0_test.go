@@ -159,17 +159,19 @@ func TestLifecycleActionShapesRetriesAndFencedRecoveryClaims(t *testing.T) {
 	termination.TerminalCode, termination.TerminalMessage, termination.Retryable = "TERMINATED", "managed agent terminated", false
 	termination.Operation.State = "terminal"
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, termination))
-	batchParent := lifecycleActionInput(lifecycleUUID(6), "", "restart_all", "direct", ManagedRuntimeFence{})
-	batchParent.State, batchParent.Stage = "succeeded", "complete"
-	batchParent.TerminalCode, batchParent.TerminalMessage, batchParent.Retryable = "BATCH_ADMITTED", "managed restart batch admitted", false
-	batchParent.Operation.State = "terminal"
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, batchParent))
-	batchChild := lifecycleActionInput(lifecycleUUID(7), agent.AgentID, "restart", "restart_all_child", source)
-	batchChild.ParentActionID = batchParent.ActionID
-	batchChild.State, batchChild.Stage = "succeeded", "complete"
-	batchChild.TerminalCode, batchChild.TerminalMessage, batchChild.Retryable = "RESTARTED", "managed agent restarted", false
-	batchChild.Operation.State = "terminal"
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, batchChild))
+	// Restart All is retired: neither its parent kind nor its child source
+	// can be admitted, and nothing is written for the rejected attempts.
+	retiredParent := lifecycleActionInput(lifecycleUUID(6), "", "restart_all", "direct", ManagedRuntimeFence{})
+	require.ErrorContains(t, store.CreateManagedLifecycleAction(ctx, retiredParent), "kind is invalid")
+	retiredChild := lifecycleActionInput(lifecycleUUID(7), agent.AgentID, "restart", "restart_all_child", source)
+	retiredChild.ParentActionID = directRestart.ActionID
+	require.ErrorContains(t, store.CreateManagedLifecycleAction(ctx, retiredChild), "source is invalid")
+	directWithParent := lifecycleActionInput(lifecycleUUID(8), agent.AgentID, "restart", "direct", source)
+	directWithParent.ParentActionID = directRestart.ActionID
+	require.Error(t, store.CreateManagedLifecycleAction(ctx, directWithParent))
+	var retiredRows int
+	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_actions WHERE kind='restart_all' OR source='restart_all_child' OR action_id IN (?,?,?)`, retiredParent.ActionID, retiredChild.ActionID, directWithParent.ActionID).Scan(&retiredRows))
+	require.Zero(t, retiredRows)
 
 	invalid := lifecycleActionInput(lifecycleUUID(10), agent.AgentID, "restart", "direct", source)
 	invalid.SourceFence = nil
@@ -268,32 +270,26 @@ func TestLifecycleTargetBindingAndRecoveryClaimClear(t *testing.T) {
 	require.Empty(t, stored.RecoveryClaimedAt)
 }
 
-func TestLifecycleBatchRowsAndGraphRetentionAreAtomic(t *testing.T) {
+func TestLegacyBatchRowsAndGraphRetentionAreAtomic(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
 	source := restartFenceFromAgent(&agent)
 	parentID, childID := lifecycleUUID(20), lifecycleUUID(21)
-	parent := lifecycleActionInput(parentID, "", "restart_all", "direct", ManagedRuntimeFence{})
-	parent.Operation = lifecycleOperation(parentID, "2026-09-07T00:00:00.000Z")
-	parent.State, parent.Stage = "succeeded", "complete"
-	parent.TerminalCode, parent.TerminalMessage, parent.Retryable = "BATCH_ADMITTED", "managed restart batch admitted", false
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, parent))
-	child := lifecycleActionInput(childID, agent.AgentID, "restart", "restart_all_child", source)
+	child := lifecycleActionInput(childID, agent.AgentID, "restart", "direct", source)
 	child.Operation = lifecycleOperation(childID, "2026-09-07T00:00:00.000Z")
-	child.ParentActionID = parentID
 	child.State, child.Stage = "succeeded", "complete"
 	child.TerminalCode, child.TerminalMessage, child.Retryable = "RESTARTED", "managed agent restarted", false
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, child))
-	require.NoError(t, store.WriteManagedLifecycleBatchItems(ctx, parentID, []ManagedLifecycleBatchItem{
-		{SnapshotPosition: 0, AgentID: agent.AgentID, Status: "accepted", ChildActionID: childID, ChildOperationID: childID, CreatedAt: "2026-09-08T00:00:00.000Z"},
-		{SnapshotPosition: 1, AgentID: "rejected-agent", Status: "rejected", ErrorCode: "NOT_READY", ErrorMessage: "managed agent is not ready", CreatedAt: "2026-09-08T00:00:00.000Z"},
-	}))
+	seedLegacyRestartAllBatch(t, store, parentID, "2026-09-07T00:00:00.000Z")
+	seedLegacyAcceptedChild(t, store, parentID, childID, agent.AgentID)
+	_, err := store.db.Exec(`INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,error_code,error_message,created_at) VALUES (?,1,'rejected-agent','rejected','NOT_READY','legacy rejection','2026-09-08T00:00:00.000Z')`, parentID)
+	require.NoError(t, err)
 	store.managedGraphFault = func(stage string) error {
 		if stage == "after_first_batch_item_delete" {
 			return errors.New("injected graph retention failure")
 		}
 		return nil
 	}
-	_, err := store.Sweep(ctx, DefaultRetentionPolicy)
+	_, err = store.Sweep(ctx, DefaultRetentionPolicy)
 	require.ErrorContains(t, err, "injected graph retention failure")
 	var retainedItems int
 	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM managed_lifecycle_batch_items WHERE parent_action_id=?`, parentID).Scan(&retainedItems))
@@ -319,17 +315,12 @@ func TestLifecycleGraphRetentionKeepsAnExpiredParentForAnUnexpiredCoalescedChild
 	store.clock = deterministic.NewFixedClock(time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
 	source := restartFenceFromAgent(&agent)
 	parentID, childID := lifecycleUUID(30), lifecycleUUID(31)
-	parent := lifecycleActionInput(parentID, "", "restart_all", "direct", ManagedRuntimeFence{})
-	parent.Operation = lifecycleOperation(parentID, "2026-09-07T00:00:00.000Z")
-	parent.State, parent.Stage = "succeeded", "complete"
-	parent.TerminalCode, parent.TerminalMessage, parent.Retryable = "BATCH_ADMITTED", "managed restart batch admitted", false
-	require.NoError(t, store.CreateManagedLifecycleAction(ctx, parent))
 	child := lifecycleActionInput(childID, agent.AgentID, "restart", "direct", source)
 	child.Operation = lifecycleOperation(childID, "2026-09-10T00:00:00.000Z")
 	child.State, child.Stage = "succeeded", "complete"
 	child.TerminalCode, child.TerminalMessage, child.Retryable = "RESTARTED", "managed agent restarted", false
 	require.NoError(t, store.CreateManagedLifecycleAction(ctx, child))
-	require.NoError(t, store.WriteManagedLifecycleBatchItems(ctx, parentID, []ManagedLifecycleBatchItem{{SnapshotPosition: 0, AgentID: agent.AgentID, Status: "coalesced", ChildActionID: childID, ChildOperationID: childID, CreatedAt: "2026-09-08T00:00:00.000Z"}}))
+	seedLegacyRestartAllBatch(t, store, parentID, "2026-09-07T00:00:00.000Z", []string{"0", agent.AgentID, "coalesced", childID})
 	result, err := store.Sweep(ctx, DefaultRetentionPolicy)
 	require.NoError(t, err)
 	require.Zero(t, result.ManagedOperations)
@@ -467,3 +458,42 @@ func setTransitionStageForMigration027Fixture(t *testing.T, store *Store, agentI
 
 var _ = sql.ErrNoRows
 var _ = time.Second
+
+// seedLegacyRestartAllBatch writes the rows an existing database may still
+// hold from before Restart All was retired. The retired write API no longer
+// exists, so the fixture goes straight to SQL. Production code never reads
+// these rows to recover or settle anything; they only matter for retention
+// and foreign-key integrity.
+func seedLegacyRestartAllBatch(t *testing.T, store *Store, parentID, parentExpiresAt string, items ...[]string) {
+	t.Helper()
+	require.NoError(t, store.runImmediate(context.Background(), func() error {
+		if err := insertManagedOperation(context.Background(), store.db, lifecycleOperation(parentID, parentExpiresAt)); err != nil {
+			return err
+		}
+		if _, err := store.db.Exec(`INSERT INTO managed_lifecycle_actions (action_id,operation_id,agent_id,kind,source,execution_owner,state,stage,terminal_code,terminal_message,retryable,completed_at,created_at,updated_at) VALUES (?,?,NULL,'restart_all','direct','lifecycle','succeeded','complete','BATCH_ADMITTED','managed restart batch admitted',0,'2026-09-08T00:00:00.000Z','2026-09-08T00:00:00.000Z','2026-09-08T00:00:00.000Z')`, parentID, parentID); err != nil {
+			return err
+		}
+		// Each item is {position, agentID, status, childID-or-error-code}.
+		for _, item := range items {
+			if item[2] == "rejected" {
+				if _, err := store.db.Exec(`INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,error_code,error_message,created_at) VALUES (?,?,?,?,?,?,'2026-09-08T00:00:00.000Z')`, parentID, item[0], item[1], item[2], item[3], "legacy rejection"); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := store.db.Exec(`INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,child_action_id,child_operation_id,created_at) VALUES (?,?,?,?,?,?,'2026-09-08T00:00:00.000Z')`, parentID, item[0], item[1], item[2], item[3], item[3]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
+// Convert a terminal direct fixture into the accepted child shape persisted by old releases.
+func seedLegacyAcceptedChild(t *testing.T, store *Store, parentID, childID, agentID string) {
+	t.Helper()
+	_, err := store.db.Exec(`UPDATE managed_lifecycle_actions SET source='restart_all_child', parent_action_id=? WHERE action_id=?`, parentID, childID)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`INSERT INTO managed_lifecycle_batch_items (parent_action_id,snapshot_position,agent_id,status,child_action_id,child_operation_id,created_at) VALUES (?,0,?,'accepted',?,?,'2026-09-08T00:00:00.000Z')`, parentID, agentID, childID, childID)
+	require.NoError(t, err)
+}

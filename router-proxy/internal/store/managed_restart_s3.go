@@ -37,13 +37,7 @@ func restartReservationInputValid(reservation ManagedLifecycleRestartReservation
 	if !isLifecycleText(reservation.AgentID) || reservation.Method == "" || reservation.CanonicalPath == "" || reservation.RequestID == "" || reservation.CanonicalBodyHash == "" || reservation.CurrentOperationID == "" || !validManagedRuntimeFence(reservation.SourceFence) || reservation.SourceFence.AgentID != reservation.AgentID || reservation.PlannedTargetRuntimeGeneration == "" || (!modelOmitted && !modelValid) {
 		return false
 	}
-	if reservation.Source != "direct" && reservation.Source != "restart_all_child" {
-		return false
-	}
-	if reservation.Source == "direct" && reservation.ParentActionID != "" {
-		return false
-	}
-	if reservation.Source == "restart_all_child" && !managedCanonicalUUIDRE.MatchString(reservation.ParentActionID) {
+	if reservation.Source != "direct" || reservation.ParentActionID != "" {
 		return false
 	}
 	if reservation.RetryOf == "" {
@@ -163,15 +157,6 @@ func (s *Store) ReserveManagedLifecycleRestart(ctx context.Context, reservation 
 		}
 		if legacy != 0 {
 			return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
-		}
-		if reservation.Source == "restart_all_child" {
-			parent, parentErr := managedLifecycleActionForTx(ctx, s.db, reservation.ParentActionID)
-			if parentErr != nil || parent.Kind != "restart_all" {
-				if parentErr != nil {
-					return parentErr
-				}
-				return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
-			}
 		}
 		now := formatTimestamp(s.clock.Now())
 		// Explicit restart admission is the reset boundary for crash policy. Keep

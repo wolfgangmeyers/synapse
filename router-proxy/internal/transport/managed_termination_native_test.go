@@ -58,7 +58,6 @@ var managedPhase2CandidatePaths = []string{
 	"router-proxy/internal/store/managed_lifecycle_s0.go",
 	"router-proxy/internal/store/managed_root_control_s4.go",
 	"router-proxy/internal/store/managed_root_control_s4_test.go",
-	"router-proxy/internal/store/managed_restart_all_s2.go",
 	"router-proxy/internal/store/managed_test.go",
 	"router-proxy/internal/store/managed_termination_s5.go",
 	"router-proxy/internal/store/managed_termination_s5_test.go",

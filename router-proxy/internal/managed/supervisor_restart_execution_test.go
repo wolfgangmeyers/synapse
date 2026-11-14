@@ -303,7 +303,7 @@ func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration, extraM
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, InitialInstruction: "one-time", RequestID: "launch"})
 	require.NoError(t, err)
-	// Restart All admits only agents whose launch operation is terminal. Waiting
+	// Restart admits only agents whose launch operation is terminal. Waiting
 	// for lifecycle_state alone races the asynchronous launch finalizer.
 	require.Eventually(t, func() bool {
 		agent, agentErr := durable.ManagedAgent(ctx, "restart-agent")

@@ -105,11 +105,7 @@ type ManagerOptions struct {
 	// after an exact group has been reaped but before session files are removed.
 	// Production leaves it nil.
 	BeforeManagedTerminationArtifactCleanup func(context.Context, string) error
-	// RestartAllDispatcher is a post-commit handoff seam. Test doubles record
-	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
-	RestartAllDispatcher              RestartAllDispatcher
-	RestartAllDispatchFailureRecorder RestartAllDispatchFailureRecorder
-	RestartExitTrigger                func(int)
+	RestartExitTrigger                      func(int)
 	// RootControlHandlers is the concrete owner set for the closed 16-operation
 	// registry. Nil retains safe correlated unavailable results until the host
 	// wires its real supervisor-service adapters.
@@ -521,8 +517,6 @@ type Manager struct {
 	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
 	beforeManagedLaunchStart                   func(context.Context, string)
 	beforeTerminationArtifactCleanup           func(context.Context, string) error
-	restartAllDispatcher                       RestartAllDispatcher
-	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	attachments                                *attachments.Store
 	embeddedMailBackoff                        time.Duration
 	rootControlHandlers                        *RootControlHandlerRegistry
@@ -545,6 +539,7 @@ type Manager struct {
 	goalContinuationDelay                      time.Duration
 	contextResetRequested                      map[string]*contextResetRequest
 	embeddedResetReservationTestHook           func()
+	embeddedRestartAdmissionTestHook           func()
 	embeddedTerminationGateTestHook            func() // test-only, gate published and admission unlocked
 	workerSelfTerminateRequested               map[string]workerSelfTerminateRequest
 	maxConsecutiveGoalContinuations            int
@@ -676,7 +671,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
 	// Keep unrelated runtimes available, but never admit Claude after unsafe
 	// recovery. A fresh manager retries recovery on the next router start.
 	if err := manager.RecoverClaudeCodeOrphans(runCtx); err != nil {
@@ -1885,8 +1880,11 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if request.Model != nil && (agent.SelectedModel.Provider == claudeCodeProvider) != (request.Model.Provider == claudeCodeProvider) {
 		return RestartResult{}, &EngineSelectionError{Reason: "Cross-engine model changes are not supported; launch a new worker"}
 	}
-	if agent.Runtime == "embedded" && agent.SelectedModel.Provider == claudeCodeProvider && request.Model == nil {
-		return m.reserveClaudeCodeRestart(ctx, request, agent)
+	if agent.Runtime == "embedded" && request.Model == nil {
+		if m.embeddedRestartAdmissionTestHook != nil {
+			m.embeddedRestartAdmissionTestHook()
+		}
+		return m.reserveClaudeCodeRestart(ctx, request)
 	}
 	if agent.Runtime == "embedded" && request.Model != nil {
 		return m.reserveEmbeddedModelSelection(ctx, request, agent)

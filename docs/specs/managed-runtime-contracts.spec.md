@@ -43,7 +43,7 @@ This remains **Draft**. “Current contract” below means an observable contrac
 8. Structured parent and child state comes from fenced events and snapshots, never terminal text. Missing evidence cannot fabricate completion. Snapshot repair and old-run rejection are required across reconnect and replacement.
 9. Managed HTTP browser compatibility is non-credentialed and origin-independent. No session, cookie, CSRF, or browser credential gate is introduced. The former private managed-bridge socket and its authentication protocol are retired.
 10. Provider credentials and model availability have runtime-specific owners. The historical Pi-store-only boundary must not be asserted for embedded router credential paths. Neither credentials nor authentication payloads belong in UI status or histories.
-11. Tmux remains a separate compatible worker path. Historical §01 also forbids router-launched tmux agents; the current host-launch path is a **historical unresolved conflict**, not an approved exception. Managed Restart All must not restart tmux processes. The worker name `supervisor` grants no lifecycle privilege.
+11. Tmux remains a separate compatible worker path. Historical §01 also forbids router-launched tmux agents; the current host-launch path is a **historical unresolved conflict**, not an approved exception. Managed lifecycle operations must not restart tmux processes (the former Restart All was removed; see `restart-all-removal.spec.md`). The worker name `supervisor` grants no lifecycle privilege.
 12. Histories and recovery ledgers remain bounded. Existing limits and pruning owners are described below; no new accumulating store is introduced by this spec.
 
 ## 3. User Scenarios (Behavioral Contract)
@@ -83,7 +83,7 @@ The thin-tool and bridge implementation below was removed. Disposition of its hi
 - **User Goal**: Exchange mail across worker sources without loss of ownership.
 - **Given**: Managed and legacy workers share a router.
 - **When**: Either sends mail or reconnects during delivery.
-- **Then**: The router persists mail and its chosen source target. Embedded managed delivery atomically appends the accepted message to the session, records its append key and acknowledgement, and acknowledges the queued message under the runtime fence; retries cannot create a second append for the same accepted delivery. Tmux delivery uses its current WebSocket lease and acknowledgement. Stale leases or runtime fences cannot acknowledge another incarnation. The former Pi bridge direct-prompt receipt is historical; a timeout alone was not proof of non-append. Restart All selects managed agents only.
+- **Then**: The router persists mail and its chosen source target. Embedded managed delivery atomically appends the accepted message to the session, records its append key and acknowledgement, and acknowledges the queued message under the runtime fence; retries cannot create a second append for the same accepted delivery. Tmux delivery uses its current WebSocket lease and acknowledgement. Stale leases or runtime fences cannot acknowledge another incarnation. The former Pi bridge direct-prompt receipt is historical; a timeout alone was not proof of non-append.
 
 ### Scenario: [MR-006] Independent histories and retention
 - **User Goal**: Read quiet messages without losing them to internal activity.
