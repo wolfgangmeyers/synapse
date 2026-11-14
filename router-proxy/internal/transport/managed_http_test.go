@@ -160,13 +160,7 @@ func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
 
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	server, durable, _ := newManagedHTTPTestServerWithPath(t)
-	return server, durable
-}
-
-func newManagedHTTPTestServerWithPath(t *testing.T) (*httptest.Server, *store.Store, string) {
-	t.Helper()
-	durable, dbPath := storetest.OpenTestStore(t)
+	durable, _ := storetest.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
@@ -175,7 +169,7 @@ func newManagedHTTPTestServerWithPath(t *testing.T) (*httptest.Server, *store.St
 	require.NoError(t, err)
 	server := httptest.NewServer(router)
 	t.Cleanup(func() { server.Close(); _ = router.Close(context.Background()); _ = durable.Close() })
-	return server, durable, dbPath
+	return server, durable
 }
 
 type providerAuthHTTPRun struct {

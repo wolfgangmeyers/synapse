@@ -12,7 +12,7 @@ Remove the managed Restart All feature. There is no replacement bulk action. Ind
 ## 2. Core Invariants
 
 1. No UI control, client method, HTTP route, alternate bulk entry point, manager dispatch, or store admission path for Restart All exists.
-2. `POST /v1/managed-agents/restart-all` returns `404` (not a generic managed-agent route, not a legacy fallback). It does not change any agent, create a managed lifecycle action, batch item, or HTTP operation record.
+2. With managed services enabled, `POST /v1/managed-agents/restart-all` returns `404` (not a generic managed-agent route, not a legacy fallback). When managed services are disabled, the existing direct-surface gate returns `503 MANAGED_DISABLED` before route dispatch. Neither response changes any agent or creates a managed lifecycle action, batch item, or HTTP operation record.
 3. `POST /v1/managed-agents/{agent_id}/restart` remains available. For a ready embedded agent, a request without a model uses the embedded restart path rather than requiring a legacy RPC binding.
 4. The lifecycle action kind `restart_all` and source `restart_all_child` are no longer accepted for new records. Direct restart, reset and terminate remain supported.
 5. Out of scope: recovery, settlement, completion, or cancellation of in-flight batches admitted before removal, including the fate of their children. Migration SQL history (including 028) is retained so fresh and existing databases can migrate; no new Restart All batches are admitted.
@@ -26,9 +26,9 @@ Remove the managed Restart All feature. There is no replacement bulk action. Ind
 - **Then**: No Restart All control is rendered. Per-agent Restart remains available.
 
 ### Scenario: [RAR-002] Retired route returns 404
-- **Given**: Several running managed agents and a snapshot of agent state and lifecycle/operation tables.
+- **Given**: Managed services are enabled, with several running managed agents and a snapshot of agent state and lifecycle/operation tables.
 - **When**: A client sends `POST /v1/managed-agents/restart-all` (with an empty body, any body, or an `Idempotency-Key`).
-- **Then**: The response is `404`. The request does not change agent runtime incarnation or state, or create a lifecycle action, batch item, or operation. Normal per-agent methods remain available for a valid agent named `restart-all`; only the retired POST operation is absent.
+- **Then**: The response is `404`. The request does not change agent runtime incarnation or state, or create a lifecycle action, batch item, or operation. Normal per-agent methods remain available for a valid agent named `restart-all`; only the retired POST operation is absent. With managed services disabled, the direct-surface gate instead responds `503 MANAGED_DISABLED` before route dispatch.
 
 ### Scenario: [RAR-003] Individual restart still works
 - **Given**: A running managed agent, including an embedded agent with no legacy RPC process binding.

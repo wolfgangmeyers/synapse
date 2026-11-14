@@ -2005,14 +2005,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 	}
 	lane := m.laneFor(binding.AgentID)
-	// Serialize foreground accounting and claims with accepted Claude restarts.
+	// Serialize foreground accounting and claims with accepted embedded restarts.
 	// The caller already owns serial; restart never waits on serial under selection.
-	if claudeEvaluation {
-		lane.selection.Lock()
-		defer lane.selection.Unlock()
-		if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
-			return nil
-		}
+	lane.selection.Lock()
+	defer lane.selection.Unlock()
+	if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
+		return nil
 	}
 	if !hasActiveWorkflow && toolCalls == 0 && !hasText && !calledGoalSnooze {
 		lane.consecutiveEmptyTurns.Add(1)
@@ -2035,19 +2033,15 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			m.startManagedTask(func() {
 				lane := m.laneFor(binding.AgentID)
 				lane.serial.Lock()
-				if claudeEvaluation {
-					lane.selection.Lock()
-					if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
-						lane.selection.Unlock()
-						lane.serial.Unlock()
-						return
-					}
+				lane.selection.Lock()
+				if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
+					lane.selection.Unlock()
+					lane.serial.Unlock()
+					return
 				}
 				token, enterErr := m.store.EnterEmbeddedGoalEvaluationExecution(m.runCtx, binding, key)
 				if enterErr != nil {
-					if claudeEvaluation {
-						lane.selection.Unlock()
-					}
+					lane.selection.Unlock()
 					lane.serial.Unlock()
 					return
 				}
@@ -2061,9 +2055,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				if clearErr != nil {
 					log.Printf("[embedded:%s] clear evaluator execution: %v", binding.AgentID, clearErr)
 				}
-				if claudeEvaluation {
-					lane.selection.Unlock()
-				}
+				lane.selection.Unlock()
 				lane.serial.Unlock()
 				if evalErr != nil || clearErr != nil || !changed {
 					m.publishProjection()
@@ -2094,25 +2086,21 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		// Evaluation cannot overlap a newer ordinary SDK turn on this agent.
 		lane := m.laneFor(binding.AgentID)
 		lane.serial.Lock()
-		if claudeEvaluation {
-			lane.selection.Lock()
-			if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
-				lane.selection.Unlock()
-				lane.serial.Unlock()
-				return
-			}
+		lane.selection.Lock()
+		if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
+			lane.selection.Unlock()
+			lane.serial.Unlock()
+			return
 		}
 		token, enterErr := m.store.EnterEmbeddedGoalEvaluationExecution(m.runCtx, binding, key)
 		if enterErr != nil {
-			if claudeEvaluation {
-				lane.selection.Unlock()
-			}
+			lane.selection.Unlock()
 			lane.serial.Unlock()
 			m.publishProjection()
 			return
 		}
+		lane.selection.Unlock()
 		if claudeEvaluation {
-			lane.selection.Unlock()
 			// Re-check the revision before recording the settled verdict.
 			currentPolicy, policyErr := m.store.ManagedGoalPolicyFor(m.runCtx, binding.AgentID)
 			if policyErr != nil || currentPolicy == nil || currentPolicy.DesiredRevision != key.GoalRevision || !currentPolicy.Config.Enabled {
@@ -2153,17 +2141,13 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 		// A successful restart reservation and verdict settlement share this
 		// boundary. Never wait for serial while holding selection here.
-		if claudeEvaluation {
-			lane.selection.Lock()
-		}
+		lane.selection.Lock()
 		if evalErr == nil {
 			piReviewBarrier(binding.AgentID, key.GoalRevision, outcome)
 			defer piReviewDecisionComplete(binding.AgentID, key.GoalRevision)
 		}
-		if m.runCtx.Err() != nil || (claudeEvaluation && lane.claudeRestartGeneration.Load() != claudeRestartGeneration) {
-			if claudeEvaluation {
-				lane.selection.Unlock()
-			}
+		if m.runCtx.Err() != nil || lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
+			lane.selection.Unlock()
 			_ = m.store.ClearEmbeddedExecution(context.Background(), binding, token)
 			lane.serial.Unlock()
 			m.publishProjection()
@@ -2188,9 +2172,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		if clearErr != nil {
 			log.Printf("[embedded:%s] clear evaluator execution: %v", binding.AgentID, clearErr)
 		}
-		if claudeEvaluation {
-			lane.selection.Unlock()
-		}
+		lane.selection.Unlock()
 		lane.serial.Unlock()
 		if evalErr != nil || clearErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {
 			m.publishProjection()
