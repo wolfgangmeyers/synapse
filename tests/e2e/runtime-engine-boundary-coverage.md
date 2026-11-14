@@ -1,6 +1,6 @@
 # Pi runtime boundary coverage
 
-Scope: SPEC-RUNTIME-ENGINE-001 / root CLAUDE_CODE_ADAPTER_PLAN.md phase 1.
+Scope: [SPEC-RUNTIME-ENGINE-001](../../docs/specs/runtime-engine-boundary.spec.md) / Pi-backed adapter boundary.
 This is partial implementation, not a passing acceptance claim.
 
 ## Scoped execution evidence
