@@ -7,7 +7,7 @@
 
 Implementation is authorized and in progress on `claude-integration`. The active simple workflow is **Implementation**, not dev-loop. The Pi seam, shared tool authority and separate reset store/coordinator changes are implemented with partial focused validation. This specification remains **Draft** pending required E2E acceptance.
 
-Companion: [Claude worker spec](claude-code-workers-spec.md) and [plan](claude-code-workers-plan.md). See the [root implementation evidence](../../CLAUDE_CODE_ADAPTER_PLAN.md#current-implementation-evidence) and [boundary coverage/gaps](../../tests/e2e/runtime-engine-boundary-coverage.md). The scoped 65-test browser run includes Claude and Pi cases; it does not establish the full scenario matrix. See the coverage report for exact evidence and gaps.
+Companion: [Claude worker spec](claude-code-workers-spec.md) and [plan](claude-code-workers-plan.md). See the [recorded implementation evidence](claude-code-workers-plan.md#recorded-implementation-evidence) and [boundary coverage/gaps](../../tests/e2e/runtime-engine-boundary-coverage.md). The scoped 65-test browser run includes Claude and Pi cases; it does not establish the full scenario matrix. See the coverage report for exact evidence and gaps.
 
 ## 1. Intent & User Outcome
 

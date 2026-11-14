@@ -1,6 +1,6 @@
 # Local fake Claude CLI
 
-Supporting fixture for `CLAUDE_CODE_ADAPTER_PLAN.md` phase 3 and detailed plan
+Supporting fixture for the [Claude worker plan](../../../docs/specs/claude-code-workers-plan.md)
 §4/§13. Not a runtime adapter or router E2E test. Only literal loopback HTTP
 MCP calls and a fixed Node child are allowed. No external network, models,
 credential APIs, arbitrary commands or production MCP server implementation.
