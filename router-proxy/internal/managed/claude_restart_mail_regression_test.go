@@ -36,6 +36,7 @@ func TestClaudeRestartReoffersMail(t *testing.T) {
 	barrier := &restartMailBarrier{entered: make(chan struct{}), release: make(chan struct{})}
 	lane.activeMu.Lock()
 	lane.activeSession = barrier
+	lane.activeBinding = owner.binding
 	lane.activeMu.Unlock()
 	req := RestartRequest{AgentID: owner.binding.AgentID, Method: "POST", CanonicalPath: "/restart", RequestID: "restart-mail-regression", CanonicalBodyHash: "hash"}
 	_, err = f.m.reserveClaudeCodeRestart(ctx, req)
@@ -52,6 +53,7 @@ func TestClaudeRestartReoffersMail(t *testing.T) {
 	require.Zero(t, f.count(t, `SELECT count(*) FROM embedded_acks WHERE message_id=?`, id))
 	lane.activeMu.Lock()
 	lane.activeSession = nil
+	lane.activeBinding = store.EmbeddedBinding{}
 	lane.activeMu.Unlock()
 	close(barrier.release)
 	require.Eventually(t, func() bool { return f.count(t, `SELECT count(*) FROM embedded_acks WHERE message_id=?`, id) == 1 }, 3*time.Second, 10*time.Millisecond, "gate release must reoffer queued mail")
@@ -105,9 +107,14 @@ func TestClaudeRestartStopFailureDoesNotReoffer(t *testing.T) {
 	proc := &ClaudeCodeProcess{stdin: poolTestStdin{}, done: done, exited: done, closeDone: make(chan struct{}), waitErr: errClaudeCodeGroupUnconfirmed}
 	pool := &f.m.claudeCodeProcesses
 	pool.mu.Lock()
-	pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {process: proc}}
+	pool.entries = map[string]*claudeCodeProcessEntry{owner.binding.AgentID: {binding: owner.binding, process: proc}}
 	pool.mu.Unlock()
-	t.Cleanup(func() { pool.mu.Lock(); delete(pool.entries, owner.binding.AgentID); pool.mu.Unlock() })
+	t.Cleanup(func() {
+		pool.mu.Lock()
+		delete(pool.entries, owner.binding.AgentID)
+		delete(pool.fencedWorkers, owner.binding.AgentID)
+		pool.mu.Unlock()
+	})
 	_, err := f.raw.Exec(`CREATE TRIGGER reject_owner_failure BEFORE UPDATE ON managed_agents BEGIN SELECT RAISE(ABORT, 'failure recording rejected'); END`)
 	require.NoError(t, err)
 	id := "e8888888-8888-4888-8888-888888888888"
