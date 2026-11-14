@@ -69,7 +69,7 @@ Remove Antigravity from the router and web UI. Google Gemini API-key access, Goo
 
 ## 4. Automated E2E Verification Matrix
 
-Browser evidence and supporting Go-boundary evidence are separate below. Execution records and scope limits live in `ANTIGRAVITY_REMOVAL_PLAN.md`. Missing/stale parent fixtures inject persisted state after ordinary admission, before the real subagent tool runs; they prove inheritance/execution handling, not public admission or legacy recovery.
+Browser evidence and supporting Go-boundary evidence are separate below. A recorded six-test browser run passed 6/6; supporting Go and SQLite checks do not establish full browser acceptance. Broad Go and app suites were not claimed green. Missing/stale parent fixtures inject persisted state after ordinary admission, before the real subagent tool runs; they prove inheritance/execution handling, not public admission or legacy recovery.
 
 | Scenario ID | Verified boundary | Actual test title / Go test |
 | :--- | :--- | :--- |
