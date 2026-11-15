@@ -132,6 +132,10 @@ func (s *Store) pruneEmbeddedEvidenceTx(ctx context.Context) error {
 			return err
 		}
 	}
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM workflow_continuation_start_identity WHERE (agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,final_seq,final_digest) NOT IN (SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,final_seq,final_digest FROM embedded_goal_continuations)`)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM embedded_continuation_prompt_identity WHERE (agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,final_seq,final_digest) NOT IN (SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,final_seq,final_digest FROM embedded_goal_continuations)`)
+	_ = s.pruneWorkflowInterruptionsTx(ctx, "")
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM legacy_continuation_ambiguity WHERE recorded_at_ms<=?`, s.clock.Now().UnixMilli()-embeddedEvidenceAgeMS)
 	return nil
 }
 

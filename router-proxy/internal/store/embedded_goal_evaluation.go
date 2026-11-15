@@ -155,7 +155,11 @@ func (s *Store) ClaimEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBindi
 			return err
 		}
 		e = EmbeddedGoalEvaluation{EmbeddedGoalEvaluationKey: k, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, OwnerToken: b.OwnerToken, State: EmbeddedGoalEvaluationUnknown, ClaimedAt: formatTimestamp(s.clock.Now())}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_evaluations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,claimed_at) VALUES(?,?,?,?,?,?,?,?,?,?,'UNKNOWN',?)`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.OwnerToken, e.FinalSeq, e.FinalDigest, e.ClaimedAt)
+		var admittedAt int64
+		if err := s.db.QueryRowContext(ctx, `SELECT retention_admitted_at_ms FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=? AND digest=? AND kind='assistant'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, k.FinalSeq, k.FinalDigest).Scan(&admittedAt); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_evaluations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,claimed_at,retention_basis_ms) VALUES(?,?,?,?,?,?,?,?,?,?,'UNKNOWN',?,?)`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.OwnerToken, e.FinalSeq, e.FinalDigest, e.ClaimedAt, admittedAt)
 		claimed = err == nil
 		return err
 	})

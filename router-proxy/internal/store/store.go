@@ -126,6 +126,8 @@ type Store struct {
 	managedTerminationFault       func(string) error
 	managedBridgeFault            func(string) error
 	embeddedGoalContinuationFault func(string) error // test-only rollback seam
+	workflowResponseCommitFault   func() error       // test-only rollback seam
+	workflowResponseRollbackFault func() error       // test-only rollback seam
 	// These process-local bounds reset on restart; reconciliation is idempotent.
 	managedParentActivityReconcileMu        sync.Mutex
 	managedParentActivityReconcileCursor    string

@@ -248,8 +248,10 @@ func (s *Store) reserveEmbeddedGoalContinuation(ctx context.Context, e EmbeddedG
 	}
 
 	var admitted int64
-	if err := s.db.QueryRowContext(ctx, `SELECT retention_admitted_at_ms FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=? AND digest=?`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest).Scan(&admitted); err != nil {
-		return err
+	if err := s.db.QueryRowContext(ctx, `SELECT retention_basis_ms FROM embedded_goal_evaluations WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.FinalSeq, e.FinalDigest).Scan(&admitted); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT retention_admitted_at_ms FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=? AND digest=?`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest).Scan(&admitted); err != nil {
+			return err
+		}
 	}
 	expiry := admitted + 2*embeddedEvidenceAgeMS
 	if due.Valid {
@@ -267,7 +269,7 @@ func (s *Store) reserveEmbeddedGoalContinuation(ctx context.Context, e EmbeddedG
 	if err := s.embeddedEvidenceAdmissionTx(ctx, b, e.UserSeq, e.UserDigest); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_continuations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,state,disposition,reserved_at,due_at,retention_expires_at_ms) VALUES(?,?,?,?,?,?,?,'reserved','pending',?,?,?) ON CONFLICT(agent_id,session_id,epoch,user_seq,user_digest,goal_revision) DO NOTHING`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, formatTimestamp(s.clock.Now()), due, expiry)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_continuations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,final_seq,final_digest,state,disposition,reserved_at,due_at,retention_expires_at_ms) VALUES(?,?,?,?,?,?,?,?,?,'reserved','pending',?,?,?) ON CONFLICT(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,final_seq,final_digest) DO NOTHING`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.FinalSeq, e.FinalDigest, formatTimestamp(s.clock.Now()), due, expiry)
 	return err
 }
 

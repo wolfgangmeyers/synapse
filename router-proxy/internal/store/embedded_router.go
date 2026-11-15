@@ -262,6 +262,8 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 		if err := s.embeddedFence(ctx, control); err != nil {
 			return err
 		}
+		var oldOwner int64
+		_ = s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&oldOwner)
 		expires := formatTimestamp(s.clock.Now().Add(100 * 365 * 24 * time.Hour))
 		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 WHEN owner_id IS NOT ? THEN owner_token+1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
 		if err != nil {
@@ -274,7 +276,10 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 		if n != 1 {
 			return errors.New("stale embedded owner binding")
 		}
-		return s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token)
+		if err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token); err != nil {
+			return err
+		}
+		return s.recordWorkflowInterruptionTx(ctx, b, oldOwner, token)
 	})
 	return token, err
 }
