@@ -103,6 +103,7 @@ Specifications governing agent search capabilities, tool integrations, and exter
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-EMBEDDED-TOOL-SCHEMA-001` | Embedded tool schema parity and rejection | `AgentManagement` | [`embedded-tool-schema-parity.spec.md`](./embedded-tool-schema-parity.spec.md) | `tests/e2e/embedded-tool-schema-parity.spec.ts`, `tests/e2e/embedded-tool-schema-rejections.spec.ts`, and `tests/e2e/embedded-tool-schema-google.spec.ts` (partial; acceptance unverified); actual wrapper boundary unverified | `Draft`; acceptance incomplete |
 | `SPEC-SEARCH-001` | Codex Search (`codex_search`) | `Tooling` | [`codex-search.md`](./codex-search.md) | `tests/e2e/codex-search.spec.ts` (planned) | `Active / Proposed` |
 
 ---

@@ -287,6 +287,14 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 	}
 	// A non-nil list, even when empty, excludes every SDK built-in.
 	tools := []agent.AgentTool{}
+	trustedDiagnosticTools := map[string]*ai.Schema{}
+	trustDiagnostics := func(tools []agent.AgentTool) {
+		for _, tool := range tools {
+			if tool.Parameters != nil {
+				trustedDiagnosticTools[tool.Name] = tool.Parameters
+			}
+		}
+	}
 	role, err := m.store.EmbeddedSessionRole(ctx, binding)
 	if err != nil {
 		return nil, err
@@ -364,6 +372,7 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		if err != nil {
 			return nil, fmt.Errorf("embedded read tool: %w", err)
 		}
+		configureEmbeddedReadSchema(&readTool)
 		readTool.PromptGuidelines = append(readTool.PromptGuidelines, "When you run a command or tool to investigate, continue until the task is complete, or write your answer to the user.", "When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.")
 		editTool, err := coding.CreateTool("edit", saved.Cwd)
 		if err != nil {
@@ -401,9 +410,12 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		tools = append(tools, m.embeddedAgentUrgencyTool(owner, toolAdmitted, toolCompleted))
 		tools = append(tools, m.embeddedProgressTool(owner))
 		tools = append(tools, m.embeddedBlockedTool(owner))
+		trustDiagnostics(tools)
 		tools = append(tools, m.buildSessionTools(&saved)...)
+		mcpEnd := len(tools)
 		tools = append(tools, m.embeddedSessionTools(owner)...)
 		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
+		trustDiagnostics(tools[mcpEnd:])
 	}
 	if m.embeddedExternalTool != nil {
 		tool := *m.embeddedExternalTool
@@ -425,6 +437,13 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		tools = append(tools, tool)
 	}
 	for i := range tools {
+		// Install diagnostics only for the host-owned schema captured above.
+		// External tool hooks and schema text are not trusted for disclosure.
+		tool := tools[i]
+		trusted := trustedDiagnosticTools[tool.Name] != nil && trustedDiagnosticTools[tool.Name] == tool.Parameters
+		tools[i].ValidationError = func(args map[string]any) string {
+			return embeddedInvalidToolArguments(&tool, args, trusted)
+		}
 		original := tools[i].Execute
 		tools[i].Execute = func(ctx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := getObserverFailure(); err != nil {
@@ -516,8 +535,18 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 				break
 			}
 		}
-		if registered == nil || !registered.Parameters.Check(call.ToolCall.Arguments) {
-			return &agent.PolicyDenial{Reason: "embedded external tool schema mismatch"}
+		if registered == nil {
+			return &agent.PolicyDenial{Reason: "embedded tool " + embeddedDiagnosticToolName(call.ToolCall.Name, trustedDiagnosticTools[call.ToolCall.Name] != nil) + " is not registered in the current catalog"}
+		}
+		// The SDK validates and normalizes Args before this callback; the raw
+		// ToolCall retains provider values for history and stricter policy checks.
+		// Direct callers without SDK arguments must still pass the current schema.
+		validatedArgs := call.Args
+		if validatedArgs == nil {
+			validatedArgs = call.ToolCall.Arguments
+		}
+		if registered.Parameters == nil || !registered.Parameters.Check(validatedArgs) {
+			return &agent.PolicyDenial{Reason: embeddedInvalidToolArguments(registered, validatedArgs, trustedDiagnosticTools[registered.Name] != nil && trustedDiagnosticTools[registered.Name] == registered.Parameters)}
 		}
 		// Check the original, uncoerced arguments before durable intent.
 		if call.ToolCall.Name == "goal" {
