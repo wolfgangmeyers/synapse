@@ -104,27 +104,6 @@ type workflowNudgeObservation struct {
 func (o *workflowNudgeObservation) dispatch(ctx context.Context) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.p.continuationKey != nil {
-		identity, err := o.p.db.EmbeddedContinuationPromptIdentity(ctx, o.p.binding, *o.p.continuationKey)
-		if err != nil {
-			return err
-		}
-		if o.decided {
-			return nil
-		}
-		o.workflow, o.workflowID = identity.Workflow, identity.WorkflowID
-		if o.workflow {
-			if o.p.turnSeq > 0 {
-				o.turnSeq, o.turnDigest = o.p.turnSeq, o.p.turnDigest
-			}
-			o.generation = o.lane.beginWorkflowNudge()
-			if !o.lane.dispatchWorkflowNudge(o.generation, o.limit) {
-				return errWorkflowNudgeCap
-			}
-		}
-		o.decided = true
-		return nil
-	}
 	if o.decided {
 		return nil
 	}

@@ -279,7 +279,7 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 		if err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token); err != nil {
 			return err
 		}
-		return s.recordWorkflowInterruptionTx(ctx, b, oldOwner, token)
+		return nil
 	})
 	return token, err
 }
