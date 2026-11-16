@@ -16,6 +16,21 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
+func encryptSecret(plaintext string) (*string, error) {
+	if strings.TrimSpace(plaintext) == "" {
+		return nil, nil
+	}
+	key, err := crypto.DeriveKey("")
+	if err != nil {
+		return nil, err
+	}
+	encrypted, err := crypto.Encrypt([]byte(strings.TrimSpace(plaintext)), key)
+	if err != nil {
+		return nil, err
+	}
+	return &encrypted, nil
+}
+
 // CustomProviderModelResponse represents a model returned in HTTP responses.
 type CustomProviderModelResponse struct {
 	ID            string `json:"id"`
@@ -149,20 +164,14 @@ func (r *Router) handleCustomProvidersCollection(w http.ResponseWriter, req *htt
 			return
 		}
 
-		// Encrypt API key if provided
-		var ciphertext *string
-		if parsed.APIKey != nil && strings.TrimSpace(*parsed.APIKey) != "" {
-			key, err := crypto.DeriveKey("")
-			if err != nil || len(key) != crypto.KeySize {
-				r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-				return
-			}
-			enc, err := crypto.Encrypt([]byte(strings.TrimSpace(*parsed.APIKey)), key)
-			if err != nil {
-				r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-				return
-			}
-			ciphertext = &enc
+		var keyInput string
+		if parsed.APIKey != nil {
+			keyInput = *parsed.APIKey
+		}
+		ciphertext, err := encryptSecret(keyInput)
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "encryption_failed"})
+			return
 		}
 
 		enabled := true
@@ -196,11 +205,11 @@ func (r *Router) handleCustomProvidersCollection(w http.ResponseWriter, req *htt
 			}
 			ctxWin := m.ContextWindow
 			if ctxWin <= 0 {
-				ctxWin = 131072
+				ctxWin = store.DefaultCustomModelContextWindow
 			}
 			maxTok := m.MaxTokens
 			if maxTok <= 0 {
-				maxTok = 8192
+				maxTok = store.DefaultCustomModelMaxTokens
 			}
 			modelsRec = append(modelsRec, store.CustomProviderModelRecord{
 				ID:            mID,
@@ -301,22 +310,12 @@ func (r *Router) handleCustomProviderItem(w http.ResponseWriter, req *http.Reque
 
 		ciphertext := existing.Provider.APIKeyCiphertext
 		if parsed.APIKey != nil {
-			trimmedKey := strings.TrimSpace(*parsed.APIKey)
-			if trimmedKey == "" {
-				ciphertext = nil
-			} else {
-				key, err := crypto.DeriveKey("")
-				if err != nil || len(key) != crypto.KeySize {
-					r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-					return
-				}
-				enc, err := crypto.Encrypt([]byte(trimmedKey), key)
-				if err != nil {
-					r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-					return
-				}
-				ciphertext = &enc
+			encryptedKey, err := encryptSecret(*parsed.APIKey)
+			if err != nil {
+				r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "encryption_failed"})
+				return
 			}
+			ciphertext = encryptedKey
 		}
 
 		providerRec := store.CustomProviderRecord{
@@ -340,11 +339,11 @@ func (r *Router) handleCustomProviderItem(w http.ResponseWriter, req *http.Reque
 			}
 			ctxWin := m.ContextWindow
 			if ctxWin <= 0 {
-				ctxWin = 131072
+				ctxWin = store.DefaultCustomModelContextWindow
 			}
 			maxTok := m.MaxTokens
 			if maxTok <= 0 {
-				maxTok = 8192
+				maxTok = store.DefaultCustomModelMaxTokens
 			}
 			modelsRec = append(modelsRec, store.CustomProviderModelRecord{
 				ID:            mID,

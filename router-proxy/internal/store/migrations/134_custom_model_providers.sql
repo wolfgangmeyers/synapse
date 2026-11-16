@@ -22,5 +22,3 @@ CREATE TABLE IF NOT EXISTS custom_provider_models (
   FOREIGN KEY (provider_id) REFERENCES custom_providers(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS custom_provider_models_provider_idx
-  ON custom_provider_models (provider_id, id);

@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	DefaultCustomModelContextWindow = 131072
+	DefaultCustomModelMaxTokens     = 8192
+)
+
 // CustomProviderRecord represents an OpenAI-compatible custom model provider.
 type CustomProviderRecord struct {
 	ID                string    `json:"id"`
@@ -121,10 +126,10 @@ INSERT INTO custom_providers (
 				m.DisplayName = m.ID
 			}
 			if m.ContextWindow <= 0 {
-				m.ContextWindow = 131072
+				m.ContextWindow = DefaultCustomModelContextWindow
 			}
 			if m.MaxTokens <= 0 {
-				m.MaxTokens = 8192
+				m.MaxTokens = DefaultCustomModelMaxTokens
 			}
 			supportsToolsInt := 0
 			if m.SupportsTools {
@@ -372,11 +377,8 @@ WHERE id = ?`,
 			return ErrCustomProviderNotFound
 		}
 
-		// Delete existing models and re-insert the provided set
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM custom_provider_models WHERE provider_id = ?`, provider.ID); err != nil {
-			return fmt.Errorf("clear custom provider models: %w", err)
-		}
-
+		// Upsert provided models
+		var modelIDs []string
 		for _, m := range models {
 			m.ID = strings.TrimSpace(m.ID)
 			if m.ID == "" {
@@ -388,10 +390,10 @@ WHERE id = ?`,
 				m.DisplayName = m.ID
 			}
 			if m.ContextWindow <= 0 {
-				m.ContextWindow = 131072
+				m.ContextWindow = DefaultCustomModelContextWindow
 			}
 			if m.MaxTokens <= 0 {
-				m.MaxTokens = 8192
+				m.MaxTokens = DefaultCustomModelMaxTokens
 			}
 			supportsToolsInt := 0
 			if m.SupportsTools {
@@ -407,11 +409,16 @@ WHERE id = ?`,
 			}
 
 			_, err := s.db.ExecContext(ctx, `
-INSERT INTO custom_provider_models (
-  id, provider_id, display_name, context_window, max_tokens, supports_tools, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				m.ID,
+INSERT INTO custom_provider_models (provider_id, id, display_name, context_window, max_tokens, supports_tools, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(provider_id, id) DO UPDATE SET
+    display_name = excluded.display_name,
+    context_window = excluded.context_window,
+    max_tokens = excluded.max_tokens,
+    supports_tools = excluded.supports_tools,
+    updated_at = excluded.updated_at`,
 				m.ProviderID,
+				m.ID,
 				m.DisplayName,
 				m.ContextWindow,
 				m.MaxTokens,
@@ -420,7 +427,27 @@ INSERT INTO custom_provider_models (
 				formatTimestamp(modelUpdated),
 			)
 			if err != nil {
-				return fmt.Errorf("re-insert custom provider model %q: %w", m.ID, err)
+				return fmt.Errorf("upsert custom provider model %q: %w", m.ID, err)
+			}
+			modelIDs = append(modelIDs, m.ID)
+		}
+
+		// Prune any models that were removed
+		if len(modelIDs) > 0 {
+			placeholders := make([]string, len(modelIDs))
+			args := make([]any, 0, 1+len(modelIDs))
+			args = append(args, provider.ID)
+			for i, id := range modelIDs {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			query := fmt.Sprintf("DELETE FROM custom_provider_models WHERE provider_id = ? AND id NOT IN (%s)", strings.Join(placeholders, ", "))
+			if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+				return fmt.Errorf("prune custom provider models: %w", err)
+			}
+		} else {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM custom_provider_models WHERE provider_id = ?`, provider.ID); err != nil {
+				return fmt.Errorf("clear custom provider models: %w", err)
 			}
 		}
 
