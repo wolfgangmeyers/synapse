@@ -951,6 +951,15 @@ func sanitizeGeminiParameters(v any) any {
 			}
 			cleaned[k] = sanitizeGeminiParameters(child)
 		}
+		if typeList, ok := cleaned["type"].([]any); ok {
+			for _, item := range typeList {
+				if s, ok := item.(string); ok && s != "null" {
+					cleaned["type"] = s
+					cleaned["nullable"] = true
+					break
+				}
+			}
+		}
 		return cleaned
 	case []any:
 		cleaned := make([]any, len(val))
