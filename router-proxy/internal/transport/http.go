@@ -252,6 +252,12 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/settings/mcp-servers":
 		r.handleMCPServersCollection(w, req)
 		return
+	case path == "/v1/custom-providers":
+		r.handleCustomProvidersCollection(w, req)
+		return
+	case path == "/v1/custom-providers/discover":
+		r.handleCustomProvidersDiscover(w, req)
+		return
 	case path == "/v1/mcp/oauth/callback":
 		r.handleMCPOAuthCallback(w, req)
 		return
@@ -306,6 +312,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if serverID, subAction, subSub, ok := mcpServerRoute(path); ok {
 		r.handleMCPServerItem(w, req, serverID, subAction, subSub)
+		return
+	}
+	if id, ok := customProviderRoute(path); ok {
+		r.handleCustomProviderItem(w, req, id)
 		return
 	}
 	if id, _, ok := routeID(path, "/v1/reminders/"); ok {

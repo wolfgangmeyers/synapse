@@ -1072,7 +1072,9 @@ export interface HistoryEntryFrame {
   view: "quiet" | "complete";
   entry: ManagedHistoryEntry;
 }
+export type CustomProviderPrefix = `custom-${string}`;
 export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex";
+export type AnyProvider = ManagedProvider | CustomProviderPrefix;
 
 export interface ProviderAuthPrompt {
   id: string;

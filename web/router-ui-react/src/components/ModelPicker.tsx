@@ -26,6 +26,10 @@ export interface ModelPickerProps {
 
 const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex']);
 
+function isAdmittedEmbeddedProvider(provider: string): boolean {
+  return ADMITTED_EMBEDDED_PROVIDERS.has(provider) || provider.startsWith("custom-");
+}
+
 export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model", isEmbedded }: ModelPickerProps) {
   const normalized = useMemo(() => normalizeModelSummaries(models), [models]);
   const [open, setOpen] = useState(false);
@@ -40,7 +44,7 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
-  const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || isAntigravityModel(m) || ADMITTED_EMBEDDED_PROVIDERS.has(m.provider))) : normalized;
+  const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || isAntigravityModel(m) || isAdmittedEmbeddedProvider(m.provider))) : normalized;
   const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {

@@ -412,6 +412,15 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 				model = resolved
 			}
 			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+				if opts == nil {
+					opts = &ai.SimpleStreamOptions{}
+				} else {
+					copyOpts := *opts
+					opts = &copyOpts
+				}
+				if opts.APIKey == "" {
+					opts.APIKey = "none"
+				}
 				return ai.StreamSimple(requestCtx, resolved, ai.Context{
 					Messages: transcript.Messages,
 				}, opts)

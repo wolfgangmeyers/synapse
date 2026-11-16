@@ -20,6 +20,11 @@ function settingsClient(): ProviderAuthClient {
     respondProviderAuth: vi.fn(async () => ({ operation_id: "auth-1" })),
     cancelProviderAuth: vi.fn(async () => ({ operation_id: "auth-1", status: "cancelled" })),
     setDefaultModel: vi.fn(async () => ({ operation_id: "default-1", default_model: { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" }, effective_fallback: { provider: "openai-codex" as const, id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true } })),
+    listCustomProviders: vi.fn(async () => []),
+    createCustomProvider: vi.fn(async (req) => ({ ...req, id: "test", created_at: "", updated_at: "", models: req.models || [] })),
+    updateCustomProvider: vi.fn(async (id, req) => ({ ...req, id, created_at: "", updated_at: "", models: req.models || [] })),
+    deleteCustomProvider: vi.fn(async () => {}),
+    discoverCustomProviderModels: vi.fn(async () => ({ models: [] })),
   };
 }
 

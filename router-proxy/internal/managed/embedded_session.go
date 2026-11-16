@@ -1398,6 +1398,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return m.streamEmbeddedVertex(requestCtx, requestModel, transcript, opts)
 		}
 		if requestModel.Provider != "openai-codex" {
+			if opts == nil {
+				opts = &ai.SimpleStreamOptions{}
+			} else {
+				copyOpts := *opts
+				opts = &copyOpts
+			}
+			if opts.APIKey == "" {
+				opts.APIKey = "none"
+			}
 			return ai.StreamSimple(requestCtx, requestModel, ai.Context{Messages: transcript.Messages}, opts)
 		}
 		if err := validateEmbeddedCodexModel(requestModel); err != nil {

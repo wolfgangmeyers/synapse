@@ -328,7 +328,10 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       const message = event.message;
       const msgFrom = message.from ?? (typeof message.sender === "string" ? message.sender : undefined);
       const msgTo = message.to ?? (typeof message.recipient === "string" ? message.recipient : undefined);
-      if (!peer || !((msgFrom === peer && msgTo === scope.agentId) || (msgTo === peer && msgFrom === scope.agentId))) return;
+      const isUserAlias = (id?: string) => !id || id === scope.agentId || id === "user" || id === "wolfgang";
+      const isIncoming = msgFrom === peer && isUserAlias(msgTo);
+      const isOutgoing = msgTo === peer && isUserAlias(msgFrom);
+      if (!peer || (!isIncoming && !isOutgoing)) return;
       if (refreshing.current) {
         if (!liveMessages.current.has(message.id) && liveMessages.current.size >= CONVERSATION_UNLOAD_THRESHOLD) liveMessages.current.delete(liveMessages.current.keys().next().value ?? "");
         liveMessages.current.set(message.id, message);
@@ -341,7 +344,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         while (ids.size > CONVERSATION_UNLOAD_THRESHOLD) ids.delete(ids.values().next().value ?? "");
         return { key: scopeKey, ids };
       });
-      const liveEvent: ConversationTimelineEvent = { id: liveId, agent_id: peer, seq: 0, kind: "message", role: msgFrom === scope.agentId ? "user" : "assistant", content: message.body ?? "", metadata: { from: msgFrom, to: msgTo, ...(message.subject !== undefined ? { subject: message.subject } : {}), ...(Array.isArray(message.attachments) ? { attachments: message.attachments } : {}) }, created_at: Date.now() };
+      const liveEvent: ConversationTimelineEvent = { id: liveId, agent_id: peer, seq: 0, kind: "message", role: isOutgoing ? "user" : "assistant", content: message.body ?? "", metadata: { from: msgFrom, to: msgTo, ...(message.subject !== undefined ? { subject: message.subject } : {}), ...(Array.isArray(message.attachments) ? { attachments: message.attachments } : {}) }, created_at: Date.now() };
       if (refreshing.current && !liveEvents.current.has(liveId) && liveEvents.current.size >= CONVERSATION_UNLOAD_THRESHOLD) liveEvents.current.delete(liveEvents.current.keys().next().value ?? "");
       if (refreshing.current) liveEvents.current.set(liveId, liveEvent);
       setTimelineWindow((window) => {
@@ -351,7 +354,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           agent_id: peer ?? "",
           seq: 0,
           kind: "message",
-          role: msgFrom === scope.agentId ? "user" : "assistant",
+          role: isOutgoing ? "user" : "assistant",
           ...(message.body !== undefined ? { content: message.body } : {}),
           metadata: {
             ...(msgFrom !== undefined ? { from: msgFrom, sender: msgFrom } : {}),
@@ -381,6 +384,9 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       if (frame === "connected") { void refresh(); return; }
       if (frame.type !== "history_entry" || frame.view !== "complete" || frame.entry.agent_id !== peer) return;
       setActivityEntries((entries) => [...entries.filter((entry) => entry.id !== frame.entry.id), frame.entry].sort(compareManagedHistoryEntries).slice(-CONVERSATION_UNLOAD_THRESHOLD));
+      if (frame.entry.presentation?.kind === "message" || frame.entry.message === "Assistant response" || frame.entry.category === "assistant") {
+        void refresh();
+      }
     });
     void refresh();
     return () => {

@@ -8,7 +8,7 @@ import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
 import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates, CreateWorkflowRequest, UpdateWorkflowRequest, WorkflowExportBundle } from "../domain/workflow-states";
-import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider, WorkflowSchedule } from "../protocol/types";
+import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider, CustomProviderPrefix, AnyProvider, WorkflowSchedule } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
 export interface Capabilities extends Record<string, unknown> {}
@@ -119,7 +119,7 @@ export interface MonitorEvaluationResult {
 }
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
-export interface ProviderModel { provider: ManagedProvider | "claude-code"; id: string; name: string; available: boolean }
+export interface ProviderModel { provider: AnyProvider | "claude-code"; id: string; name: string; available: boolean }
 export interface ProviderStatus { provider: ManagedProvider; label: string; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
@@ -408,8 +408,11 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || (breadcrumbItems !== undefined && (!Array.isArray(breadcrumbItems) || !breadcrumbItems.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); }))) || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
   return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
-function providerName(value: unknown): value is ManagedProvider {
+function isBuiltinManagedProvider(value: unknown): value is ManagedProvider {
   return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex";
+}
+function providerName(value: unknown): value is AnyProvider {
+  return isBuiltinManagedProvider(value) || (typeof value === "string" && value.startsWith("custom-"));
 }
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
@@ -425,7 +428,7 @@ function modelChoice(value: unknown): value is ProviderModel {
 }
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
-  if (!item || !providerName(item.provider) || typeof item.authenticated !== "boolean" || (item.status !== "authenticated" && item.status !== "signed_out") || item.authenticated !== (item.status === "authenticated") || !isRouterUtcTimestamp(item.updated_at) || (Object.hasOwn(item, "account_label") && !nonEmptyString(item.account_label)) || (Object.hasOwn(item, "error") && !nonEmptyString(item.error))) return false;
+  if (!item || !isBuiltinManagedProvider(item.provider) || typeof item.authenticated !== "boolean" || (item.status !== "authenticated" && item.status !== "signed_out") || item.authenticated !== (item.status === "authenticated") || !isRouterUtcTimestamp(item.updated_at) || (Object.hasOwn(item, "account_label") && !nonEmptyString(item.account_label)) || (Object.hasOwn(item, "error") && !nonEmptyString(item.error))) return false;
   const labels: Record<ManagedProvider, readonly string[]> = {
     "openai-codex": ["ChatGPT"],
     google: ["Google"],
@@ -534,6 +537,62 @@ export interface AddMCPServerRequest {
   registration_endpoint?: string;
   revocation_endpoint?: string;
   scopes?: string;
+}
+
+export interface CustomProviderModel {
+  id: string;
+  display_name: string;
+  context_window: number;
+  max_tokens: number;
+  supports_tools: boolean;
+}
+
+export interface CustomProvider {
+  id: string;
+  label: string;
+  base_url: string;
+  protocol: string;
+  enabled: boolean;
+  has_api_key: boolean;
+  api_key_masked?: string;
+  models: CustomProviderModel[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCustomProviderRequest {
+  id: string;
+  label: string;
+  base_url: string;
+  protocol?: string;
+  api_key?: string;
+  enabled?: boolean;
+  models: Array<{
+    id: string;
+    display_name?: string;
+    context_window?: number;
+    max_tokens?: number;
+    supports_tools?: boolean;
+  }>;
+}
+
+export interface UpdateCustomProviderRequest {
+  label?: string;
+  base_url?: string;
+  protocol?: string;
+  api_key?: string;
+  enabled?: boolean;
+  models: Array<{
+    id: string;
+    display_name?: string;
+    context_window?: number;
+    max_tokens?: number;
+    supports_tools?: boolean;
+  }>;
+}
+
+export interface CustomModelDiscoveryResult {
+  models: CustomProviderModel[];
 }
 
 export interface MCPServerDetailResponse {
@@ -656,6 +715,11 @@ export interface RouterHttpClient {
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   cancelProviderAuth(operationId: string): Promise<{ operation_id: string; status: string }>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
+  listCustomProviders(): Promise<CustomProvider[]>;
+  createCustomProvider(req: CreateCustomProviderRequest): Promise<CustomProvider>;
+  updateCustomProvider(id: string, req: UpdateCustomProviderRequest): Promise<CustomProvider>;
+  deleteCustomProvider(id: string): Promise<void>;
+  discoverCustomProviderModels(req: { base_url: string; api_key?: string }): Promise<CustomModelDiscoveryResult>;
   systemOneConfig(): Promise<SystemOneConfig>;
   saveSystemOneConfig(config: SystemOneConfig): Promise<SystemOneConfig>;
   contextThresholds(): Promise<ContextThresholdConfig>;
@@ -886,6 +950,33 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return { operation_id: body.operation_id, status: body.status };
     },
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
+    listCustomProviders: async () => {
+      const body = await request("/v1/custom-providers");
+      const rec = recordValue(body);
+      if (!rec || !Array.isArray(rec.custom_providers)) return [];
+      return rec.custom_providers as CustomProvider[];
+    },
+    createCustomProvider: async (req) => {
+      const body = await jsonRequest("/v1/custom-providers", "POST", req);
+      const rec = recordValue(body);
+      if (!rec || !rec.custom_provider) throw invalidResponse("Invalid create custom provider response", body);
+      return rec.custom_provider as CustomProvider;
+    },
+    updateCustomProvider: async (id, req) => {
+      const body = await jsonRequest(`/v1/custom-providers/${encodeURIComponent(id)}`, "PUT", req);
+      const rec = recordValue(body);
+      if (!rec || !rec.custom_provider) throw invalidResponse("Invalid update custom provider response", body);
+      return rec.custom_provider as CustomProvider;
+    },
+    deleteCustomProvider: async (id) => {
+      await request(`/v1/custom-providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+    discoverCustomProviderModels: async (req) => {
+      const body = await jsonRequest("/v1/custom-providers/discover", "POST", req);
+      const rec = recordValue(body);
+      if (!rec || !Array.isArray(rec.models)) return { models: [] };
+      return { models: rec.models as CustomProviderModel[] };
+    },
     systemOneConfig: async () => {
       const body = await request("/v1/settings/systemone");
       const rec = recordValue(body);
