@@ -109,6 +109,7 @@ func TestEmbeddedDistinctFinalContinuationExactStart(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, second, latest)
+
 	_, started, err := s.StartEmbeddedGoalContinuation(ctx, b, second)
 	require.NoError(t, err)
 	require.True(t, started)
@@ -118,7 +119,8 @@ func TestEmbeddedDistinctFinalContinuationExactStart(t *testing.T) {
 	newer, err := s.EmbeddedGoalContinuationFor(ctx, b, second)
 	require.NoError(t, err)
 	require.Equal(t, "started", newer.State)
-	token, err := s.EnterEmbeddedSDKExecution(ctx, b, &second)
+	var executionToken int64
+	err = s.db.QueryRowContext(ctx, `SELECT execution_token FROM embedded_sessions WHERE agent_id = ?`, b.AgentID).Scan(&executionToken)
 	require.NoError(t, err)
-	require.NoError(t, s.ClearEmbeddedExecution(ctx, b, token))
+	require.NoError(t, s.ClearEmbeddedExecution(ctx, b, executionToken))
 }

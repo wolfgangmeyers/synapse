@@ -21,7 +21,7 @@ type EmbeddedGoalContinuation struct {
 
 func (s *Store) embeddedGoalContinuationRow(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalContinuation, error) {
 	var c EmbeddedGoalContinuation
-	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,origin,state,disposition,reserved_at,due_at,COALESCE(started_at,'') FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&c.AgentID, &c.SessionID, &c.Epoch, &c.Generation, &c.UserSeq, &c.UserDigest, &c.GoalRevision, &c.Origin, &c.State, &c.Disposition, &c.ReservedAt, &c.DueAt, &c.StartedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,origin,state,disposition,reserved_at,due_at,COALESCE(started_at,''),final_seq,final_digest FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest).Scan(&c.AgentID, &c.SessionID, &c.Epoch, &c.Generation, &c.UserSeq, &c.UserDigest, &c.GoalRevision, &c.Origin, &c.State, &c.Disposition, &c.ReservedAt, &c.DueAt, &c.StartedAt, &c.FinalSeq, &c.FinalDigest)
 	return c, err
 }
 
@@ -55,7 +55,7 @@ func (s *Store) LatestReservedEmbeddedGoalContinuation(ctx context.Context, b Em
 	var k EmbeddedGoalEvaluationKey
 	var finalSeq sql.NullInt64
 	var finalDigest sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT c.user_seq, c.user_digest, c.goal_revision, e.final_seq, e.final_digest FROM embedded_goal_continuations c JOIN embedded_goal_evaluations e ON e.agent_id=c.agent_id AND e.session_id=c.session_id AND e.epoch=c.epoch AND e.user_seq=c.user_seq AND e.user_digest=c.user_digest AND e.goal_revision=c.goal_revision WHERE c.agent_id=? AND c.session_id=? AND c.epoch=? AND c.state='reserved' AND EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=c.agent_id AND x.session_id=c.session_id AND x.epoch=c.epoch AND x.generation=c.generation AND x.user_seq=c.user_seq AND x.user_digest=c.user_digest AND x.goal_revision=c.goal_revision) AND c.retention_expires_at_ms>MAX((SELECT evidence_expired_through_ms+2592000000 FROM embedded_sessions s WHERE s.agent_id=c.agent_id AND s.session_id=c.session_id AND s.epoch=c.epoch AND s.generation=c.generation),?) ORDER BY c.user_seq DESC LIMIT 1`, b.AgentID, b.SessionID, b.Epoch, s.clock.Now().UnixMilli()).Scan(&k.UserSeq, &k.UserDigest, &k.GoalRevision, &finalSeq, &finalDigest)
+	err := s.db.QueryRowContext(ctx, `SELECT c.user_seq, c.user_digest, c.goal_revision, c.final_seq, c.final_digest FROM embedded_goal_continuations c WHERE c.agent_id=? AND c.session_id=? AND c.epoch=? AND c.state='reserved' AND EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=c.agent_id AND x.session_id=c.session_id AND x.epoch=c.epoch AND x.generation=c.generation AND x.user_seq=c.user_seq AND x.user_digest=c.user_digest AND x.goal_revision=c.goal_revision AND x.final_seq=c.final_seq AND x.final_digest=c.final_digest) AND c.retention_expires_at_ms>MAX((SELECT evidence_expired_through_ms+2592000000 FROM embedded_sessions s WHERE s.agent_id=c.agent_id AND s.session_id=c.session_id AND s.epoch=c.epoch AND s.generation=c.generation),?) ORDER BY c.user_seq DESC, c.final_seq DESC LIMIT 1`, b.AgentID, b.SessionID, b.Epoch, s.clock.Now().UnixMilli()).Scan(&k.UserSeq, &k.UserDigest, &k.GoalRevision, &finalSeq, &finalDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return k, false, nil
 	}
@@ -199,7 +199,7 @@ func (s *Store) reserveEmbeddedGoalContinuation(ctx context.Context, e EmbeddedG
 	}
 	b := EmbeddedBinding{AgentID: e.AgentID, SessionID: e.SessionID, Epoch: e.Epoch, Generation: e.Generation, OwnerToken: e.OwnerToken}
 	var existing int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, e.AgentID, e.SessionID, e.Epoch, e.UserSeq, e.UserDigest, e.GoalRevision).Scan(&existing); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, e.AgentID, e.SessionID, e.Epoch, e.UserSeq, e.UserDigest, e.GoalRevision, e.FinalSeq, e.FinalDigest).Scan(&existing); err != nil {
 		return err
 	}
 	if existing > 0 {
@@ -308,7 +308,7 @@ func (s *Store) StartEmbeddedGoalContinuation(ctx context.Context, b EmbeddedBin
 			return err
 		}
 		if enabled != 1 || desired != k.GoalRevision || applied != k.GoalRevision || projection != "applied" {
-			_, err = s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='invalidated',disposition='invalidated' WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND state='reserved'`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision)
+			_, err = s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='invalidated',disposition='invalidated' WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=? AND state='reserved'`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest)
 			if err != nil {
 				return err
 			}
@@ -334,7 +334,7 @@ func (s *Store) StartEmbeddedGoalContinuation(ctx context.Context, b EmbeddedBin
 			return err
 		}
 		// Commit started UNKNOWN before provider entry; never replace k.
-		result, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='started',disposition='unknown',started_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=? AND state='reserved' AND (due_at IS NULL OR due_at<=?)`, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, k.UserSeq, k.UserDigest, k.GoalRevision, now)
+		result, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='started',disposition='unknown',started_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=? AND state='reserved' AND (due_at IS NULL OR due_at<=?)`, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest, now)
 		if err != nil {
 			return err
 		}

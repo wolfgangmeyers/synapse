@@ -114,7 +114,7 @@ func (s *Store) embeddedGoalEvaluationGate(ctx context.Context, b EmbeddedBindin
 
 func (s *Store) embeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalEvaluation, error) {
 	var e EmbeddedGoalEvaluation
-	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,reason,claimed_at,COALESCE(completed_at,'') FROM embedded_goal_evaluations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&e.AgentID, &e.SessionID, &e.Epoch, &e.Generation, &e.UserSeq, &e.UserDigest, &e.GoalRevision, &e.OwnerToken, &e.FinalSeq, &e.FinalDigest, &e.State, &e.Reason, &e.ClaimedAt, &e.CompletedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,reason,claimed_at,COALESCE(completed_at,'') FROM embedded_goal_evaluations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest).Scan(&e.AgentID, &e.SessionID, &e.Epoch, &e.Generation, &e.UserSeq, &e.UserDigest, &e.GoalRevision, &e.OwnerToken, &e.FinalSeq, &e.FinalDigest, &e.State, &e.Reason, &e.ClaimedAt, &e.CompletedAt)
 	return e, err
 }
 
@@ -398,7 +398,7 @@ func (s *Store) RecordEmbeddedGoalEvaluationActivity(ctx context.Context, b Embe
 			return errors.New("superseded embedded evaluation activity")
 		}
 		var published int
-		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_goal_activity_publications WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&published)
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_goal_activity_publications WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest).Scan(&published)
 		if err == nil {
 			return nil
 		}
@@ -418,7 +418,7 @@ func (s *Store) RecordEmbeddedGoalEvaluationActivity(ctx context.Context, b Embe
 				return err
 			}
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason) VALUES (?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, eventKey, reason)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,final_seq,final_digest,event_key,reason) VALUES (?,?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest, eventKey, reason)
 		return err
 	})
 	return entry, err
