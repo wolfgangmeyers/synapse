@@ -1,4 +1,4 @@
-import { isClaudeCodeAgent } from "../state/agent-projection";
+import { isClaudeCodeAgent, isAntigravityAgent } from "../state/agent-projection";
 import { useState, useRef, useEffect, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, SubagentSummary } from "../state/agent-projection";
@@ -106,7 +106,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
           {hasGoal ? onGoal ? <button type="button" className="goal-indicator" title="Set goal" aria-label="Set goal" onClick={(event) => { stopActionPropagation(event); onGoal(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-flag" aria-hidden="true" /></button> : <span className="goal-indicator" title="Goal active" aria-label="Goal active"><i className="fa-solid fa-flag" aria-hidden="true" /></span> : null}
           {hasReminders ? onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : <span className="reminder-row-indicator" title={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`} aria-label={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`}><i className="fa-solid fa-clock" aria-hidden="true" /></span> : null}
           {arrival ? <span className="agent-row-arrival" onClick={(event) => event.stopPropagation()}><ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /></span> : null}
-          <strong>{humanName(agent.agent_id)}</strong>{agent.urgent === true ? <span className="agent-row-urgent-badge">Urgent</span> : null}{agent.source !== "router-managed" ? <small className="agent-source">tmux</small> : isClaudeCodeAgent(agent) ? <small className="agent-source">claude</small> : null}
+          <strong>{humanName(agent.agent_id)}</strong>{agent.urgent === true ? <span className="agent-row-urgent-badge">Urgent</span> : null}{agent.source !== "router-managed" ? <small className="agent-source">tmux</small> : isClaudeCodeAgent(agent) ? <small className="agent-source">claude</small> : isAntigravityAgent(agent) ? <small className="agent-source">antigravity</small> : null}
         </span>
         {(showSubagentBadge || agent.workflow_state || agent.blocked) ? (
           <span className="agent-meta-line">

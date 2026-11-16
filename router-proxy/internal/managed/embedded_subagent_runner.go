@@ -383,9 +383,9 @@ func (m *Manager) drainQueueLocked() {
 }
 
 func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Model, agent.StreamFn, error) {
-	// Claude children use the scoped process path, never the Pi resolver.
-	if record.SelectedModel.Provider == claudeCodeProvider {
-		return nil, nil, errors.New("Claude managed child execution requires the scoped child process bridge")
+	// CLI children use the scoped process path, never the Pi resolver.
+	if isCLIProvider(record.SelectedModel.Provider) {
+		return nil, nil, errors.New("CLI managed child execution requires the scoped child process bridge")
 	}
 	if record.SelectedModel.Provider == "" || record.SelectedModel.ID == "" {
 		record.SelectedModel.Provider = "google-vertex"
@@ -566,7 +566,7 @@ func (m *Manager) admitSubagent(ctx context.Context, task *subagentTask) (*Subag
 		m.finalizeQueuedTask(task, "failed", err.Error())
 		return nil, err
 	}
-	task.claude = child.SelectedModel.Provider == claudeCodeProvider
+	task.claude = isCLIProvider(child.SelectedModel.Provider)
 	m.subagentsMu.Lock()
 	if m.runCtx.Err() != nil {
 		m.subagentsMu.Unlock()
@@ -981,7 +981,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		}
 	}
 
-	if childAgent.SelectedModel.Provider == claudeCodeProvider {
+	if isCLIProvider(childAgent.SelectedModel.Provider) {
 		terminalStatus, resultText, errorMsg = m.runClaudeSubagent(taskCtx, task, childBinding, *childAgent)
 		task.mu.Lock()
 		terminalStatus, resultText, errorMsg = settleClaudeChildOutcome(terminalStatus, resultText, errorMsg, task.stopped, task.inactivityTimedOut, taskCtx.Err() == context.DeadlineExceeded)
@@ -1826,6 +1826,9 @@ func (m *Manager) runClaudeSubagent(ctx context.Context, task *subagentTask, bin
 		return "failed", "", "Claude child already started; automatic resume is unavailable and prior effects may have occurred"
 	}
 	cfg := ClaudeCodeProcessConfig{Cwd: child.Cwd, SessionID: claudeCodeSessionID(binding.SessionID), Model: child.SelectedModel.ID, ChildAuthority: true, MCPConfigFile: path, SystemPromptFile: promptPath, OrphanRoot: m.config.SessionRoot}
+	if child.SelectedModel.Provider == antigravityProvider {
+		cfg.Adapter = NewAntigravityAdapter("", nil)
+	}
 	m.fenceClaudeChildTaskConfig(&cfg, task)
 	if err := check(ctx); err != nil {
 		return "failed", "", err.Error()

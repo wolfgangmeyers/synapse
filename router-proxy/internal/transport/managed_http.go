@@ -968,6 +968,14 @@ func managedRestartError(err error) error {
 	if errors.As(err, &cli) {
 		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
 	}
+	var agyFenced *managed.AntigravityAdmissionFencedError
+	if errors.As(err, &agyFenced) {
+		return &managedHTTPError{503, "ANTIGRAVITY_ADMISSION_FENCED", agyFenced.Error()}
+	}
+	var agyCli *managed.AntigravityUnavailableError
+	if errors.As(err, &agyCli) {
+		return &managedHTTPError{422, "ANTIGRAVITY_UNAVAILABLE", agyCli.Error()}
+	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
 	}
@@ -1127,6 +1135,14 @@ func managedLaunchError(err error) error {
 	var cli *managed.ClaudeUnavailableError
 	if errors.As(err, &cli) {
 		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
+	}
+	var agyFenced *managed.AntigravityAdmissionFencedError
+	if errors.As(err, &agyFenced) {
+		return &managedHTTPError{503, "ANTIGRAVITY_ADMISSION_FENCED", agyFenced.Error()}
+	}
+	var agyCli *managed.AntigravityUnavailableError
+	if errors.As(err, &agyCli) {
+		return &managedHTTPError{422, "ANTIGRAVITY_UNAVAILABLE", agyCli.Error()}
 	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}

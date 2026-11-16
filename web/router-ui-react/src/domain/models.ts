@@ -37,10 +37,41 @@ export function mergeAgentModelProjection(agents: ModelAgent[], peer: string, in
 export function modelControlStatusTitle(accepted: unknown, errorCode?: string): string { if (accepted === true) return "Model changed"; return REJECTIONS.has(errorCode ?? "") ? "Model change rejected" : "Model change not confirmed"; }
 export function isConfirmedModelRejection(errorCode: unknown): boolean { return typeof errorCode === "string" && REJECTIONS.has(errorCode); }
 
-// Claude is an embedded turn engine, not a provider-auth integration.
+export function isAntigravityModel(model: unknown): boolean {
+  if (!model) return false;
+  if (typeof model === "string") {
+    return model.startsWith("antigravity/") || model === "antigravity";
+  }
+  const summary = normalizeModelSummary(model);
+  if (summary) {
+    return summary.provider === "antigravity" || summary.id.startsWith("antigravity/");
+  }
+  return false;
+}
+
+function resolveModelString(model: unknown): string | null | undefined {
+  if (typeof model === "string") return model;
+  const summary = normalizeModelSummary(model);
+  if (summary) {
+    if (summary.provider === "antigravity") {
+      return summary.id.startsWith("antigravity/") ? summary.id : `antigravity/${summary.id}`;
+    }
+    return summary.id;
+  }
+  return undefined;
+}
+
 export function isClaudeCodeModel(model: unknown): boolean {
   return normalizeModelSummary(model)?.provider === "claude-code";
 }
-export function sameModelEngine(left: unknown, right: ModelSummary): boolean {
-  return isClaudeCodeModel(left) === isClaudeCodeModel(right);
+
+// sameModelEngine determines whether two models share the same execution engine.
+// Cross-engine model switching (e.g. switching between Pi, Claude Code, and Antigravity)
+// is strictly disallowed within an active worker session because each engine maintains
+// incompatible conversation state, tool calling protocols, and subagent process lifecycles.
+// Users must launch a new worker rather than switch engines mid-session.
+export function sameModelEngine(modelA: unknown, modelB: unknown): boolean {
+  const aStr = resolveModelString(modelA);
+  const bStr = resolveModelString(modelB);
+  return isAntigravityModel(aStr) === isAntigravityModel(bStr) && isClaudeCodeModel(modelA) === isClaudeCodeModel(modelB);
 }

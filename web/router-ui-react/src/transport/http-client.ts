@@ -416,11 +416,11 @@ function providerModel(value: unknown): value is ProviderModel {
   const nameValid = typeof item?.name === "string" ? nonEmptyString(item.name) : true;
   return !!item && providerName(item.provider) && nonEmptyString(item.id) && nameValid;
 }
-// Catalog choices include a local engine without adding an auth provider.
+// Catalog choices include local engines (claude-code, antigravity) without adding an auth provider.
 function modelChoice(value: unknown): value is ProviderModel {
   if (providerModel(value)) return true;
   const item = recordValue(value);
-  return !!item && item.provider === "claude-code" && nonEmptyString(item.id)
+  return !!item && (item.provider === "claude-code" || item.provider === "antigravity") && nonEmptyString(item.id)
     && (typeof item.name !== "string" || nonEmptyString(item.name));
 }
 function providerStatus(value: unknown): value is ProviderStatus {

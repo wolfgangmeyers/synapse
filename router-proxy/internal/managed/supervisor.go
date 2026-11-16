@@ -840,6 +840,18 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 			return LaunchResult{}, &ClaudeUnavailableError{Cause: preflightErr}
 		}
 	}
+	if candidate.Provider == antigravityProvider {
+		if _, modelErr := antigravityModel(candidate.ID); modelErr != nil {
+			return LaunchResult{}, modelErr
+		}
+		if preflightErr := NewAntigravityAdapter("", nil).Preflight(ctx); preflightErr != nil {
+			var fenced *AntigravityAdmissionFencedError
+			if errors.As(preflightErr, &fenced) {
+				return LaunchResult{}, fenced
+			}
+			return LaunchResult{}, &AntigravityUnavailableError{Cause: preflightErr}
+		}
+	}
 	// Embedded selection never derives credential authority from Pi catalog
 	// availability. RPC continues to use the shared catalog unchanged.
 	if request.Runtime == "embedded" && (err == nil || IsModelUnavailable(err)) {
@@ -1883,7 +1895,7 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if err != nil {
 		return RestartResult{}, err
 	}
-	if request.Model != nil && (agent.SelectedModel.Provider == claudeCodeProvider) != (request.Model.Provider == claudeCodeProvider) {
+	if request.Model != nil && engineOf(agent.SelectedModel.Provider) != engineOf(request.Model.Provider) {
 		return RestartResult{}, &EngineSelectionError{Reason: "Cross-engine model changes are not supported; launch a new worker"}
 	}
 	if agent.Runtime == "embedded" && request.Model == nil {
@@ -3580,7 +3592,7 @@ func (m *Manager) Models(ctx context.Context) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	return withClaudeCodeModels(catalog), nil
+	return withAntigravityModels(withClaudeCodeModels(catalog)), nil
 }
 
 func (m *Manager) Agents(ctx context.Context) ([]*store.ManagedAgentRecord, error) {
