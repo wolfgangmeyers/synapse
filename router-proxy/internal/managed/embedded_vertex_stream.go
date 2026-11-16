@@ -65,7 +65,9 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 
 		thinkingCfg := map[string]any{"includeThoughts": true}
 		if opts != nil && (opts.Reasoning == "off" || opts.Reasoning == ai.ThinkingLevel("off")) {
-			if strings.Contains(requestModel.ID, "3.8") || strings.Contains(requestModel.ID, "3.7") || strings.Contains(requestModel.ID, "gemma") {
+			if strings.Contains(requestModel.ID, "gemini-4") {
+				thinkingCfg = map[string]any{"thinkingLevel": "LOW"}
+			} else if strings.Contains(requestModel.ID, "3.8") || strings.Contains(requestModel.ID, "3.7") || strings.Contains(requestModel.ID, "gemma") {
 				thinkingCfg = map[string]any{"thinkingLevel": "MINIMAL"}
 			} else {
 				thinkingCfg = map[string]any{"thinkingBudget": 0}

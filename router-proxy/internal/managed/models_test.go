@@ -107,24 +107,26 @@ func TestResolveModelCanonical(t *testing.T) {
 	}
 	require.Equal(t, "google", catalogGoogle.Provider)
 
-	// 3b. Gemini-4-argon synthesized metadata
-	argonGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "gemini-4-argon"})
-	require.NoError(t, err)
-	require.NotNil(t, argonGoogle)
-	require.Equal(t, "google", argonGoogle.Provider)
-	require.Equal(t, "gemini-4-argon", argonGoogle.ID)
-	require.Equal(t, "google-generative-ai", argonGoogle.Api)
-	require.Equal(t, 1048576, argonGoogle.ContextWindow)
-	require.Equal(t, 65536, argonGoogle.MaxTokens)
+	// 3b. Gemini-4 synthesized metadata (argon, carbon, hydrogen)
+	for _, id := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
+		mGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: id})
+		require.NoError(t, err)
+		require.NotNil(t, mGoogle)
+		require.Equal(t, "google", mGoogle.Provider)
+		require.Equal(t, id, mGoogle.ID)
+		require.Equal(t, "google-generative-ai", mGoogle.Api)
+		require.Equal(t, 1048576, mGoogle.ContextWindow)
+		require.Equal(t, 65536, mGoogle.MaxTokens)
 
-	argonVertex, err := ResolveModel(store.ManagedModel{Provider: "google-vertex", ID: "gemini-4-argon"})
-	require.NoError(t, err)
-	require.NotNil(t, argonVertex)
-	require.Equal(t, "google-vertex", argonVertex.Provider)
-	require.Equal(t, "gemini-4-argon", argonVertex.ID)
-	require.Equal(t, "google-vertex", argonVertex.Api)
-	require.Equal(t, 1048576, argonVertex.ContextWindow)
-	require.Equal(t, 65536, argonVertex.MaxTokens)
+		mVertex, err := ResolveModel(store.ManagedModel{Provider: "google-vertex", ID: id})
+		require.NoError(t, err)
+		require.NotNil(t, mVertex)
+		require.Equal(t, "google-vertex", mVertex.Provider)
+		require.Equal(t, id, mVertex.ID)
+		require.Equal(t, "google-vertex", mVertex.Api)
+		require.Equal(t, 1048576, mVertex.ContextWindow)
+		require.Equal(t, 65536, mVertex.MaxTokens)
+	}
 
 	// 4. Missing model under non-antigravity provider: returns error, does NOT fall back to openai-codex
 	missingGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "nonexistent-model"})

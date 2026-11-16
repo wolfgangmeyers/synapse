@@ -949,6 +949,27 @@ func sanitizeGeminiParameters(v any) any {
 			if geminiRejectedSchemaFields[k] {
 				continue
 			}
+			if k == "type" {
+				if types, ok := child.([]any); ok {
+					hasNull := false
+					var primaryType string
+					for _, item := range types {
+						s, _ := item.(string)
+						if s == "null" {
+							hasNull = true
+						} else if primaryType == "" && s != "" {
+							primaryType = s
+						}
+					}
+					if primaryType != "" {
+						cleaned["type"] = primaryType
+					}
+					if hasNull {
+						cleaned["nullable"] = true
+					}
+					continue
+				}
+			}
 			cleaned[k] = sanitizeGeminiParameters(child)
 		}
 		return cleaned
@@ -1021,7 +1042,9 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 
 		thinkingCfg := map[string]any{"includeThoughts": true}
 		if opts != nil && (opts.Reasoning == "off" || opts.Reasoning == ai.ThinkingLevel("off")) {
-			if strings.Contains(requestModel.ID, "3.8") || strings.Contains(requestModel.ID, "3.7") || strings.Contains(requestModel.ID, "gemma") {
+			if strings.Contains(requestModel.ID, "gemini-4") {
+				thinkingCfg = map[string]any{"thinkingLevel": "LOW"}
+			} else if strings.Contains(requestModel.ID, "3.8") || strings.Contains(requestModel.ID, "3.7") || strings.Contains(requestModel.ID, "gemma") {
 				thinkingCfg = map[string]any{"thinkingLevel": "MINIMAL"}
 			} else {
 				thinkingCfg = map[string]any{"thinkingBudget": 0}

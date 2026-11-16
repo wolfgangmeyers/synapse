@@ -251,6 +251,10 @@ test("Google API key login preserves GEMINI_API_KEY and exposes Gemini developer
   assert.equal(googleStatus.authenticated, true);
   assert.equal(googleStatus.status, "authenticated");
   assert.ok(terminal.models.some((m) => m.provider === "google"));
+  for (const modelId of ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"]) {
+    const m = terminal.models.find((m) => m.provider === "google" && m.id === modelId);
+    assert.ok(m, `google model ${modelId} must be present`);
+  }
 
   // Check auth.json contents
   const stored = JSON.parse(await readFile(authPath, "utf8"));
@@ -370,6 +374,10 @@ test("Vertex AI ADC login succeeds using host Application Default Credentials wi
   assert.equal(vertexStatus.authenticated, true);
   assert.equal(vertexStatus.status, "authenticated");
   assert.ok(terminal.models.some((m) => m.provider === "google-vertex"));
+  for (const modelId of ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"]) {
+    const m = terminal.models.find((m) => m.provider === "google-vertex" && m.id === modelId);
+    assert.ok(m, `google-vertex model ${modelId} must be present`);
+  }
 
   const stored = JSON.parse(await readFile(authPath, "utf8"));
   assert.deepEqual(stored["google-vertex"], {
@@ -867,4 +875,50 @@ test("Antigravity removal rejects login and logout without credential mutation",
   assert.deepEqual(snapshot.providers.map(p => p.provider).sort(), ["cursor", "google", "google-vertex", "openai-codex"]);
   assert.equal(snapshot.models.some(m => m.provider === "antigravity"), false);
   assert.equal(await readFile(authPath, "utf8"), credentials);
+});
+
+test("Google and Vertex providers register Gemini 4 models (argon, carbon, hydrogen) with full configuration", async () => {
+  const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+  const { useRouterOwnedCodex, registerGoogleProvider, registerVertexAdcProvider } = await import("./providers.mjs");
+
+  const home = await mkdtemp(join(tmpdir(), "gemini4-models-"));
+  const authPath = join(home, "auth.json");
+  await writeFile(authPath, "{}", { mode: 0o600 });
+
+  const runtime = await ModelRuntime.create({
+    authPath,
+    modelsPath: null,
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+  });
+  useRouterOwnedCodex(runtime);
+  registerGoogleProvider(runtime);
+  registerVertexAdcProvider(runtime);
+
+  const expectedGemini4 = [
+    { id: "gemini-4-argon", name: "Gemini 4 Argon" },
+    { id: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+    { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+  ];
+
+  for (const providerId of ["google", "google-vertex"]) {
+    const provider = runtime.getProvider(providerId);
+    assert.ok(provider, `provider ${providerId} must exist`);
+    const models = provider.getModels ? provider.getModels() : provider.models;
+    assert.ok(Array.isArray(models), `models for ${providerId} must be an array`);
+
+    for (const expected of expectedGemini4) {
+      const model = models.find((m) => m?.id === expected.id);
+      assert.ok(model, `${providerId} must contain ${expected.id}`);
+      assert.equal(model.name, expected.name);
+      assert.equal(model.provider, providerId);
+      assert.equal(model.contextWindow, 1048576);
+      assert.equal(model.maxTokens, 65536);
+      assert.equal(model.reasoning, true);
+      assert.equal(model.thinkingLevelMap.low, "low");
+      assert.equal(model.thinkingLevelMap.medium, "medium");
+      assert.equal(model.thinkingLevelMap.high, "high");
+      assert.deepEqual(model.cost, { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
+    }
+  }
 });

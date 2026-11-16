@@ -327,3 +327,23 @@ func TestManagedHistoryPresentationAcceptsLongSubagentIDsInFromAndTo(t *testing.
 	require.Equal(t, childID, entry2.Presentation.From)
 	require.Equal(t, parentID, entry2.Presentation.To)
 }
+
+func TestManagedHistoryMessageBoundedTo512Bytes(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	// A message exceeding 512 bytes must be cleanly bounded instead of failing the sqlite CHECK constraint
+	longMessage := strings.Repeat("A very long error message that goes on and on and contains lots of details. ", 20)
+	require.Greater(t, len(longMessage), 512)
+
+	entry, err := durable.RecordManagedCompleteHistory(ctx, "worker", "managed_lifecycle", "info", longMessage, "long-msg-1")
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(entry.Message), 512)
+	require.True(t, strings.HasSuffix(entry.Message, "..."))
+
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, entry.Message, page.Entries[0].Message)
+}
+
