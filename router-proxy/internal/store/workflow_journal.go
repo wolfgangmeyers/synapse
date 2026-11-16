@@ -166,14 +166,31 @@ func (s *Store) prepareWorkflowJournalMigration132Tx(ctx context.Context) error 
 			return nil // Already the new journal schema; CREATE IF NOT EXISTS is safe.
 		}
 	}
-	legacy := []string{"run_id", "sequence", "type", "state_id", "entry_id", "exit", "note", "at"}
-	if len(columns) != len(legacy) {
-		return fmt.Errorf("workflow_journal_events has an unknown schema; refusing to overwrite it")
-	}
-	for _, column := range legacy {
-		if !columns[column] {
-			return fmt.Errorf("workflow_journal_events has an unknown schema; refusing to overwrite it")
+	legacy1 := []string{"run_id", "sequence", "type", "state_id", "entry_id", "exit", "note", "at"}
+	legacy2 := []string{"run_id", "sequence", "semantic_key", "event_type", "occurred_at", "state_id", "entry_id", "exit_name", "note", "safe_outcome_json"}
+
+	isLegacy1 := len(columns) == len(legacy1)
+	if isLegacy1 {
+		for _, column := range legacy1 {
+			if !columns[column] {
+				isLegacy1 = false
+				break
+			}
 		}
+	}
+
+	isLegacy2 := len(columns) == len(legacy2)
+	if isLegacy2 {
+		for _, column := range legacy2 {
+			if !columns[column] {
+				isLegacy2 = false
+				break
+			}
+		}
+	}
+
+	if !isLegacy1 && !isLegacy2 {
+		return fmt.Errorf("workflow_journal_events has an unknown schema; refusing to overwrite it")
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name='workflow_journal_events_pre132'`).Scan(&exists); err != nil {
 		return err

@@ -70,7 +70,7 @@ func TestWorkflowJournalMigration132ActiveBindingRestart(t *testing.T) {
 
 func TestWorkflowJournalMigration132NameCollision(t *testing.T) {
 	ctx := context.Background()
-	for _, kind := range []string{"legacy", "compatible", "unknown"} {
+	for _, kind := range []string{"legacy", "legacy2", "compatible", "unknown"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "router.db")
 			migrations := DefaultMigrations()
@@ -80,6 +80,8 @@ func TestWorkflowJournalMigration132NameCollision(t *testing.T) {
 			switch kind {
 			case "legacy":
 				create = `CREATE TABLE workflow_journal_events (run_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, state_id TEXT, entry_id TEXT, exit TEXT, note TEXT, at TEXT NOT NULL); INSERT INTO workflow_journal_events(run_id,sequence,type,note,at) VALUES('old',1,'run_launched','saved','2026-01-01');`
+			case "legacy2":
+				create = `CREATE TABLE workflow_journal_events (run_id TEXT NOT NULL, sequence INTEGER NOT NULL, semantic_key TEXT, event_type TEXT, occurred_at TEXT NOT NULL, state_id TEXT, entry_id TEXT, exit_name TEXT, note TEXT, safe_outcome_json TEXT); INSERT INTO workflow_journal_events(run_id,sequence,semantic_key,event_type,occurred_at,note) VALUES('old2',1,'sem_key','run_launched','2026-01-01','saved2');`
 			case "compatible":
 				create = `CREATE TABLE workflow_journal_events (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,sequence INTEGER NOT NULL,kind TEXT NOT NULL,occurred_at TEXT NOT NULL,workflow_id TEXT NOT NULL DEFAULT '',workflow_name TEXT NOT NULL DEFAULT '',state_id TEXT NOT NULL DEFAULT '',state_name TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT '',text TEXT NOT NULL DEFAULT '',target_event_id TEXT NOT NULL DEFAULT '',UNIQUE(run_id,sequence));`
 			case "unknown":
@@ -112,6 +114,11 @@ func TestWorkflowJournalMigration132NameCollision(t *testing.T) {
 				var note string
 				require.NoError(t, after.db.QueryRowContext(ctx, `SELECT note FROM workflow_journal_events_pre132 WHERE run_id='old'`).Scan(&note))
 				require.Equal(t, "saved", note)
+			}
+			if kind == "legacy2" {
+				var note string
+				require.NoError(t, after.db.QueryRowContext(ctx, `SELECT note FROM workflow_journal_events_pre132 WHERE run_id='old2'`).Scan(&note))
+				require.Equal(t, "saved2", note)
 			}
 			var column string
 			require.NoError(t, after.db.QueryRowContext(ctx, `SELECT name FROM pragma_table_info('workflow_journal_events') WHERE name='kind'`).Scan(&column))
