@@ -9,12 +9,26 @@ import (
 
 // SettleClaudeUnsubmittedMail records only a fixed diagnostic, never provider output.
 // The caller must have joined process and persistence cleanup before calling.
-func (s *Store) SettleClaudeUnsubmittedMail(ctx context.Context, b EmbeddedBinding, expected *EmbeddedMailAttempt) (ManagedHistoryEntry, error) {
+func (s *Store) SettleClaudeUnsubmittedMail(ctx context.Context, b EmbeddedBinding, expected *EmbeddedMailAttempt, categories ...string) (ManagedHistoryEntry, error) {
+	return s.settleClaudeUnsubmittedMail(ctx, b, expected, false, categories...)
+}
+
+// SettleClaudeStartRetry permits prompt settlement only for a confirmed permanent
+// preflight failure; callers must establish that fact and complete cleanup.
+func (s *Store) SettleClaudeStartRetry(ctx context.Context, b EmbeddedBinding, expected *EmbeddedMailAttempt, prompt bool, categories ...string) (ManagedHistoryEntry, error) {
+	return s.settleClaudeUnsubmittedMail(ctx, b, expected, prompt, categories...)
+}
+
+func (s *Store) settleClaudeUnsubmittedMail(ctx context.Context, b EmbeddedBinding, expected *EmbeddedMailAttempt, prompt bool, categories ...string) (ManagedHistoryEntry, error) {
 	var entry ManagedHistoryEntry
 	if expected == nil || expected.AttemptID == "" {
 		return entry, errors.New("missing attempt")
 	}
-	text := "Claude could not start or acquire a process. Check the Claude CLI and run claude auth status on the router host, then retry the message."
+	category := "unknown"
+	if len(categories) > 0 {
+		category = categories[0]
+	}
+	text := claudeStartHistoryText(category)
 	presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "error", Summary: "Claude could not start"}
 	encoded, err := managedHistoryPresentationJSON(presentation)
 	if err != nil {
@@ -50,6 +64,21 @@ func (s *Store) SettleClaudeUnsubmittedMail(ctx context.Context, b EmbeddedBindi
 			if _, err = s.embeddedMailAcceptedTx(ctx, a, true); err != nil {
 				return err
 			}
+		}
+		// Read and gate retry state in the same write transaction as settlement.
+		// The durable category wins over caller input on recovery.
+		retry, retryErr := s.claudeRetryRead(ctx, b, a)
+		if retryErr != nil && !errors.Is(retryErr, sql.ErrNoRows) {
+			return retryErr
+		}
+		if retryErr == nil {
+			if retry.InFlight {
+				return ErrClaudeRetryInFlight
+			}
+			if !retry.PromptSettlement && s.clock.Now().Before(retry.Deadline) {
+				return ErrClaudeRetryNotDue
+			}
+			text = claudeStartHistoryText(retry.Category)
 		}
 		key := fmt.Sprintf("claude-unsubmitted:%s", embeddedHash([]byte(a.MessageID), []byte(a.MessageIncarnationID)))
 		entry, err = s.recordManagedCompleteHistoryStrictTx(ctx, b.AgentID, "managed_message", "error", text, key, encoded, presentation, managedHistoryDetails{MessageContent: &text})

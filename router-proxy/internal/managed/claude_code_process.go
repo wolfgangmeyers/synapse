@@ -151,25 +151,44 @@ func resolveClaudeCodeBinary(cfg ClaudeCodeProcessConfig, env []string) (string,
 	}
 	if candidate != "" {
 		if strings.ContainsRune(candidate, os.PathSeparator) {
-			return executable(candidate)
+			p, err := executable(candidate)
+			if errors.Is(err, os.ErrNotExist) {
+				return "", errors.Join(errClaudeExecutableMissing, err)
+			}
+			return p, err
 		}
+		var ambiguous error
 		for _, dir := range filepath.SplitList(claudeCodeEnvValue(env, "PATH")) {
 			if p, e := executable(filepath.Join(dir, candidate)); e == nil {
 				return p, nil
+			} else if !errors.Is(e, os.ErrNotExist) && ambiguous == nil {
+				ambiguous = e
 			}
 		}
-		return "", fmt.Errorf("Claude executable %q not found", candidate)
+		if ambiguous != nil {
+			return "", ambiguous
+		}
+		return "", fmt.Errorf("Claude executable %q not found: %w", candidate, errors.Join(errClaudeExecutableMissing, os.ErrNotExist))
 	}
+	var ambiguous error
 	for _, dir := range filepath.SplitList(claudeCodeEnvValue(env, "PATH")) {
 		if p, e := executable(filepath.Join(dir, "claude")); e == nil {
 			return p, nil
+		} else if !errors.Is(e, os.ErrNotExist) && ambiguous == nil {
+			ambiguous = e
 		}
 	}
 	home := claudeCodeEnvValue(env, "HOME")
 	if home != "" {
-		return executable(filepath.Join(home, ".local", "bin", "claude"))
+		p, err := executable(filepath.Join(home, ".local", "bin", "claude"))
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			return p, err
+		}
 	}
-	return "", errors.New("Claude executable not found")
+	if ambiguous != nil {
+		return "", ambiguous
+	}
+	return "", fmt.Errorf("Claude executable not found: %w", errors.Join(errClaudeExecutableMissing, os.ErrNotExist))
 }
 
 // PreflightClaudeCode runs local `auth status --json` with a five-second limit,
@@ -185,7 +204,11 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 	env := claudeCodeEnvironment(cfg.Environment)
 	bin, err := resolveClaudeCodeBinary(cfg, env)
 	if err != nil {
-		return "", fmt.Errorf("install Claude CLI and sign in on the host: %w", err)
+		category := claudeStartUnknown
+		if errors.Is(err, os.ErrNotExist) {
+			category = claudeStartSpawn
+		}
+		return "", claudeStartCategorize(category, fmt.Errorf("install Claude CLI and sign in on the host: %w", err))
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -217,8 +240,20 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 	var status struct {
 		LoggedIn *bool `json:"loggedIn"`
 	}
-	if err != nil || out.overflow || json.Unmarshal(out.data, &status) != nil || status.LoggedIn == nil || !*status.LoggedIn {
-		return "", errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host")
+	if err != nil {
+		return "", fmt.Errorf("Claude CLI auth status failed; check installation and sign in on the host: %w", err)
+	}
+	if out.overflow {
+		return "", errors.New("Claude CLI auth status output exceeded the limit; check installation and sign in on the host")
+	}
+	if err := json.Unmarshal(out.data, &status); err != nil {
+		return "", fmt.Errorf("Claude CLI auth status returned invalid JSON; check installation and sign in on the host: %w", err)
+	}
+	if status.LoggedIn == nil {
+		return "", errors.New("Claude CLI auth status omitted loggedIn; check installation and sign in on the host")
+	}
+	if !*status.LoggedIn {
+		return "", claudeStartCategorize(claudeStartAuth, errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host"))
 	}
 	return bin, nil
 }
@@ -318,7 +353,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		stderr.Close()
 		outw.Close()
 		errw.Close()
-		return nil, err
+		return nil, claudeStartCategorize(claudeStartSpawn, err)
 	}
 	_ = cmd.ExtraFiles[0].Close()
 	var orphanPath string
