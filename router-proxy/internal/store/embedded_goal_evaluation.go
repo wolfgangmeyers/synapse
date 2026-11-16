@@ -114,7 +114,7 @@ func (s *Store) embeddedGoalEvaluationGate(ctx context.Context, b EmbeddedBindin
 
 func (s *Store) embeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalEvaluation, error) {
 	var e EmbeddedGoalEvaluation
-	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,reason,claimed_at,COALESCE(completed_at,'') FROM embedded_goal_evaluations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&e.AgentID, &e.SessionID, &e.Epoch, &e.Generation, &e.UserSeq, &e.UserDigest, &e.GoalRevision, &e.OwnerToken, &e.FinalSeq, &e.FinalDigest, &e.State, &e.Reason, &e.ClaimedAt, &e.CompletedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,reason,claimed_at,COALESCE(completed_at,'') FROM embedded_goal_evaluations WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest).Scan(&e.AgentID, &e.SessionID, &e.Epoch, &e.Generation, &e.UserSeq, &e.UserDigest, &e.GoalRevision, &e.OwnerToken, &e.FinalSeq, &e.FinalDigest, &e.State, &e.Reason, &e.ClaimedAt, &e.CompletedAt)
 	return e, err
 }
 
@@ -155,7 +155,11 @@ func (s *Store) ClaimEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBindi
 			return err
 		}
 		e = EmbeddedGoalEvaluation{EmbeddedGoalEvaluationKey: k, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, OwnerToken: b.OwnerToken, State: EmbeddedGoalEvaluationUnknown, ClaimedAt: formatTimestamp(s.clock.Now())}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_evaluations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,claimed_at) VALUES(?,?,?,?,?,?,?,?,?,?,'UNKNOWN',?)`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.OwnerToken, e.FinalSeq, e.FinalDigest, e.ClaimedAt)
+		var admittedAt int64
+		if err := s.db.QueryRowContext(ctx, `SELECT retention_admitted_at_ms FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=? AND digest=? AND kind='assistant'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, k.FinalSeq, k.FinalDigest).Scan(&admittedAt); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_evaluations(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision,owner_token,final_seq,final_digest,state,claimed_at,retention_basis_ms) VALUES(?,?,?,?,?,?,?,?,?,?,'UNKNOWN',?,?)`, e.AgentID, e.SessionID, e.Epoch, e.Generation, e.UserSeq, e.UserDigest, e.GoalRevision, e.OwnerToken, e.FinalSeq, e.FinalDigest, e.ClaimedAt, admittedAt)
 		claimed = err == nil
 		return err
 	})
@@ -394,7 +398,7 @@ func (s *Store) RecordEmbeddedGoalEvaluationActivity(ctx context.Context, b Embe
 			return errors.New("superseded embedded evaluation activity")
 		}
 		var published int
-		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_goal_activity_publications WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision).Scan(&published)
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_goal_activity_publications WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=? AND final_seq=? AND final_digest=?`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest).Scan(&published)
 		if err == nil {
 			return nil
 		}
@@ -414,7 +418,7 @@ func (s *Store) RecordEmbeddedGoalEvaluationActivity(ctx context.Context, b Embe
 				return err
 			}
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,event_key,reason) VALUES (?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, eventKey, reason)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_activity_publications(agent_id,session_id,epoch,user_seq,user_digest,goal_revision,final_seq,final_digest,event_key,reason) VALUES (?,?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, k.UserSeq, k.UserDigest, k.GoalRevision, k.FinalSeq, k.FinalDigest, eventKey, reason)
 		return err
 	})
 	return entry, err

@@ -182,6 +182,12 @@ type managedAgentLane struct {
 	activePersistence                 *embeddedPersistence
 	claudeRestartGeneration           atomic.Uint64
 	consecutiveContinuations          atomic.Int64
+	workflowAccountingMu              sync.Mutex
+	workflowUnanswered                atomic.Int64
+	workflowNudgeGeneration           uint64
+	workflowNudgeDispatched           bool
+	workflowNudgeResponded            bool
+	workflowCapWake                   func()
 	goalNextAttempt                   time.Time // lane.serial-owned
 	goalOwnerInvalid                  bool      // lane.serial-owned
 	consecutiveEmptyTurns             atomic.Int64

@@ -197,6 +197,7 @@ type embeddedPersistence struct {
 	toolCompanionTexts       map[string]string
 	source                   string
 	msgID                    string
+	continuationKey          *store.EmbeddedGoalEvaluationKey
 }
 
 func (p *embeddedPersistence) hasSteerAttempt(messageID string) bool {
