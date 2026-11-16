@@ -119,25 +119,46 @@ func (s StoreCatalogSource) Catalog(ctx context.Context) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
+
+	var customModels []Model
+	if activeCustoms, err := s.Store.ListActiveCustomModels(ctx); err == nil && len(activeCustoms) > 0 {
+		for _, m := range activeCustoms {
+			provID := CanonicalCustomProviderID(m.ProviderID)
+			dispName := m.DisplayName
+			if dispName == "" {
+				dispName = m.ID
+			}
+			customModels = append(customModels, Model{
+				Provider:      provID,
+				ID:            m.ID,
+				Name:          dispName,
+				Available:     true,
+				ContextWindow: m.ContextWindow,
+			})
+		}
+	}
+
 	// Once provider orchestration has committed models, the router's durable
 	// catalog is launch truth. A compatibility helper is used only by older test
 	// seams; production passes no helper and therefore cannot launch from a
 	// signed-out migration row.
 	if len(persisted.Providers) > 0 && (len(persisted.Models) > 0 || s.Helper == nil) {
-		models := make([]Model, 0, len(persisted.Models))
+		models := make([]Model, 0, len(persisted.Models)+len(customModels))
 		for _, model := range persisted.Models {
 			models = append(models, Model{Provider: model.Provider, ID: model.ID, Name: model.Name, Available: model.Available})
 		}
+		models = append(models, customModels...)
 		return withAntigravityModels(withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: models})), nil
 	}
 	if s.Helper == nil {
-		return withAntigravityModels(withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}})), nil
+		return withAntigravityModels(withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: customModels})), nil
 	}
 	catalog, err := s.Helper.Catalog(ctx)
 	if err != nil {
 		return Catalog{}, err
 	}
 	catalog.AuthRevision = persisted.AuthRevision
+	catalog.Models = append(catalog.Models, customModels...)
 	return withAntigravityModels(withClaudeCodeModels(catalog)), nil
 }
 
@@ -167,7 +188,16 @@ func CatalogFromModels(models ...Model) ModelSource {
 
 // ResolveModel resolves supported selections without cross-provider fallback.
 func ResolveModel(saved store.ManagedModel) (*ai.Model, error) {
-	if !validProviderAuthProvider(saved.Provider) || saved.ID == "" {
+	if saved.ID == "" {
+		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
+	}
+	if IsCustomProvider(saved.Provider) {
+		if candidate := ai.GetModel(saved.Provider, saved.ID); candidate != nil {
+			return candidate, nil
+		}
+		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
+	}
+	if !validProviderAuthProvider(saved.Provider) {
 		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
 	}
 	model := ai.GetModel(saved.Provider, saved.ID)

@@ -380,6 +380,9 @@ func main() {
 		if err := managed.LoadCodexModelsStore(options.managed.PiAgentDir); err != nil {
 			log.Printf("ordinary Pi model store unavailable: %v", err)
 		}
+		if err := managed.SyncCustomModelsToAI(ctx, durable); err != nil {
+			log.Printf("custom models sync unavailable: %v", err)
+		}
 		managedManager, err = managed.NewManager(codexOptions)
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)

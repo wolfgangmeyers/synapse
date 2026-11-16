@@ -1,11 +1,21 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import type { ManagedProvider, ProviderAuthPromptFrame } from "../protocol/types";
-import type { DefaultModelResponse, ProviderAuthResponse, ProviderStatus, ModelsResponse, RouterHttpClient } from "../transport/http-client";
+import type { DefaultModelResponse, ProviderAuthResponse, ProviderStatus, ModelsResponse, RouterHttpClient, CustomProvider, CustomProviderModel } from "../transport/http-client";
 import { DialogShell } from "./DialogShell";
 
 export type ProviderAuthClient = Pick<
   RouterHttpClient,
-  "models" | "providerAuth" | "respondProviderAuth" | "cancelProviderAuth" | "setDefaultModel" | "startProviderAuth"
+  | "models"
+  | "providerAuth"
+  | "respondProviderAuth"
+  | "cancelProviderAuth"
+  | "setDefaultModel"
+  | "startProviderAuth"
+  | "listCustomProviders"
+  | "createCustomProvider"
+  | "updateCustomProvider"
+  | "deleteCustomProvider"
+  | "discoverCustomProviderModels"
 >;
 
 export interface ProviderAuthDialogProps {
@@ -82,6 +92,19 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   const [googleMenuOpen, setGoogleMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
 
+  // Custom provider states
+  const [dialogMode, setDialogMode] = useState<"list" | "form">("list");
+  const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
+  const [editingCustomId, setEditingCustomId] = useState<string | null>(null);
+  const [customLabel, setCustomLabel] = useState("");
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customApiKey, setCustomApiKey] = useState("");
+  const [discoveredModels, setDiscoveredModels] = useState<CustomProviderModel[]>([]);
+  const [manualModelInput, setManualModelInput] = useState("");
+  const [discovering, setDiscovering] = useState(false);
+  const [savingCustom, setSavingCustom] = useState(false);
+  const [customFormError, setCustomFormError] = useState("");
+
   const promptInputRef = useRef<HTMLInputElement>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const googlePickerRef = useRef<HTMLDivElement>(null);
@@ -119,6 +142,13 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
     const nextAuth = await client.providerAuth();
     setAuth(nextAuth);
     try { setCatalog(await client.models()); } catch { setCatalog(undefined); }
+    try {
+      if (client.listCustomProviders) {
+        setCustomProviders(await client.listCustomProviders());
+      }
+    } catch {
+      setCustomProviders([]);
+    }
   };
 
   useEffect(() => {
@@ -129,6 +159,16 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       setPendingProvider(null);
       setGoogleMenuOpen(false);
       setModelMenuOpen(false);
+      setDialogMode("list");
+      setEditingCustomId(null);
+      setCustomLabel("");
+      setCustomBaseUrl("");
+      setCustomApiKey("");
+      setDiscoveredModels([]);
+      setManualModelInput("");
+      setDiscovering(false);
+      setSavingCustom(false);
+      setCustomFormError("");
       return;
     }
     void refresh().catch(() => setStatus("Provider settings are unavailable."));
@@ -253,7 +293,259 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
     }
   };
 
-  return <DialogShell open={open} title="Provider settings" titleId="provider-settings-title" description="These settings apply to every managed agent." onClose={onClose} closeLabel="Close provider settings" className="message-dialog provider-auth-dialog">
+  const startAddCustom = (): void => {
+    setEditingCustomId(null);
+    setCustomLabel("");
+    setCustomBaseUrl("");
+    setCustomApiKey("");
+    setDiscoveredModels([]);
+    setManualModelInput("");
+    setCustomFormError("");
+    setDialogMode("form");
+  };
+
+  const startEditCustom = (p: CustomProvider): void => {
+    setEditingCustomId(p.id);
+    setCustomLabel(p.label);
+    setCustomBaseUrl(p.base_url);
+    setCustomApiKey("");
+    setDiscoveredModels(p.models || []);
+    setManualModelInput("");
+    setCustomFormError("");
+    setDialogMode("form");
+  };
+
+  const handleDiscoverModels = async (): Promise<void> => {
+    const url = customBaseUrl.trim();
+    if (!url) {
+      setCustomFormError("Base URL is required to discover models.");
+      return;
+    }
+    setDiscovering(true);
+    setCustomFormError("");
+    try {
+      const res = await client.discoverCustomProviderModels({
+        base_url: url,
+        ...(customApiKey.trim() ? { api_key: customApiKey.trim() } : {}),
+      });
+      if (res.models && res.models.length > 0) {
+        setDiscoveredModels(res.models);
+      } else {
+        setCustomFormError("No models were discovered from this endpoint. You can add model IDs manually below.");
+      }
+    } catch {
+      setCustomFormError("Model discovery failed. You can add model IDs manually below.");
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const handleAddManualModel = (): void => {
+    const trimmed = manualModelInput.trim();
+    if (!trimmed) return;
+    if (discoveredModels.some((m) => m.id === trimmed)) {
+      setManualModelInput("");
+      return;
+    }
+    setDiscoveredModels((prev) => [
+      ...prev,
+      {
+        id: trimmed,
+        display_name: trimmed,
+        context_window: 131072,
+        max_tokens: 8192,
+        supports_tools: true,
+      },
+    ]);
+    setManualModelInput("");
+  };
+
+  const handleRemoveModel = (id: string): void => {
+    setDiscoveredModels((prev) => prev.filter((m) => m.id !== id));
+  };
+
+  const handleSaveCustomProvider = async (e: React.FormEvent): Promise<void> => {
+    e.preventDefault();
+    const label = customLabel.trim();
+    const baseUrl = customBaseUrl.trim();
+    if (!label) {
+      setCustomFormError("Provider name is required.");
+      return;
+    }
+    if (!baseUrl) {
+      setCustomFormError("Base URL is required.");
+      return;
+    }
+    if (discoveredModels.length === 0) {
+      setCustomFormError("At least one model must be added or discovered.");
+      return;
+    }
+
+    setSavingCustom(true);
+    setCustomFormError("");
+    try {
+      const providerId = editingCustomId || label.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "custom";
+      if (editingCustomId) {
+        await client.updateCustomProvider(editingCustomId, {
+          label,
+          base_url: baseUrl,
+          ...(customApiKey.trim() ? { api_key: customApiKey.trim() } : {}),
+          models: discoveredModels,
+        });
+      } else {
+        await client.createCustomProvider({
+          id: providerId,
+          label,
+          base_url: baseUrl,
+          ...(customApiKey.trim() ? { api_key: customApiKey.trim() } : {}),
+          models: discoveredModels,
+        });
+      }
+      await refresh();
+      setDialogMode("list");
+      setStatus(`Saved custom provider "${label}".`);
+    } catch (err) {
+      setCustomFormError(err instanceof Error ? err.message : "Failed to save custom provider.");
+    } finally {
+      setSavingCustom(false);
+    }
+  };
+
+  const handleDeleteCustomProvider = async (p: CustomProvider): Promise<void> => {
+    try {
+      await client.deleteCustomProvider(p.id);
+      await refresh();
+      setStatus(`Deleted custom provider "${p.label}".`);
+    } catch {
+      setStatus(`Failed to delete custom provider "${p.label}".`);
+    }
+  };
+
+  return <DialogShell open={open} title="Provider settings" titleId="provider-settings-title" description={dialogMode === "form" ? "Configure an OpenAI-compatible custom endpoint." : "These settings apply to every managed agent."} onClose={onClose} closeLabel="Close provider settings" className="message-dialog provider-auth-dialog">
+    {dialogMode === "form" ? (
+      <section className="custom-provider-form-section">
+        <form onSubmit={(e) => void handleSaveCustomProvider(e)}>
+          <div className="custom-provider-form-fields" style={{ display: "grid", gap: "12px" }}>
+            <label>
+              Provider Name / Label
+              <input
+                type="text"
+                placeholder="e.g. Local Ollama, vLLM"
+                value={customLabel}
+                onChange={(e) => setCustomLabel(e.target.value)}
+                required
+                aria-label="Provider name"
+              />
+            </label>
+            <label>
+              Base URL (OpenAI-compatible)
+              <input
+                type="url"
+                placeholder="http://127.0.0.1:11434/v1"
+                value={customBaseUrl}
+                onChange={(e) => setCustomBaseUrl(e.target.value)}
+                required
+                aria-label="Base URL"
+              />
+            </label>
+            <label>
+              API Key (optional)
+              <input
+                type="password"
+                placeholder={editingCustomId ? "Leave blank to keep existing key" : "Optional secret token"}
+                value={customApiKey}
+                onChange={(e) => setCustomApiKey(e.target.value)}
+                autoComplete="off"
+                aria-label="API key"
+              />
+            </label>
+
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
+              <button
+                type="button"
+                className="secondary"
+                disabled={discovering || !customBaseUrl.trim()}
+                onClick={() => void handleDiscoverModels()}
+              >
+                {discovering ? "Discovering…" : "Test & Discover Models"}
+              </button>
+            </div>
+
+            {customFormError && (
+              <p className="provider-auth-status error" role="alert">{customFormError}</p>
+            )}
+
+            <div className="custom-models-section" style={{ display: "grid", gap: "8px", marginTop: "8px" }}>
+              <strong>Configured Models ({discoveredModels.length})</strong>
+              {discoveredModels.length > 0 ? (
+                <ul className="custom-models-list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "4px" }}>
+                  {discoveredModels.map((m) => (
+                    <li key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--canvas)", padding: "6px 10px", borderRadius: "8px" }}>
+                      <span>{m.display_name || m.id}</span>
+                      <button
+                        type="button"
+                        className="icon-btn-round danger"
+                        title={`Remove model ${m.id}`}
+                        aria-label={`Remove model ${m.id}`}
+                        onClick={() => handleRemoveModel(m.id)}
+                      >
+                        <i className="fa-solid fa-xmark" aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p style={{ fontSize: "13px", color: "var(--text-muted)" }}>No models added yet. Click &quot;Test &amp; Discover Models&quot; or enter one below.</p>
+              )}
+
+              <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+                <input
+                  type="text"
+                  placeholder="Enter manual model ID (e.g. llama3.2:3b)"
+                  value={manualModelInput}
+                  onChange={(e) => setManualModelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddManualModel();
+                    }
+                  }}
+                  aria-label="Manual model ID"
+                />
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!manualModelInput.trim()}
+                  onClick={handleAddManualModel}
+                >
+                  Add Model
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="provider-auth-actions" style={{ marginTop: "18px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setCustomFormError("");
+                setDialogMode("list");
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={savingCustom || !customLabel.trim() || !customBaseUrl.trim() || discoveredModels.length === 0}
+            >
+              {savingCustom ? "Saving…" : "Save Provider"}
+            </button>
+          </div>
+        </form>
+      </section>
+    ) : (
+      <>
     {prompt ? <section className="provider-auth-prompt" aria-live="polite" aria-labelledby="provider-auth-prompt-title">
       <h3 id="provider-auth-prompt-title">Sign-in request</h3>
       {prompt.prompt.kind === "manual_code" ? (() => {
@@ -491,6 +783,60 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         );
       })()}
     </section>
+    <section className="provider-auth-section" aria-labelledby="custom-providers-title">
+      <div className="provider-auth-section-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <h3 id="custom-providers-title">Custom Providers</h3>
+          <p>Add self-hosted endpoints (Ollama, vLLM, LM Studio) or OpenAI-compatible providers.</p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={startAddCustom}
+        >
+          + Add Custom Provider
+        </button>
+      </div>
+
+      {customProviders.length === 0 ? (
+        <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: 0 }}>No custom providers configured yet.</p>
+      ) : (
+        <div style={{ display: "grid", gap: "8px" }}>
+          {customProviders.map((cp) => (
+            <div className="provider-auth-row" key={cp.id}>
+              <div className="provider-auth-provider">
+                <strong>{cp.label}</strong>
+                <p className="provider-auth-connection">
+                  <span className={`status-dot${cp.enabled ? " connected" : ""}`} aria-hidden="true" />
+                  <span>{cp.models.length} {cp.models.length === 1 ? "model" : "models"} ({cp.base_url})</span>
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="icon-btn-round"
+                  title={`Edit ${cp.label}`}
+                  aria-label={`Edit ${cp.label}`}
+                  onClick={() => startEditCustom(cp)}
+                >
+                  <i className="fa-solid fa-pen" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn-round danger"
+                  title={`Delete ${cp.label}`}
+                  aria-label={`Delete ${cp.label}`}
+                  onClick={() => void handleDeleteCustomProvider(cp)}
+                >
+                  <i className="fa-solid fa-trash" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+
     {auth !== undefined && (
       <section className="provider-auth-section" aria-labelledby="provider-default-model-title">
         <div className="provider-auth-section-heading">
@@ -566,5 +912,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
     )}
     {status ? <p className={`provider-auth-status${status === defaultSaveFailedMessage ? " error" : ""}`} role="status">{status}</p> : null}
     {refreshNotice ? <p className="provider-auth-status">{refreshNotice}</p> : null}
+    </>
+    )}
   </DialogShell>;
 }

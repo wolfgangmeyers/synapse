@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/antigravitymodels"
@@ -48,6 +49,22 @@ func scanManagedSubagent(row interface{ Scan(...any) error }) (*ManagedSubagentR
 	}
 	r.TerminalAt = terminal.String
 	return &r, nil
+}
+
+func (s *Store) isAdmittedSubagentProviderTx(ctx context.Context, provider string) (bool, error) {
+	if validManagedProvider(provider) {
+		return true, nil
+	}
+	if strings.HasPrefix(provider, "custom-") {
+		customID := strings.TrimPrefix(provider, "custom-")
+		var count int
+		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM custom_providers WHERE id = ?`, customID).Scan(&count)
+		if err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	}
+	return false, nil
 }
 
 func validSubagentDuration(value float64) bool {
@@ -161,7 +178,11 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 			return err
 		}
 		if provider == claudemodels.Provider || defaultProvider.String == claudemodels.Provider || provider == antigravitymodels.Provider || defaultProvider.String == antigravitymodels.Provider {
-			if !defaultProvider.Valid || !defaultModel.Valid || !(validManagedProvider(defaultProvider.String) || (defaultProvider.String == claudemodels.Provider && claudemodels.Valid(defaultModel.String)) || (defaultProvider.String == antigravitymodels.Provider && antigravitymodels.Valid(defaultModel.String))) || !managedModelIDRE.MatchString(defaultModel.String) {
+			defaultValid, err := s.isAdmittedSubagentProviderTx(ctx, defaultProvider.String)
+			if err != nil {
+				return err
+			}
+			if !defaultProvider.Valid || !defaultModel.Valid || !(defaultValid || (defaultProvider.String == claudemodels.Provider && claudemodels.Valid(defaultModel.String)) || (defaultProvider.String == antigravitymodels.Provider && antigravitymodels.Valid(defaultModel.String))) || !managedModelIDRE.MatchString(defaultModel.String) {
 				return errors.New("subagent requires a configured router default model")
 			}
 			provider, model = defaultProvider.String, defaultModel.String
@@ -172,7 +193,11 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if model == "" {
 			model = "gemini-3.8-flash"
 		}
-		if !validManagedProvider(provider) && !(provider == claudemodels.Provider && claudemodels.Valid(model)) && !(provider == antigravitymodels.Provider && antigravitymodels.Valid(model)) {
+		admitted, err := s.isAdmittedSubagentProviderTx(ctx, provider)
+		if err != nil {
+			return err
+		}
+		if !admitted && !(provider == claudemodels.Provider && claudemodels.Valid(model)) && !(provider == antigravitymodels.Provider && antigravitymodels.Valid(model)) {
 			return errors.New("subagent model provider is unavailable")
 		}
 		now := formatTimestamp(s.clock.Now())

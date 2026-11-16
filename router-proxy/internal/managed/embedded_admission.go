@@ -23,6 +23,22 @@ func (m *Manager) admitEmbeddedModel(ctx context.Context, candidate Model) (Mode
 	if candidate.Provider == "google" || candidate.Provider == "google-vertex" {
 		return candidate, nil
 	}
+	if IsCustomProvider(candidate.Provider) {
+		if ai.GetModel(candidate.Provider, candidate.ID) != nil {
+			return candidate, nil
+		}
+		if m.store != nil {
+			rawID := strings.TrimPrefix(candidate.Provider, "custom-")
+			if p, err := m.store.GetCustomProvider(ctx, rawID); err == nil && p != nil && p.Provider.Enabled {
+				for _, mod := range p.Models {
+					if mod.ID == candidate.ID {
+						return candidate, nil
+					}
+				}
+			}
+		}
+		return Model{}, &modelUnavailableError{candidate.Provider, candidate.ID}
+	}
 	sdk := ai.GetModel(candidate.Provider, candidate.ID)
 	if validateEmbeddedCodexModel(sdk) != nil || m.codexCredentialStore == nil {
 		return Model{}, &modelUnavailableError{candidate.Provider, candidate.ID}

@@ -61,6 +61,74 @@ MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:87
 
 The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. For compatible local clients, use `127.0.0.1` in `MECHA_ROUTER_URL` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
 
+## Isolated Router & Web UI Development Launches
+
+Subagent background shells or standard ephemeral shell commands terminate child processes when their session or harness exits. Never launch long-running test routers directly in ephemeral tool shells without detaching them. Use a persistent session manager such as tmux, or launch detached background processes via `nohup` / `setsid`.
+
+### Serving Web UI Directly via Router
+
+Building the Web UI and pointing the router at its dist directory serves the frontend directly at `/` on the router's HTTP port. This eliminates separate static file servers and avoids cross-origin CORS overhead:
+
+1. Build the UI:
+   ```bash
+   npm --prefix web/router-ui-react run build
+   ```
+2. Pass `--managed-ui-dist` (or export `MECHA_ROUTER_MANAGED_UI_DIST=/path/to/web/router-ui-react/dist`). When `tools/run_router.sh` runs and finds `web/router-ui-react/dist/index.html`, it automatically serves that built UI unless overridden.
+
+### Option 1: tmux (Recommended for interactive dev & inspection)
+
+Use detached tmux sessions to keep isolated routers running independently while retaining log capture and console attachment:
+
+```bash
+# Pick isolated ports and temporary state paths
+ROUTER_PORT=18765
+DB_PATH="/tmp/test-router.sqlite"
+LOG_PATH="/tmp/test-router.jsonl"
+UI_DIST="$(pwd)/web/router-ui-react/dist"
+
+tmux new-session -d -s test-router -n router \
+  "MECHA_ROUTER_PORT=${ROUTER_PORT} \
+   MECHA_ROUTER_DATABASE=${DB_PATH} \
+   MECHA_ROUTER_LOG=${LOG_PATH} \
+   MECHA_ROUTER_MANAGED_UI_DIST=${UI_DIST} \
+   ./tools/run_router.sh"
+
+# Inspect output or verify health
+tmux capture-pane -pt test-router:router -S -50
+curl -fsS "http://127.0.0.1:${ROUTER_PORT}/v1/health"
+
+# Stop session when finished
+tmux kill-session -t test-router
+```
+
+### Option 2: nohup / Background Detachment (Scriptable across macOS and Linux)
+
+For headless or script-driven automation without tmux:
+
+```bash
+ROUTER_PORT=18765
+DB_PATH="/tmp/test-router.sqlite"
+LOG_PATH="/tmp/test-router.jsonl"
+OUT_LOG="/tmp/test-router.out"
+PID_FILE="/tmp/test-router.pid"
+UI_DIST="$(pwd)/web/router-ui-react/dist"
+
+nohup env \
+  MECHA_ROUTER_PORT="${ROUTER_PORT}" \
+  MECHA_ROUTER_DATABASE="${DB_PATH}" \
+  MECHA_ROUTER_LOG="${LOG_PATH}" \
+  MECHA_ROUTER_MANAGED_UI_DIST="${UI_DIST}" \
+  ./tools/run_router.sh > "${OUT_LOG}" 2>&1 &
+
+echo $! > "${PID_FILE}"
+
+# Poll health check until ready
+curl --retry 10 --retry-delay 1 --retry-connrefused -fsS "http://127.0.0.1:${ROUTER_PORT}/v1/health"
+
+# Stop when done
+kill "$(cat "${PID_FILE}")" && rm -f "${PID_FILE}"
+```
+
 ## System 1 Decision Model Integration
 
 For high-speed, structured evaluation and classification (e.g. security checks, triage, policy verification), agents can leverage the System 1 decision model (Cloudflare Clef) hosted via Ollama. See `docs/system-one.md` for complete API schema, routing, and examples.
