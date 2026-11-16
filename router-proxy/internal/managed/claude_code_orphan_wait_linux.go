@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os/exec"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -52,7 +51,7 @@ func waitClaudeCodeCommandWithReapHook(cmd *exec.Cmd, identity ProcessIdentity, 
 	default:
 		return fmt.Errorf("%w: unsafe pinned child identity: %s", errClaudeCodeGroupUnconfirmed, probe.State)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), claudeGroupConfirmTimeout)
 	defer cancel()
 	if err := confirmClaudeCodeGroupAbsent(ctx, func() ProcessProbeState { return ops.Probe(identity).State }); err != nil {
 		// Do NOT call Wait: preserve the verifiable leader and fail admission closed.

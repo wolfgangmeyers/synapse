@@ -192,6 +192,8 @@ func reapClaudeCodeOrphans(ctx context.Context, root string) error {
 	return errors.Join(failures...)
 }
 
+const claudeGroupConfirmTimeout = 10 * time.Second
+
 func reapClaudeCodeOrphan(ctx context.Context, identity ProcessIdentity) error {
 	ops := defaultProcessGroupOps{}
 	switch ops.Probe(identity).State {
@@ -205,7 +207,7 @@ func reapClaudeCodeOrphan(ctx context.Context, identity ProcessIdentity) error {
 			}
 			return err
 		}
-		confirmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		confirmCtx, cancel := context.WithTimeout(ctx, claudeGroupConfirmTimeout)
 		defer cancel()
 		return confirmClaudeCodeGroupAbsent(confirmCtx, func() ProcessProbeState { return ops.Probe(identity).State })
 	default:

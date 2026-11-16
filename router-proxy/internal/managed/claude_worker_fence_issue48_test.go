@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -124,3 +125,29 @@ func TestClaudeWorkerFenceCapacityFailsClosed(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, pool.stopAll(), first)
 }
+
+func TestClaudePreflightUnconfirmedStopDoesNotClosePool(t *testing.T) {
+	ctx := context.Background()
+	db, b, _ := completionFixture(t)
+	saved, err := db.ManagedAgent(ctx, b.AgentID)
+	require.NoError(t, err)
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{saved.Cwd}}, CatalogSource: StoreCatalogSource{Store: db}})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+
+	cfg := m.claudeShortCommandConfig(saved.Cwd)
+	require.Nil(t, cfg.OnUnconfirmedStop, "short command config must not close the process pool on unconfirmed stop")
+
+	cfg.Binary = filepath.Join(t.TempDir(), "nonexistent-claude-binary")
+	_, err = PreflightClaudeCode(ctx, cfg)
+	require.Error(t, err)
+
+	m.claudeCodeProcesses.mu.Lock()
+	closed := m.claudeCodeProcesses.closed
+	m.claudeCodeProcesses.mu.Unlock()
+	require.False(t, closed, "preflight failure must not close the process pool")
+}
+

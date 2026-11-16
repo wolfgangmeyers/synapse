@@ -26,7 +26,7 @@ func waitClaudeCodeCommandWithReapHook(cmd *exec.Cmd, identity ProcessIdentity, 
 	}
 	return waitClaudeCodeReapedCommand(wait, func() ProcessProbeState {
 		return (defaultProcessGroupOps{}).Probe(identity).State
-	}, confirmed, 2*time.Second)
+	}, confirmed, claudeGroupConfirmTimeout)
 }
 
 func waitClaudeCodeReapedCommand(wait func() error, probe func() ProcessProbeState, confirmed func(), timeout time.Duration) error {
