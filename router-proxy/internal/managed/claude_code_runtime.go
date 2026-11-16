@@ -52,7 +52,7 @@ func (pool *claudeCodeProcessPool) admitExternal() (func(), error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	if pool.closed {
-		return nil, &ClaudeAdmissionFencedError{Cause: errors.Join(errClaudeDefiniteStart, pool.startErr)}
+		return nil, &ClaudeAdmissionFencedError{Cause: pool.startErr}
 	}
 	pool.starts.Add(1)
 	var once sync.Once
@@ -193,7 +193,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 	pool.mu.Lock()
 	if err := pool.workerErrorLocked(b.AgentID); err != nil {
 		pool.mu.Unlock()
-		return nil, errors.Join(errClaudeDefiniteStart, err)
+		return nil, claudeDefiniteStart(err)
 	}
 	if pool.entries == nil {
 		pool.entries = make(map[string]*claudeCodeProcessEntry)
@@ -207,7 +207,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		grant, err = newGrant()
 		if err != nil {
 			if ctx.Err() == nil {
-				return nil, errors.Join(errClaudeDefiniteStart, err)
+				return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartGrantFailed, err))
 			}
 			return nil, err
 		}
@@ -228,7 +228,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 			grant.Revoke()
 		}
 		if ctx.Err() == nil {
-			return nil, errors.Join(errClaudeDefiniteStart, err)
+			return nil, claudeDefiniteStart(err)
 		}
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 			// Keep the cleanup marker and cause chain, but never format raw paths.
 			return nil, errors.Join(fenceErr, &claudeStartCleanupError{err: &ClaudeAdmissionFencedError{Cause: closeErr}})
 		}
-		return nil, errors.Join(errClaudeDefiniteStart, fenceErr)
+		return nil, claudeDefiniteStart(fenceErr)
 	}
 	pool.entries[b.AgentID] = entry
 	pool.mu.Unlock()
@@ -614,7 +614,7 @@ func (r *claudeCodeRuntime) failedInitialProbe(proc *ClaudeCodeProcess, started 
 		r.mu.Lock()
 		r.probeCleanupErr = cleanupErr
 		r.mu.Unlock()
-		return false, errors.Join(probeErr, cleanupErr)
+		return false, errors.Join(probeErr, &claudeStartCleanupError{err: cleanupErr})
 	}
 	missing := started && strings.Contains(proc.Stderr(), "No conversation found with session ID:")
 	return missing, probeErr
@@ -723,8 +723,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		if _, probeErr := proc.Control(ctx, map[string]interface{}{"subtype": "interrupt"}); probeErr != nil {
 			fallback, cleanupErr := r.failedInitialProbe(proc, started, probeErr)
 			if !fallback {
-				if proc.Err() != nil && ctx.Err() == nil {
-					return nil, errors.Join(errClaudeDefiniteStart, cleanupErr)
+				var cleanupFailure *claudeStartCleanupError
+				if proc.Err() != nil && ctx.Err() == nil && !errors.As(cleanupErr, &cleanupFailure) {
+					return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartProbeDied, cleanupErr))
 				}
 				return nil, cleanupErr
 			}
@@ -735,8 +736,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 			}
 			if _, err = proc.Control(ctx, map[string]interface{}{"subtype": "interrupt"}); err != nil {
 				_, cleanupErr := r.failedInitialProbe(proc, false, err)
-				if proc.Err() != nil && ctx.Err() == nil {
-					return nil, errors.Join(errClaudeDefiniteStart, cleanupErr)
+				var cleanupFailure *claudeStartCleanupError
+				if proc.Err() != nil && ctx.Err() == nil && !errors.As(cleanupErr, &cleanupFailure) {
+					return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartProbeDied, cleanupErr))
 				}
 				return nil, cleanupErr
 			}

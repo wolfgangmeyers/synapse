@@ -48,10 +48,25 @@ func (c *FixedClock) AfterFunc(delay time.Duration, callback func()) func() {
 // AfterNamedFunc exposes active test timer registrations to test fixtures.
 func (c *FixedClock) AfterNamedFunc(name string, delay time.Duration, callback func()) func() {
 	c.mu.Lock()
+	return c.registerTimerLocked(name, c.now.Add(delay), callback)
+}
+
+// AfterFuncAt registers against an absolute clock deadline atomically with Advance.
+func (c *FixedClock) AfterFuncAt(deadline time.Time, callback func()) func() {
+	c.mu.Lock()
+	return c.registerTimerLocked("", deadline, callback)
+}
+
+func (c *FixedClock) registerTimerLocked(name string, deadline time.Time, callback func()) func() {
+	if !c.now.Before(deadline) {
+		c.mu.Unlock()
+		go callback()
+		return func() {}
+	}
 	if c.timers == nil {
 		c.timers = make(map[*fixedTimer]struct{})
 	}
-	t := &fixedTimer{at: c.now.Add(delay), callback: callback, name: name}
+	t := &fixedTimer{at: deadline, callback: callback, name: name}
 	c.timers[t] = struct{}{}
 	c.mu.Unlock()
 	return func() { c.mu.Lock(); delete(c.timers, t); c.mu.Unlock() }
