@@ -204,3 +204,27 @@ func TestCustomProviders_SubagentAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, admitted)
 }
+
+func TestCustomProviderSubagentAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test_custom_provider_subagent_admission.db")
+	s, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	defer s.Close()
+
+	err = s.CreateCustomProvider(ctx, CustomProviderRecord{
+		ID:      "mock-ollama",
+		Label:   "Mock Ollama",
+		BaseURL: "http://127.0.0.1:11434/v1",
+	}, nil)
+	require.NoError(t, err)
+
+	admitted, err := s.isAdmittedSubagentProviderTx(ctx, "custom-mock-ollama")
+	require.NoError(t, err)
+	require.True(t, admitted)
+
+	admitted, err = s.isAdmittedSubagentProviderTx(ctx, "custom-nonexistent")
+	require.NoError(t, err)
+	require.False(t, admitted)
+}
+
