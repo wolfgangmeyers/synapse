@@ -9,13 +9,16 @@ import (
 func TestCatalog(t *testing.T) {
 	require.Equal(t, "antigravity", Provider)
 	cat := Catalog()
-	require.Len(t, cat, 4)
+	require.Len(t, cat, 7)
 
 	expectedIDs := []string{
 		"gemini-2.5-pro",
 		"gemini-2.5-flash",
 		"gemini-3.8-pro",
 		"gemini-3.8-flash",
+		"gemini-4-argon",
+		"gemini-4-carbon",
+		"gemini-4-hydrogen",
 	}
 
 	for i, id := range expectedIDs {

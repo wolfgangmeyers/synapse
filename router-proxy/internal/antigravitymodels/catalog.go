@@ -15,6 +15,9 @@ func Catalog() []ModelDef {
 		{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash (Antigravity)", ContextWindow: 1_000_000},
 		{ID: "gemini-3.8-pro", Name: "Gemini 3.8 Pro (Antigravity)", ContextWindow: 1_000_000},
 		{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash (Antigravity)", ContextWindow: 1_000_000},
+		{ID: "gemini-4-argon", Name: "Gemini 4 Argon (Antigravity)", ContextWindow: 1_000_000},
+		{ID: "gemini-4-carbon", Name: "Gemini 4 Carbon (Antigravity)", ContextWindow: 1_000_000},
+		{ID: "gemini-4-hydrogen", Name: "Gemini 4 Hydrogen (Antigravity)", ContextWindow: 1_000_000},
 	}
 }
 
