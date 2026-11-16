@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { isClaudeCodeModel, sameModelEngine, modelKey, modelOptionLabel, normalizeModelSummaries, type ModelSummary } from "../domain/models";
+import { isClaudeCodeModel, isAntigravityModel, sameModelEngine, modelKey, modelOptionLabel, normalizeModelSummaries, type ModelSummary } from "../domain/models";
 
 export interface ModelPickerEmptyOption {
   label: string;
@@ -40,7 +40,7 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
-  const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || ADMITTED_EMBEDDED_PROVIDERS.has(m.provider))) : normalized;
+  const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || isAntigravityModel(m) || ADMITTED_EMBEDDED_PROVIDERS.has(m.provider))) : normalized;
   const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {

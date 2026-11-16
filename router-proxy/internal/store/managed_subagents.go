@@ -8,6 +8,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/antigravitymodels"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/claudemodels"
 )
 
@@ -159,8 +160,8 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if err := s.db.QueryRowContext(ctx, `SELECT default_model_provider, default_model_id FROM managed_settings WHERE singleton_id=1`).Scan(&defaultProvider, &defaultModel); err != nil {
 			return err
 		}
-		if provider == claudemodels.Provider || defaultProvider.String == claudemodels.Provider {
-			if !defaultProvider.Valid || !defaultModel.Valid || !(validManagedProvider(defaultProvider.String) || defaultProvider.String == claudemodels.Provider && claudemodels.Valid(defaultModel.String)) || !managedModelIDRE.MatchString(defaultModel.String) {
+		if provider == claudemodels.Provider || defaultProvider.String == claudemodels.Provider || provider == antigravitymodels.Provider || defaultProvider.String == antigravitymodels.Provider {
+			if !defaultProvider.Valid || !defaultModel.Valid || !(validManagedProvider(defaultProvider.String) || (defaultProvider.String == claudemodels.Provider && claudemodels.Valid(defaultModel.String)) || (defaultProvider.String == antigravitymodels.Provider && antigravitymodels.Valid(defaultModel.String))) || !managedModelIDRE.MatchString(defaultModel.String) {
 				return errors.New("subagent requires a configured router default model")
 			}
 			provider, model = defaultProvider.String, defaultModel.String
@@ -171,7 +172,7 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if model == "" {
 			model = "gemini-3.8-flash"
 		}
-		if !validManagedProvider(provider) && !(provider == claudemodels.Provider && claudemodels.Valid(model)) {
+		if !validManagedProvider(provider) && !(provider == claudemodels.Provider && claudemodels.Valid(model)) && !(provider == antigravitymodels.Provider && antigravitymodels.Valid(model)) {
 			return errors.New("subagent model provider is unavailable")
 		}
 		now := formatTimestamp(s.clock.Now())

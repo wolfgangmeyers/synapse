@@ -29,6 +29,7 @@ const (
 // Nil Environment inherits the host environment. Binary overrides
 // MECHA_CLAUDE_BIN, then PATH and ~/.local/bin/claude are tried.
 type ClaudeCodeProcessConfig struct {
+	Adapter                         CLIAdapter
 	Binary, Cwd, SessionID, Model   string
 	MCPConfigFile, SystemPromptFile string
 	OrphanRoot                      string      // managed private recovery root; empty only for standalone callers
@@ -74,6 +75,7 @@ type claudeCodePendingInput struct {
 // SendUser and Control may be concurrent. Interrupt awaits a receipt, not a
 // turn result, and is deliberately distinct from Close.
 type ClaudeCodeProcess struct {
+	adapter             CLIAdapter
 	orphanPath          string
 	orphanIdentity      ProcessIdentity
 	orphanCleanupOnce   sync.Once
@@ -201,6 +203,16 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 		}
 		defer release()
 	}
+	if cfg.Adapter != nil && cfg.Adapter.Provider() != claudeCodeProvider {
+		bin, err := cfg.Adapter.Executable(ctx)
+		if err != nil {
+			return "", err
+		}
+		if err := cfg.Adapter.Preflight(ctx); err != nil {
+			return "", err
+		}
+		return bin, nil
+	}
 	env := claudeCodeEnvironment(cfg.Environment)
 	bin, err := resolveClaudeCodeBinary(cfg, env)
 	if err != nil {
@@ -277,6 +289,20 @@ func (b *claudeCodeBoundedCapture) Write(v []byte) (int, error) {
 
 // claudeCodeProcessArgs limits built-in tools while preserving role-specific MCP configuration.
 func claudeCodeProcessArgs(cfg ClaudeCodeProcessConfig) []string {
+	if cfg.Adapter != nil && cfg.Adapter.Provider() != claudeCodeProvider {
+		return cfg.Adapter.BuildArgs(CLIProcessConfig{
+			Binary:           cfg.Binary,
+			Cwd:              cfg.Cwd,
+			SessionID:        cfg.SessionID,
+			Model:            cfg.Model,
+			MCPConfigFile:    cfg.MCPConfigFile,
+			SystemPromptFile: cfg.SystemPromptFile,
+			RootAuthority:    cfg.RootAuthority,
+			ChildAuthority:   cfg.ChildAuthority,
+			Resume:           cfg.Resume,
+			Environment:      cfg.Environment,
+		}, cfg.MCPConfigFile)
+	}
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,Edit,Glob,Grep,ToolSearch"}
 	if cfg.RootAuthority || cfg.ChildAuthority {
 		args = append(args, "--strict-mcp-config")
@@ -299,6 +325,9 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 	if cfg.Cwd == "" || cfg.SessionID == "" || cfg.Model == "" {
 		return nil, errors.New("Claude process requires cwd, session ID and model")
 	}
+	if cfg.Adapter == nil {
+		cfg.Adapter = NewClaudeCodeAdapter(cfg.Binary, cfg.Environment)
+	}
 	bin, err := PreflightClaudeCode(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -314,7 +343,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 	defer gate.Close()
 	defer cmd.ExtraFiles[0].Close()
 	cmd.Dir = cfg.Cwd
-	cmd.Env = claudeCodeEnvironment(cfg.Environment)
+	cmd.Env = cfg.Adapter.CleanEnvironment(cfg.Environment)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -458,7 +487,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 	gate.Close()
 	outw.Close()
 	errw.Close()
-	p := &ClaudeCodeProcess{cmd: cmd, stdin: stdin, notify: make(chan struct{}, 1), controls: make(map[string]chan claudeCodeControlResponse), inputs: make(map[string]claudeCodePendingInput), done: make(chan struct{}), exited: make(chan struct{}), closeDone: make(chan struct{}), sessionID: cfg.SessionID}
+	p := &ClaudeCodeProcess{adapter: cfg.Adapter, cmd: cmd, stdin: stdin, notify: make(chan struct{}, 1), controls: make(map[string]chan claudeCodeControlResponse), inputs: make(map[string]claudeCodePendingInput), done: make(chan struct{}), exited: make(chan struct{}), closeDone: make(chan struct{}), sessionID: cfg.SessionID}
 	p.orphanPath, p.orphanIdentity = orphanPath, orphanIdentity
 	p.onUnconfirmedStop = cfg.OnUnconfirmedStop
 	reads := sync.WaitGroup{}
@@ -548,7 +577,35 @@ func (p *ClaudeCodeProcess) read(r io.Reader) {
 			p.fail(errors.New("Claude stdout record exceeds 16 MiB"))
 			return
 		}
-		event, control, err := parseClaudeCodeEvent(line, p.sessionID)
+		var event ClaudeCodeEvent
+		var control *claudeCodeControlResponse
+		var err error
+		if p.adapter != nil && p.adapter.Provider() != claudeCodeProvider {
+			var norm NormalizedEvent
+			norm, err = p.adapter.ParseLine(line, p.sessionID)
+			if err == nil {
+				event = ClaudeCodeEvent{
+					Type:            norm.Type,
+					Subtype:         norm.Subtype,
+					SessionID:       norm.SessionID,
+					UUID:            norm.UUID,
+					IsReplay:        norm.IsReplay,
+					ParentToolUseID: norm.ParentToolUseID,
+					Message:         norm.Message,
+					Raw:             norm.Raw,
+				}
+				if norm.Control != nil {
+					control = &claudeCodeControlResponse{
+						Subtype:   norm.Control.Subtype,
+						RequestID: norm.Control.RequestID,
+						Response:  norm.Control.Response,
+						Error:     norm.Control.Error,
+					}
+				}
+			}
+		} else {
+			event, control, err = parseClaudeCodeEvent(line, p.sessionID)
+		}
 		if err != nil {
 			p.fail(err)
 			return
@@ -721,7 +778,21 @@ func (p *ClaudeCodeProcess) sendUserWithStart(ctx context.Context, id string, co
 	p.inputs[id] = claudeCodePendingInput{content: append(json.RawMessage(nil), content...), bytes: len(content)}
 	p.inputBytes += len(content)
 	p.mu.Unlock()
-	err := p.writeWithStart(ctx, map[string]interface{}{"type": "user", "uuid": id, "session_id": p.sessionID, "message": map[string]interface{}{"role": "user", "content": content}}, start)
+	var turnInput any
+	if p.adapter != nil && p.adapter.Provider() != claudeCodeProvider {
+		rawTurn, err := p.adapter.FormatUserTurn(UserTurnInput{
+			ID:        id,
+			SessionID: p.sessionID,
+			Content:   content,
+		})
+		if err != nil {
+			return err
+		}
+		turnInput = json.RawMessage(rawTurn)
+	} else {
+		turnInput = map[string]interface{}{"type": "user", "uuid": id, "session_id": p.sessionID, "message": map[string]interface{}{"role": "user", "content": content}}
+	}
+	err := p.writeWithStart(ctx, turnInput, start)
 	if err != nil {
 		p.mu.Lock()
 		if pending, ok := p.inputs[id]; ok {

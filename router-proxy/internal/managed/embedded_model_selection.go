@@ -30,7 +30,7 @@ func (m *Manager) reserveEmbeddedModelSelection(ctx context.Context, request Res
 	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
-	if request.Model != nil && (agent.SelectedModel.Provider == claudeCodeProvider) != (request.Model.Provider == claudeCodeProvider) {
+	if request.Model != nil && engineOf(agent.SelectedModel.Provider) != engineOf(request.Model.Provider) {
 		return RestartResult{}, &EngineSelectionError{Reason: "Cross-engine model changes are not supported; launch a new worker"}
 	}
 	var selected Model
@@ -45,6 +45,8 @@ func (m *Manager) reserveEmbeddedModelSelection(ctx context.Context, request Res
 	}
 	if request.Model != nil && request.Model.Provider == claudeCodeProvider {
 		selected, err = claudeCodeModel(request.Model.ID)
+	} else if request.Model != nil && request.Model.Provider == antigravityProvider {
+		selected, err = antigravityModel(request.Model.ID)
 	}
 	if err != nil {
 		return RestartResult{}, err

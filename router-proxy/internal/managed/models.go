@@ -67,9 +67,6 @@ func ValidateSelectedModel(model Model) error {
 
 func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (Model, error) {
 	available := func(candidate Model) bool {
-		if candidate.Provider == "antigravity" {
-			return false
-		}
 		for _, model := range catalog.Models {
 			if model.Provider == candidate.Provider && model.ID == candidate.ID && model.Available {
 				return true
@@ -99,7 +96,7 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 		return Model{Provider: saved.Provider, ID: saved.ID, Name: name, Available: false}, nil
 	}
 	for _, model := range catalog.Models {
-		if model.Available && model.Provider != claudeCodeProvider {
+		if model.Available && model.Provider != claudeCodeProvider && model.Provider != antigravityProvider {
 			return model, nil
 		}
 	}
@@ -131,17 +128,17 @@ func (s StoreCatalogSource) Catalog(ctx context.Context) (Catalog, error) {
 		for _, model := range persisted.Models {
 			models = append(models, Model{Provider: model.Provider, ID: model.ID, Name: model.Name, Available: model.Available})
 		}
-		return withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: models}), nil
+		return withAntigravityModels(withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: models})), nil
 	}
 	if s.Helper == nil {
-		return withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}}), nil
+		return withAntigravityModels(withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}})), nil
 	}
 	catalog, err := s.Helper.Catalog(ctx)
 	if err != nil {
 		return Catalog{}, err
 	}
 	catalog.AuthRevision = persisted.AuthRevision
-	return withClaudeCodeModels(catalog), nil
+	return withAntigravityModels(withClaudeCodeModels(catalog)), nil
 }
 
 func (s StoreCatalogSource) DefaultModel(ctx context.Context) (*store.ManagedModel, error) {

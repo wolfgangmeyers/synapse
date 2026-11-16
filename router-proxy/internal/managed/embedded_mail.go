@@ -455,8 +455,15 @@ func (m *Manager) blockClaudeUnclassified(lane *managedAgentLane, attempt *store
 }
 
 func (m *Manager) scheduleClaudeMailRetry(agentID string, delay time.Duration) {
+	now := time.Now()
+	if m.clock != nil {
+		now = m.clock.Now()
+	}
+	m.scheduleClaudeMailRetryAt(agentID, now.Add(delay))
+}
+
+func (m *Manager) scheduleClaudeMailRetryAt(agentID string, deadline time.Time) {
 	lane := m.laneFor(agentID) // caller holds lane.serial
-	deadline := time.Now().Add(delay)
 	if lane.claudeRetryScheduled {
 		if deadline.Before(lane.claudeRetryDeadline) {
 			lane.claudeRetryDeadline = deadline
@@ -474,13 +481,17 @@ func (m *Manager) scheduleClaudeMailRetry(agentID string, delay time.Duration) {
 	if !m.startManagedTask(func() {
 		for {
 			lane.serial.Lock()
-			remaining := time.Until(lane.claudeRetryDeadline)
+			deadline := lane.claudeRetryDeadline
 			lane.serial.Unlock()
-			timer := time.NewTimer(remaining)
+			fired, cancel := claudeRetryTimer(m.clock, deadline)
 			select {
-			case <-timer.C:
+			case <-fired:
 				lane.serial.Lock()
-				if time.Now().Before(lane.claudeRetryDeadline) {
+				now := time.Now()
+				if m.clock != nil {
+					now = m.clock.Now()
+				}
+				if now.Before(lane.claudeRetryDeadline) {
 					lane.serial.Unlock()
 					continue
 				}
@@ -490,14 +501,9 @@ func (m *Manager) scheduleClaudeMailRetry(agentID string, delay time.Duration) {
 				m.OfferDirect(agentID)
 				return
 			case <-wake:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
+				cancel()
 			case <-m.runCtx.Done():
-				timer.Stop()
+				cancel()
 				lane.serial.Lock()
 				lane.claudeRetryScheduled = false
 				lane.claudeRetryDeadline = time.Time{}

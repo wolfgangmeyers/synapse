@@ -1260,6 +1260,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	var err error
 	if saved.SelectedModel.Provider == claudeCodeProvider {
 		model = &ai.Model{Provider: claudeCodeProvider, Api: claudeCodeProvider, ID: saved.SelectedModel.ID, ContextWindow: 1000000}
+	} else if saved.SelectedModel.Provider == antigravityProvider {
+		mInfo, _ := antigravityModel(saved.SelectedModel.ID)
+		cw := mInfo.ContextWindow
+		if cw <= 0 {
+			cw = 1000000
+		}
+		model = &ai.Model{Provider: antigravityProvider, Api: antigravityProvider, ID: saved.SelectedModel.ID, ContextWindow: cw}
 	} else {
 		model, err = ResolveModel(saved.SelectedModel)
 	}
@@ -1267,7 +1274,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, err
 	}
 	var injectedStreamModel *ai.Model
-	if m.embeddedModelResolver != nil && saved.SelectedModel.Provider != claudeCodeProvider {
+	if m.embeddedModelResolver != nil && !isCLIProvider(saved.SelectedModel.Provider) {
 		resolved := m.embeddedModelResolver(saved)
 		if resolved == nil {
 			return 0, errors.New("embedded model is unavailable")
@@ -1439,7 +1446,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		maxTokens = model.MaxTokens
 	}
 	activeWorkflowState := authority.workflowState
-	workerPrompt := buildEmbeddedEngineSystemPrompt(role, binding.AgentID, saved.Cwd, saved.SelectedModel.Provider == claudeCodeProvider)
+	workerPrompt := buildEmbeddedEngineSystemPrompt(role, binding.AgentID, saved.Cwd, isCLIProvider(saved.SelectedModel.Provider))
 	if activeWorkflowState != nil {
 		wfVars := saved.WorkflowVariables
 		if guidanceState, err := m.store.WorkflowStateForGuidance(ctx, binding.AgentID, activeWorkflowState); err == nil {
@@ -1449,7 +1456,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			workerPrompt = workerPrompt + "\n\n" + guidance
 		}
 	}
-	if saved.SelectedModel.Provider != claudeCodeProvider {
+	if !isCLIProvider(saved.SelectedModel.Provider) {
 		session = coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 			ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
 				return nil, nil
@@ -1765,7 +1772,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 				// Claude reports fresh usage on the wake itself. Settle before monitoring
 				// while the reset coordinator still owns the fresh-binding guard.
-				if explicitPrompt != ContextResetWakePrompt || model.Provider == claudeCodeProvider {
+				if explicitPrompt != ContextResetWakePrompt || isCLIProvider(model.Provider) {
 					if err := settleExecution(); err != nil {
 						return 0, err
 					}
@@ -1779,7 +1786,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if explicitPrompt != ContextResetWakePrompt || model.Provider == claudeCodeProvider {
+		if explicitPrompt != ContextResetWakePrompt || isCLIProvider(model.Provider) {
 			if err := settleExecution(); err != nil {
 				return 0, err
 			}
@@ -1841,7 +1848,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		return nil
 	}
 
-	claudeEvaluation := model != nil && model.Provider == claudeCodeProvider
+	claudeEvaluation := model != nil && isCLIProvider(model.Provider)
 	claudeRestartGeneration := p.claudeRestartGeneration
 	policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID)
 	if err != nil {

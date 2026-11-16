@@ -115,7 +115,13 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		setReceipt(&receipt)
 		return nil
 	}
-	config := ClaudeCodeProcessConfig{OrphanRoot: m.config.SessionRoot, Cwd: saved.Cwd, SessionID: claudeCodeSessionID(p.binding.SessionID), Model: saved.SelectedModel.ID, RootAuthority: authority.role == "root"}
+	var adapter CLIAdapter
+	if saved.SelectedModel.Provider == antigravityProvider {
+		adapter = NewAntigravityAdapter("", nil)
+	} else {
+		adapter = NewClaudeCodeAdapter("", nil)
+	}
+	config := ClaudeCodeProcessConfig{Adapter: adapter, OrphanRoot: m.config.SessionRoot, Cwd: saved.Cwd, SessionID: claudeCodeSessionID(p.binding.SessionID), Model: saved.SelectedModel.ID, RootAuthority: authority.role == "root"}
 	grantFactory := func() (claudeCodeProcessGrant, error) {
 		mcpURL, err := m.ClaudeCodeMCPURL()
 		if err != nil {
@@ -159,7 +165,11 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		path := file.Name()
 		err = file.Chmod(0600)
 		if err == nil {
-			err = json.NewEncoder(file).Encode(map[string]interface{}{"mcpServers": map[string]interface{}{"mecha": map[string]interface{}{"type": "http", "url": mcpURL, "headers": map[string]string{"Authorization": "Bearer " + token}}}})
+			var content []byte
+			content, err = adapter.EphemeralSettingsContent(mcpURL, token)
+			if err == nil {
+				_, err = file.Write(content)
+			}
 		}
 		closeErr := file.Close()
 		if err == nil {

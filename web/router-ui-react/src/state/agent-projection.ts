@@ -1,4 +1,4 @@
-import { isClaudeCodeModel, mergeAgentModelSnapshot, normalizeModelSummaries, normalizeModelSummary, type ModelAgent } from "../domain/models";
+import { isClaudeCodeModel, isAntigravityModel, mergeAgentModelSnapshot, normalizeModelSummaries, normalizeModelSummary, type ModelAgent } from "../domain/models";
 import { normalizeGoalProjection, normalizeGoalState, type GoalState } from "../domain/goals";
 import type { AgentProgress, ContextUsage, ManagedAgent, ManagedChildrenProjection } from "../protocol/types";
 export type { AgentProgress };
@@ -73,3 +73,15 @@ export { normalizeModelSummary, normalizeModelSummaries };
 export function isClaudeCodeAgent(agent: Agent | undefined): boolean {
   return agent?.source === "router-managed" && isClaudeCodeModel(agent.managed_agent?.model ?? agent.current_model);
 }
+
+export function isAntigravityAgent(agent: Agent | ManagedAgent | null | undefined): boolean {
+  if (!agent) return false;
+  if ("source" in agent && agent.source !== "router-managed") return false;
+  const managed = "managed_agent" in agent ? agent.managed_agent : agent;
+  const currentModel = "current_model" in agent ? agent.current_model : undefined;
+  const model: { id?: string; provider?: string } | undefined =
+    managed?.model ?? (currentModel ? normalizeModelSummary(currentModel) : undefined);
+  if (!model) return false;
+  return isAntigravityModel(model.id) || model.provider === "antigravity";
+}
+

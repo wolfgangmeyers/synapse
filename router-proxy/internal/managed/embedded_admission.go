@@ -17,6 +17,9 @@ func (m *Manager) admitEmbeddedModel(ctx context.Context, candidate Model) (Mode
 	if candidate.Provider == claudeCodeProvider {
 		return claudeCodeModel(candidate.ID)
 	}
+	if candidate.Provider == antigravityProvider {
+		return antigravityModel(candidate.ID)
+	}
 	if candidate.Provider == "google" || candidate.Provider == "google-vertex" {
 		return candidate, nil
 	}
