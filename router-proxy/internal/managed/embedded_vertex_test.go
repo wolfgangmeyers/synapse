@@ -478,4 +478,52 @@ func TestVertexStream_ReasoningOff_ThinkingDisabled(t *testing.T) {
 	require.Equal(t, float64(0), thinkingConfig25["thinkingBudget"])
 	_, hasInclude25 := thinkingConfig25["includeThoughts"]
 	require.False(t, hasInclude25, "gemini-2.5-flash with reasoning off must not include includeThoughts")
+
+	// 3. Test gemini-4 models: thinkingLevel: "LOW" and no includeThoughts
+	for _, gemini4ID := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
+		capturedReqBody = nil
+		s := m.streamEmbeddedVertex(context.Background(), &ai.Model{ID: gemini4ID, Provider: "google-vertex"}, transcript, opts)
+		for event := range s.Events() {
+			if event.Type == ai.EventError {
+				t.Fatalf("stream encountered error: %v", event.Error)
+			}
+		}
+		require.NotNil(t, capturedReqBody)
+		genCfg, ok := capturedReqBody["generationConfig"].(map[string]any)
+		require.True(t, ok)
+		thkCfg, ok := genCfg["thinkingConfig"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "LOW", thkCfg["thinkingLevel"], "expected LOW for %s", gemini4ID)
+		_, hasInc := thkCfg["includeThoughts"]
+		require.False(t, hasInc, "%s with reasoning off must not include includeThoughts", gemini4ID)
+	}
 }
+
+func TestVertexModelRequiresGlobal(t *testing.T) {
+	testCases := []struct {
+		modelID  string
+		expected bool
+	}{
+		{"gemini-4-argon", true},
+		{"gemini-4-carbon", true},
+		{"gemini-4-hydrogen", true},
+		{"gemini-4-flash", true},
+		{"argon", true},
+		{"carbon", true},
+		{"hydrogen", true},
+		{"gemini-3.8-flash", true},
+		{"gemini-3.8-pro", true},
+		{"gemini-3-flash", true},
+		{"gemini-2.5-flash", false},
+		{"gemini-1.5-pro", false},
+		{"claude-3-5-sonnet", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.modelID, func(t *testing.T) {
+			actual := vertexModelRequiresGlobal(tc.modelID)
+			require.Equal(t, tc.expected, actual, "model %s global routing requirement mismatch", tc.modelID)
+		})
+	}
+}
+

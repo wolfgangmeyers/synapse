@@ -466,6 +466,25 @@ func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
 	require.Equal(t, float64(0), thinkingConfig25["thinkingBudget"])
 	_, hasInclude25 := thinkingConfig25["includeThoughts"]
 	require.False(t, hasInclude25, "gemini-2.5-flash with reasoning off must not include includeThoughts")
+
+	// 3. Test gemini-4 models: thinkingLevel: "LOW" and no includeThoughts
+	for _, gemini4ID := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
+		capturedReqBody = nil
+		s := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: gemini4ID, Provider: "google"}, transcript, opts)
+		for event := range s.Events() {
+			if event.Type == ai.EventError {
+				t.Fatalf("stream encountered error: %v", event.Error)
+			}
+		}
+		require.NotNil(t, capturedReqBody)
+		genCfg, ok := capturedReqBody["generationConfig"].(map[string]any)
+		require.True(t, ok)
+		thkCfg, ok := genCfg["thinkingConfig"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "LOW", thkCfg["thinkingLevel"], "expected LOW for %s", gemini4ID)
+		_, hasInc := thkCfg["includeThoughts"]
+		require.False(t, hasInc, "%s with reasoning off must not include includeThoughts", gemini4ID)
+	}
 }
 
 func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {

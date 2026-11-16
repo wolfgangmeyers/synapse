@@ -297,6 +297,7 @@ func (s *Store) RecordManagedCompleteHistoryWithDetails(ctx context.Context, age
 }
 
 func (s *Store) RecordManagedCompleteHistoryWithFullDetails(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation, toolInput any, messageContent *string, senderIdentity *string) (ManagedHistoryEntry, error) {
+	message = boundManagedHistoryMessage(message)
 	if ctx == nil || !isLifecycleText(agentID) || category == "" || level == "" || !managedHistoryText(message, 512, false) || len(category) > 64 || len(level) > 32 || len(eventKey) > 200 || !utf8.ValidString(category) || !utf8.ValidString(level) || !utf8.ValidString(eventKey) {
 		return ManagedHistoryEntry{}, errors.New("managed history entry is invalid")
 	}
@@ -397,11 +398,23 @@ func (s *Store) recordManagedCompleteHistoryStrictTx(ctx context.Context, agentI
 	return s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, detail)
 }
 
+func boundManagedHistoryMessage(message string) string {
+	msg := strings.TrimSpace(message)
+	if len(msg) == 0 {
+		return "operational event"
+	}
+	if len(msg) > 512 {
+		return msg[:509] + "..."
+	}
+	return msg
+}
+
 // recordManagedCompleteHistoryTx inserts and prunes one Complete row while the
 // caller's immediate transaction is open. Generic callers retain the existing
 // idempotent event-key behavior; acknowledgement callers use the strict helper
 // above so an unrelated row can never be silently reused.
 func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation, details ...managedHistoryDetails) (ManagedHistoryEntry, error) {
+	message = boundManagedHistoryMessage(message)
 	detail := managedHistoryDetails{}
 	if len(details) > 0 {
 		detail = details[0]

@@ -60,36 +60,47 @@ function isValidVertexRegion(region) {
   return REGION_LABEL_PATTERN.test(region);
 }
 
-function ensureArgonModel(models, provider, api, baseUrl) {
+const GEMINI_4_MODELS = [
+  { id: "gemini-4-argon", name: "Gemini 4 Argon" },
+  { id: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+  { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+];
+
+function ensureGemini4Models(models, provider, api, baseUrl) {
   if (!Array.isArray(models)) return models;
-  if (models.some((m) => m?.id === "gemini-4-argon")) return models;
+  let result = [...models];
   const template = models.find((m) => m?.id === "gemini-3.8-flash") || models[0];
-  const argon = {
-    ...template,
-    id: "gemini-4-argon",
-    name: "Gemini 4 Argon",
-    api: api || template?.api,
-    provider: provider || template?.provider,
-    baseUrl: baseUrl || template?.baseUrl,
-    reasoning: true,
-    thinkingLevelMap: template?.thinkingLevelMap || {
-      off: null,
-      minimal: null,
-      low: "low",
-      medium: "medium",
-      high: "high",
-      xhigh: null,
-      max: null,
-    },
-    input: ["text", "image"],
-    cost: template?.cost || { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  };
-  return [...models, argon];
+
+  for (const { id, name } of GEMINI_4_MODELS) {
+    if (result.some((m) => m?.id === id)) continue;
+    const model = {
+      ...template,
+      id,
+      name,
+      api: api || template?.api,
+      provider: provider || template?.provider,
+      baseUrl: baseUrl || template?.baseUrl,
+      reasoning: true,
+      thinkingLevelMap: template?.thinkingLevelMap || {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+      input: ["text", "image"],
+      cost: template?.cost || { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+      contextWindow: 1048576,
+      maxTokens: 65536,
+    };
+    result.push(model);
+  }
+  return result;
 }
 
-function registerGoogleProvider(runtime) {
+export function registerGoogleProvider(runtime) {
   const google = runtime.getProvider("google");
   if (!google) return;
 
@@ -98,7 +109,7 @@ function registerGoogleProvider(runtime) {
     ...google,
     getModels: () => {
       const models = originalGetModels ? originalGetModels() : (google.models || []);
-      return ensureArgonModel(models, "google", "google-generative-ai", google.baseUrl);
+      return ensureGemini4Models(models, "google", "google-generative-ai", google.baseUrl);
     },
     auth: {
       apiKey: {
@@ -125,7 +136,7 @@ function registerGoogleProvider(runtime) {
   });
 }
 
-function registerVertexAdcProvider(runtime) {
+export function registerVertexAdcProvider(runtime) {
   const vertex = runtime.getProvider("google-vertex");
   if (!vertex) return;
 
@@ -134,7 +145,7 @@ function registerVertexAdcProvider(runtime) {
     ...vertex,
     getModels: () => {
       const models = originalGetModels ? originalGetModels() : (vertex.models || []);
-      return ensureArgonModel(models, "google-vertex", "google-vertex", vertex.baseUrl);
+      return ensureGemini4Models(models, "google-vertex", "google-vertex", vertex.baseUrl);
     },
     auth: {
       apiKey: {
