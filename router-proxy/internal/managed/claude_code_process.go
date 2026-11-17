@@ -24,6 +24,15 @@ const (
 	claudeCodeQueueBytes  = 16 << 20
 )
 
+const (
+	ClaudeMilestonePreflightAuth       = "preflight_auth"
+	ClaudeMilestoneMCPGrantSetup       = "mcp_grant_setup"
+	ClaudeMilestoneProcessSpawn        = "process_spawn"
+	ClaudeMilestoneGateRelease         = "gate_release"
+	ClaudeMilestoneControlProbe        = "control_probe"
+	ClaudeMilestoneInitialPromptSubmit = "initial_prompt_submit"
+)
+
 // ClaudeCodeProcessConfig describes only the CLI boundary. The caller owns
 // configuration files, checked persistence, process reuse and turn admission.
 // Nil Environment inherits the host environment. Binary overrides
@@ -193,9 +202,17 @@ func resolveClaudeCodeBinary(cfg ClaudeCodeProcessConfig, env []string) (string,
 	return "", fmt.Errorf("Claude executable not found: %w", errors.Join(errClaudeExecutableMissing, os.ErrNotExist))
 }
 
-// PreflightClaudeCode runs local `auth status --json` with a five-second limit,
+// PreflightClaudeCode runs local `auth status --json` with a fifteen-second limit,
 // bounded capture and scrubbed environment. No identity is retained or model called.
 func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (string, error) {
+	bin, err := preflightClaudeCodeInternal(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestonePreflightAuth, err)
+	}
+	return bin, nil
+}
+
+func preflightClaudeCodeInternal(ctx context.Context, cfg ClaudeCodeProcessConfig) (string, error) {
 	if cfg.admitExternal != nil {
 		release, err := cfg.admitExternal()
 		if err != nil {
@@ -222,7 +239,7 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 		}
 		return "", claudeStartCategorize(category, fmt.Errorf("install Claude CLI and sign in on the host: %w", err))
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd, gate, err := claudeCodeGatedCommand(bin, []string{"auth", "status", "--json"})
 	if err != nil {
@@ -382,7 +399,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		stderr.Close()
 		outw.Close()
 		errw.Close()
-		return nil, claudeStartCategorize(claudeStartSpawn, err)
+		return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneProcessSpawn, claudeStartCategorize(claudeStartSpawn, err))
 	}
 	_ = cmd.ExtraFiles[0].Close()
 	var orphanPath string
@@ -479,10 +496,10 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		}
 		if n == 0 && confirmed && cfg.afterFailedRelease != nil {
 			if restoreErr := cfg.afterFailedRelease(); restoreErr != nil {
-				return nil, errors.Join(writeErr, cleanupErr, restoreErr)
+				return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneGateRelease, errors.Join(writeErr, cleanupErr, restoreErr))
 			}
 		}
-		return nil, errors.Join(writeErr, cleanupErr)
+		return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneGateRelease, errors.Join(writeErr, cleanupErr))
 	}
 	gate.Close()
 	outw.Close()
@@ -718,7 +735,7 @@ func (p *ClaudeCodeProcess) write(ctx context.Context, value interface{}) error 
 	return p.writeWithStart(ctx, value, nil)
 }
 func (p *ClaudeCodeProcess) writeWithStart(ctx context.Context, value interface{}, start func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -807,7 +824,7 @@ func (p *ClaudeCodeProcess) sendUserWithStart(ctx context.Context, id string, co
 // Control correlates the nested response. Timeouts stop uncertain protocol state;
 // no abandoned response map accumulates. A rejection does not stop the process.
 func (p *ClaudeCodeProcess) Control(ctx context.Context, request map[string]interface{}) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	p.mu.Lock()
 	if len(p.controls) >= 64 {
