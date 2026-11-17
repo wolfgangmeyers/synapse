@@ -5590,29 +5590,6 @@ dialog,
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-.timeline-load-older-item {
-  display: flex;
-  justify-content: center;
-  padding: 10px 0;
-  list-style: none;
-}
-.load-older-button {
-  background: var(--bg-surface-elevated, #1e293b);
-  color: var(--text-muted, #94a3b8);
-  border: 1px solid var(--border-subtle, #334155);
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.load-older-button:hover:not(:disabled) {
-  background: #334155;
-  color: #ffffff;
-  border-color: #475569;
-}
-
 /* Subagent Viewer Dialog & Cards */
 /* Knowledge Base Dialog */
 dialog.kb-dialog:not([open]) {

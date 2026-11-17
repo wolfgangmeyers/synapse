@@ -48,7 +48,7 @@ Existing tests are partial evidence only; they have not been run for this docume
 ### Scenario: [SCN-MANAGED-PAGE-003] Bounded live window and hidden pages
 - **Given** a selected agent receives sustained live activity, or a page contains only entries hidden from the feed.
 - **When** the live window exceeds 150 entries or the user opens the conversation.
-- **Then** live retention and live-ID bookkeeping remain bounded; discarded durable entries remain reachable using the managed history cursor. The load-older control remains available even if no entries on the current page are visible.
+- **Then** live retention and live-ID bookkeeping remain bounded; discarded durable entries remain reachable using the managed history cursor. Older history pagination remains available via scrollback even if no entries on the current page are visible.
 
 ### Scenario: [SCN-MANAGED-PAGE-004] Timeline recovery and cursor failure
 - **Given** timeline messages have been trimmed from the live window, or an older timeline request fails.

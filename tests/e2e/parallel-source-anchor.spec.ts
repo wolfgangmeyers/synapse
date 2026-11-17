@@ -40,11 +40,11 @@ c.commit()
     await expect(page.getByText('Activity item 79', { exact: true })).toBeVisible();
     await expect(page.getByText('Timeline item 79', { exact: true })).toBeVisible();
     // Reveal the initially deferred combined window before requesting older source pages.
-    await page.getByRole('button', { name: /load older history/i }).click();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 50;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await expect(page.getByText('Timeline item 30', { exact: true })).toHaveCount(1);
-    const anchor = page.getByText('Timeline item 55', { exact: true });
-    await anchor.scrollIntoViewIfNeeded();
-    const before = await anchor.boundingBox();
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let observed!: () => void;
@@ -62,9 +62,14 @@ c.commit()
         await route.fulfill({ response });
       } else await route.continue();
     });
+    const anchor = page.getByText('Timeline item 55', { exact: true });
     try {
-      await page.getByRole('button', { name: /load older history/i }).click();
+      await page.locator('.messages').evaluate((el) => {
+        el.scrollTop = 50;
+        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+      });
       await Promise.race([requested, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('older activity request not observed')), 10000))]);
+      const before = await anchor.boundingBox();
       await expect(page.getByText('Timeline item 00', { exact: true })).toHaveCount(1);
       await expect(page.getByText('Activity item 00', { exact: true })).toHaveCount(0);
       // Keep the second response gated until the first prepend and viewport stop moving.
@@ -81,12 +86,13 @@ c.commit()
           );
         }, before!.y);
       }, { timeout: 10_000 }).toBeLessThanOrEqual(3);
+      release();
+      await expect(page.getByText('Activity item 00', { exact: true })).toHaveCount(1);
+      await expect.poll(async () => {
+        const after = await anchor.boundingBox();
+        return Math.abs(after!.y - before!.y);
+      }).toBeLessThanOrEqual(3);
     } finally { release(); }
-    await expect(page.getByText('Activity item 00', { exact: true })).toHaveCount(1);
-    await expect.poll(async () => {
-      const after = await anchor.boundingBox();
-      return Math.abs(after!.y - before!.y);
-    }).toBeLessThanOrEqual(3);
     expect(timelineRequests).toBe(1);
     expect(historyRequests).toBe(1);
     for (const i of [0, 30, 55, 79]) {

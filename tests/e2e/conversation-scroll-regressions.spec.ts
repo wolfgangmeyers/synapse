@@ -185,7 +185,6 @@ test.describe('Persistent scroll regressions', () => {
     await p.reload();
     await expect.poll(() => browserRegistered).toBe(true);
     await expect(p.locator('.bubble-wrap').filter({ hasText: `${agent} retained ${newest}` })).toHaveCount(1);
-    await expect(p.locator('.load-older-button')).toBeEnabled();
     expect(await feed(p).evaluate(el => el.scrollHeight - el.clientHeight)).toBeGreaterThan(600); await bottom(p);
   }
   async function append(p: Page, agent: string, label: string) {
@@ -214,16 +213,6 @@ test.describe('Persistent scroll regressions', () => {
     let release!: () => void, requested!: () => void;
     const gate = new Promise<void>(r => { release = r; });
     const seen = new Promise<void>(r => { requested = r; });
-    let fallbackFinished!: () => void;
-    const fallbackDone = new Promise<void>(resolve => { fallbackFinished = resolve; });
-    if (outcome === 'failure') await p.route('**/v1/conversations?**', async route => {
-      const u = new URL(route.request().url());
-      if (u.searchParams.get('peer') !== agent || !u.searchParams.has('before')) { await route.continue(); return; }
-      const response = p.waitForResponse(r => r.url() === route.request().url());
-      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'deterministic legacy pagination outage' }) });
-      await (await response).finished();
-      fallbackFinished();
-    });
     await p.route('**/v1/conversation?**', async route => {
       const u = new URL(route.request().url());
       if (u.searchParams.get('agent_id') !== agent || !u.searchParams.has('before_seq')) { await route.continue(); return; }
@@ -233,29 +222,25 @@ test.describe('Persistent scroll regressions', () => {
         body: JSON.stringify(outcome === 'failure' ? { error: 'deterministic pagination outage' } : {
           agent_id: agent, events: outcome === 'empty' ? [] : retained.events, next_before_seq: retained.next_before_seq }) });
     });
-    // Real button action, without scrolling it into view and triggering another load.
-    await test.step('request older page through enabled history button', async () => {
-      await expect(p.locator('.load-older-button')).toBeEnabled();
-      await p.locator('.load-older-button').dispatchEvent('click'); await seen;
+    await test.step('request older page through scroll to top', async () => {
+      await feed(p).evaluate(el => { el.scrollTop = 50; el.dispatchEvent(new Event('scroll', { bubbles: true })); });
+      await seen;
     });
-    return { release, fallback: outcome === 'failure' ? fallbackDone : Promise.resolve() };
+    return { release, fallback: Promise.resolve() };
   }
   async function complete(p: Page, request: { release(): void; fallback: Promise<void> }, expectFallback = true) {
     const response = p.waitForResponse(r => r.url().includes('before_seq=')); request.release();
     await (await response).finished();
     if (expectFallback) await request.fallback;
     await settle(p);
-    // Observe the UI lifecycle after the HTTP body, not only response headers.
-    const button = p.locator('.load-older-button');
-    if (await button.count()) await expect(button).toBeEnabled();
-    await settle(p);
   }
   for (const outcome of ['failure', 'empty', 'duplicate'] as const) {
     test(`SCN-SCROLL-007: pagination ${outcome} releases follow after returning near bottom`, async ({ page: p }) => {
       const a = `scroll-${outcome}`; await seed(a); await open(p, a);
-      const reading = await scroll(p, 'reading'), count = await p.locator('.bubble-wrap').count();
-      await complete(p, await pending(p, a, outcome));
-      await expect(p.locator('.load-older-button')).toBeEnabled();
+      const count = await p.locator('.bubble-wrap').count();
+      const request = await pending(p, a, outcome);
+      const reading = await scroll(p, 'reading');
+      await complete(p, request);
       expect(await p.locator('.bubble-wrap').count()).toBe(count); await stable(p, reading);
       await append(p, a, `${outcome} reading update`); await stable(p, reading);
       await scroll(p, 'near');
@@ -281,9 +266,10 @@ test.describe('Persistent scroll regressions', () => {
     });
   }
   test('SCN-SCROLL-011: successful delayed pagination respects return to bottom', async ({ page: p }) => {
-    const a = 'scroll-success'; await seed(a); await open(p, a); await scroll(p, 'reading');
+    const a = 'scroll-success'; await seed(a); await open(p, a);
     const count = await p.locator('.bubble-wrap').count(), request = await pending(p, a, 'success');
     try {
+      await scroll(p, 'reading');
       await scroll(p, 'bottom'); await complete(p, request);
       await expect(p.locator('.bubble-wrap')).toHaveCount(count + 10); await bottom(p);
       await append(p, a, 'success resumed first'); await bottom(p);
@@ -344,9 +330,10 @@ test.describe('Persistent scroll regressions', () => {
     expect(Math.max(...deviations)).toBeLessThanOrEqual(2);
   }
   test('SCN-SCROLL-012: successful prepend preserves visible reading anchor with concurrent live update', async ({ page: p }) => {
-    const a = 'anchor-success'; await seed(a); await open(p, a); await scroll(p, 'reading');
-    const anchor = await readingAnchor(p), count = await p.locator('.bubble-wrap').count();
+    const a = 'anchor-success'; await seed(a); await open(p, a);
     const request = await pending(p, a, 'success');
+    await scroll(p, 'reading');
+    const anchor = await readingAnchor(p), count = await p.locator('.bubble-wrap').count();
     try {
       await append(p, a, 'concurrent live during prepend'); await anchorStable(p, anchor);
       await complete(p, request);
@@ -357,8 +344,9 @@ test.describe('Persistent scroll regressions', () => {
   });
   test('SCN-SCROLL-013: successful stale pagination cannot contaminate another conversation', async ({ page: p }) => {
     const a = 'stale-success-a', b = 'stale-success-b';
-    await seed(a); await seed(b); await open(p, a); await scroll(p, 'reading');
+    await seed(a); await seed(b); await open(p, a);
     const request = await pending(p, a, 'success');
+    await scroll(p, 'reading');
     const switchTo = async (agent: string) => {
       await p.locator('.agent-row-select').filter({ hasText: new RegExp(agent.replace(/-/g, ' '), 'i') }).click();
       await expect(p.locator('.bubble-wrap').filter({ hasText: `${agent} retained 60` })).toHaveCount(1);

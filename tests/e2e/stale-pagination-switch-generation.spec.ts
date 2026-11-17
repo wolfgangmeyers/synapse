@@ -76,7 +76,10 @@ c.commit()
       await resume.promise;
       try { await route.fulfill({ response }); } finally { delivered.release(); }
     });
-    await page.getByRole('button', { name: /load older history/i }).click();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await fetched.promise;
     expect(contents).toContain('Fence history 001');
     await select('Beta');
@@ -93,7 +96,10 @@ c.commit()
     await expect(bubble(page, 'Fence history 065')).toHaveCount(1);
     await expect(bubble(page, 'Current Alpha live')).toHaveCount(1);
     // The stale page must not consume the new selection's cursor or leave it loading.
-    await page.getByRole('button', { name: /load older history/i }).click();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await expect(bubble(page, 'Fence history 001')).toBeVisible();
     await expect(bubble(page, 'Current Alpha live')).toHaveCount(1);
   } finally {
