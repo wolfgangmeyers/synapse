@@ -28,7 +28,7 @@ func TestImplicitReturnDefinitionPortability(t *testing.T) {
 		}
 		require.Equal(t, map[string]bool{"enabled": true, "disabled": false}, values)
 	}
-	dup, err := s.DuplicateWorkflow(ctx, wf.ID, "duplicate")
+	dup, err := s.DuplicateWorkflow(ctx, wf.ID, "", "duplicate")
 	require.NoError(t, err)
 	states, err := s.ListWorkflowStatesByWorkflow(ctx, dup.ID)
 	require.NoError(t, err)

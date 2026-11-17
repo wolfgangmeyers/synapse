@@ -587,6 +587,19 @@ export interface WorkflowJournalDetail { state_totals: { workflow_id: string; wo
 export interface WorkflowJournalRunPage { runs: WorkflowJournalRun[]; next_cursor?: string; }
 export interface WorkflowJournalFilters { status?: string; workflow_id?: string; cursor?: string; }
 
+/**
+ * WorkflowCollection represents an isolated group of workflows.
+ * The 'default' collection is immutable and acts as system fallback.
+ */
+export interface WorkflowCollection {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  workflow_count: number;
+}
+
 export interface RouterHttpClient {
   readonly routerUrl: string;
   request(path: string, init?: RequestInit): Promise<unknown>;
@@ -616,12 +629,18 @@ export interface RouterHttpClient {
   createWorkflowState(payload: unknown): Promise<WorkflowStateResponse>;
   updateWorkflowState(id: string, payload: unknown): Promise<WorkflowStateResponse>;
   deleteWorkflowState(id: string): Promise<unknown>;
-  listWorkflows(): Promise<Workflow[]>;
+  listWorkflowCollections(): Promise<WorkflowCollection[]>;
+  createWorkflowCollection(payload: { name: string; description?: string }): Promise<WorkflowCollection>;
+  getWorkflowCollection(id: string): Promise<WorkflowCollection>;
+  updateWorkflowCollection(id: string, payload: { name: string; description?: string }): Promise<WorkflowCollection>;
+  deleteWorkflowCollection(id: string, cascade?: boolean): Promise<{ ok: boolean; deleted_id: string }>;
+  listWorkflows(collectionId?: string): Promise<Workflow[]>;
   getWorkflow(id: string): Promise<WorkflowWithStates>;
   createWorkflow(req: CreateWorkflowRequest): Promise<Workflow>;
   updateWorkflow(id: string, req: UpdateWorkflowRequest): Promise<Workflow>;
   deleteWorkflow(id: string): Promise<void>;
-  duplicateWorkflow(id: string, req?: { name?: string }): Promise<Workflow>;
+  duplicateWorkflow(workflowId: string, payload?: { destination_collection_id?: string; name?: string }): Promise<Workflow>;
+  moveWorkflow(workflowId: string, destinationCollectionId: string): Promise<Workflow>;
   exportWorkflow(id: string): Promise<WorkflowExportBundle>;
   importWorkflow(bundle: WorkflowExportBundle): Promise<Workflow>;
   updateWorkflowLayout(id: string, positions: WorkflowStatePosition[]): Promise<void>;
@@ -781,12 +800,21 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     createWorkflowState: async (payload) => jsonRequest("/v1/workflow-states", "POST", payload) as Promise<WorkflowStateResponse>,
     updateWorkflowState: async (id, payload) => jsonRequest(`/v1/workflow-states/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowStateResponse>,
     deleteWorkflowState: (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`, { method: "DELETE" }),
-    listWorkflows: async () => request("/v1/workflows") as Promise<Workflow[]>,
+    listWorkflowCollections: async () => request("/v1/workflow-collections") as Promise<WorkflowCollection[]>,
+    createWorkflowCollection: async (payload: { name: string; description?: string }) => jsonRequest("/v1/workflow-collections", "POST", payload) as Promise<WorkflowCollection>,
+    getWorkflowCollection: async (id: string) => request(`/v1/workflow-collections/${encodeURIComponent(id)}`) as Promise<WorkflowCollection>,
+    updateWorkflowCollection: async (id: string, payload: { name: string; description?: string }) => jsonRequest(`/v1/workflow-collections/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowCollection>,
+    deleteWorkflowCollection: async (id: string, cascade?: boolean) => {
+      await request(`/v1/workflow-collections/${encodeURIComponent(id)}?cascade=${cascade ? "true" : "false"}`, { method: "DELETE" });
+      return { ok: true, deleted_id: id };
+    },
+    listWorkflows: async (collectionId?: string) => request(`/v1/workflows${collectionId ? `?collection_id=${encodeURIComponent(collectionId)}` : ""}`) as Promise<Workflow[]>,
     getWorkflow: async (id) => request(`/v1/workflows/${encodeURIComponent(id)}`) as Promise<WorkflowWithStates>,
     createWorkflow: async (req) => jsonRequest("/v1/workflows", "POST", req) as Promise<Workflow>,
     updateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}`, "PUT", req) as Promise<Workflow>,
     deleteWorkflow: async (id) => { await request(`/v1/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }); },
-    duplicateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/duplicate`, "POST", req ?? {}) as Promise<Workflow>,
+    duplicateWorkflow: async (workflowId: string, payload?: { destination_collection_id?: string; name?: string }) => jsonRequest(`/v1/workflows/${encodeURIComponent(workflowId)}/duplicate`, "POST", payload ?? {}) as Promise<Workflow>,
+    moveWorkflow: async (workflowId: string, destinationCollectionId: string) => jsonRequest(`/v1/workflows/${encodeURIComponent(workflowId)}/move`, "POST", { destination_collection_id: destinationCollectionId }) as Promise<Workflow>,
     exportWorkflow: async (id) => request(`/v1/workflows/${encodeURIComponent(id)}/export`) as Promise<WorkflowExportBundle>,
     importWorkflow: async (bundle) => jsonRequest("/v1/workflows/import", "POST", bundle) as Promise<Workflow>,
     updateWorkflowLayout: async (id, positions) => { await jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/layout`, "PUT", { positions }); },

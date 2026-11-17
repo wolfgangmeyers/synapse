@@ -86,6 +86,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-WORKFLOWS-002` | Implicit Workflow Goals & Workflow-Level Snooze | `Workflows` | [`workflow-implicit-goals.spec.md`](./workflow-implicit-goals.spec.md) | `tests/e2e/workflow-implicit-goals.spec.ts` | `Active` |
 | `SPEC-WORKFLOWS-IMPLICIT-RETURN-001` | Implicit Workflow Return to Previous State | `Workflows` | [`workflow-implicit-return.spec.md`](./workflow-implicit-return.spec.md) | `tests/e2e/workflow-implicit-return*.spec.ts` and focused return suites (partial; see spec matrix) | `Draft`; acceptance incomplete |
 | `SPEC-WORKFLOWS-003` | Structured Workflow Schedules & Test Clock | `Workflows` | [`SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md`](./SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
+| `SPEC-WORKFLOW-COLLECTIONS-001` | Multiple Workflow Collections with Per-Collection Git Sync, Move, and Copy | `Workflows` | [`workflow-collections.spec.md`](./workflow-collections.spec.md) | `tests/e2e/workflow-collections.spec.ts` | `Active` |
 
 ---
 
