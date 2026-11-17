@@ -491,6 +491,9 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		}
 		toolCallID := call.ToolCall.ID
 		if toolCallID != "" && toolName != "" {
+			if p != nil {
+				p.currentThinking = ""
+			}
 			var companionText string
 			if p != nil && p.currentTurnAssistantText != "" {
 				companionText = p.currentTurnAssistantText
