@@ -40,12 +40,16 @@ func gitSyncRoute(path string) (target string, action string, ok bool) {
 	}
 	parts := strings.Split(rest, "/")
 	if len(parts) == 1 {
-		return parts[0], "", true
+		target = parts[0]
+		action = ""
+	} else if len(parts) == 2 {
+		target = parts[0]
+		action = parts[1]
+	} else {
+		return "", "", false
 	}
-	if len(parts) == 2 {
-		return parts[0], parts[1], true
-	}
-	return "", "", false
+
+	return target, action, true
 }
 
 func (r *Router) getGitSyncer() gitsync.Syncer {
@@ -153,10 +157,31 @@ func (r *Router) handleGitSyncPull(w http.ResponseWriter, req *http.Request, tar
 	ctx, cancel := context.WithTimeout(req.Context(), 60*time.Second)
 	defer cancel()
 
-	targetConfig, err := r.store.GetGitSyncTarget(ctx, target)
+	// Parse target key. Collection-scoped workflow sync uses target keys of the format
+	// "workflows:<collection_id>". For backwards compatibility, the bare target "workflows"
+	// maps to "workflows:default" with fallback to "workflows" in git_sync_targets.
+	lookupTarget := target
+	if target == "workflows" {
+		lookupTarget = "workflows:default"
+	}
+	targetConfig, err := r.store.GetGitSyncTarget(ctx, lookupTarget)
 	if err != nil {
 		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
 		return
+	}
+	// Backward compatibility: if workflows:default is unconfigured, fallback to plain workflows config
+	if (targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "") && target == "workflows" {
+		targetConfig, err = r.store.GetGitSyncTarget(ctx, "workflows")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+	} else if (targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "") && target == "workflows:default" {
+		targetConfig, err = r.store.GetGitSyncTarget(ctx, "workflows")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
 	}
 	if targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "" {
 		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "target_not_configured"})
@@ -166,6 +191,84 @@ func (r *Router) handleGitSyncPull(w http.ResponseWriter, req *http.Request, tar
 	syncer := r.getGitSyncer()
 	if syncer == nil {
 		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+		return
+	}
+
+	isWorkflowTarget := target == "workflows" || strings.HasPrefix(target, "workflows:")
+
+	if isWorkflowTarget {
+		// Extract collection ID from target format "workflows:<collection_id>" or default to "default"
+		targetCollectionID := store.DefaultWorkflowCollectionID
+		if strings.HasPrefix(target, "workflows:") {
+			targetCollectionID = strings.TrimPrefix(target, "workflows:")
+		}
+		if targetCollectionID == "" {
+			targetCollectionID = store.DefaultWorkflowCollectionID
+		}
+
+		filename := "workflows.json"
+		content, exists, err := syncer.Pull(ctx, targetConfig.RepoURL, filename)
+		if err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Git pull failed: %v", err),
+			})
+			return
+		}
+		if !exists {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"target":  target,
+				"exists":  false,
+				"message": "No workflows.json found in repository",
+			})
+			return
+		}
+
+		var payload store.WorkflowsExportPayload
+		if err := json.Unmarshal(content, &payload); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Invalid JSON in %s: %v", filename, err),
+			})
+			return
+		}
+
+		if payload.Format != "" && payload.Format != "mecha-workflows" {
+			r.writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "invalid_request",
+				"message": fmt.Sprintf("unsupported format %q, expected mecha-workflows", payload.Format),
+			})
+			return
+		}
+
+		if payload.Version < 1 {
+			r.writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "invalid_request",
+				"message": fmt.Sprintf("unsupported version %d, expected version >= 1", payload.Version),
+			})
+			return
+		}
+
+		for _, bundle := range payload.Workflows {
+			if err := r.store.ValidateExportBundle(bundle); err != nil {
+				r.writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error":   "invalid_request",
+					"message": fmt.Sprintf("Invalid workflow bundle %q: %v", bundle.Workflow.Name, err),
+				})
+				return
+			}
+		}
+
+		if err := r.store.ReplaceWorkflowsInCollection(ctx, targetCollectionID, payload.Workflows); err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target": target,
+			"exists": true,
+			"count":  len(payload.Workflows),
+		})
 		return
 	}
 
@@ -265,71 +368,6 @@ func (r *Router) handleGitSyncPull(w http.ResponseWriter, req *http.Request, tar
 			"templates": payload.Templates,
 		})
 
-	case "workflows":
-		filename := "workflows.json"
-		content, exists, err := syncer.Pull(ctx, targetConfig.RepoURL, filename)
-		if err != nil {
-			r.writeJSON(w, http.StatusOK, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Git pull failed: %v", err),
-			})
-			return
-		}
-		if !exists {
-			r.writeJSON(w, http.StatusOK, map[string]any{
-				"target":  "workflows",
-				"exists":  false,
-				"message": "No workflows.json found in repository",
-			})
-			return
-		}
-
-		var payload store.WorkflowsExportPayload
-		if err := json.Unmarshal(content, &payload); err != nil {
-			r.writeJSON(w, http.StatusOK, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Invalid JSON in %s: %v", filename, err),
-			})
-			return
-		}
-
-		if payload.Format != "" && payload.Format != "mecha-workflows" {
-			r.writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   "invalid_request",
-				"message": fmt.Sprintf("unsupported format %q, expected mecha-workflows", payload.Format),
-			})
-			return
-		}
-
-		if payload.Version < 1 {
-			r.writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   "invalid_request",
-				"message": fmt.Sprintf("unsupported version %d, expected version >= 1", payload.Version),
-			})
-			return
-		}
-
-		for _, bundle := range payload.Workflows {
-			if err := r.store.ValidateExportBundle(bundle); err != nil {
-				r.writeJSON(w, http.StatusBadRequest, map[string]any{
-					"error":   "invalid_request",
-					"message": fmt.Sprintf("Invalid workflow bundle %q: %v", bundle.Workflow.Name, err),
-				})
-				return
-			}
-		}
-
-		if err := r.store.ReplaceAllWorkflows(ctx, payload.Workflows); err != nil {
-			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-			return
-		}
-
-		r.writeJSON(w, http.StatusOK, map[string]any{
-			"target": "workflows",
-			"exists": true,
-			"count":  len(payload.Workflows),
-		})
-
 	case "kb":
 		// KB sync operates directly on directory structures (PullDirectory)
 		// between the remote repository and the local KB storage directory.
@@ -355,10 +393,31 @@ func (r *Router) handleGitSyncPush(w http.ResponseWriter, req *http.Request, tar
 	ctx, cancel := context.WithTimeout(req.Context(), 60*time.Second)
 	defer cancel()
 
-	targetConfig, err := r.store.GetGitSyncTarget(ctx, target)
+	// Parse target key. Collection-scoped workflow sync uses target keys of the format
+	// "workflows:<collection_id>". For backwards compatibility, the bare target "workflows"
+	// maps to "workflows:default" with fallback to "workflows" in git_sync_targets.
+	lookupTarget := target
+	if target == "workflows" {
+		lookupTarget = "workflows:default"
+	}
+	targetConfig, err := r.store.GetGitSyncTarget(ctx, lookupTarget)
 	if err != nil {
 		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
 		return
+	}
+	// Backward compatibility: if workflows:default is unconfigured, fallback to plain workflows config
+	if (targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "") && target == "workflows" {
+		targetConfig, err = r.store.GetGitSyncTarget(ctx, "workflows")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+	} else if (targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "") && target == "workflows:default" {
+		targetConfig, err = r.store.GetGitSyncTarget(ctx, "workflows")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
 	}
 	if targetConfig == nil || strings.TrimSpace(targetConfig.RepoURL) == "" {
 		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "target_not_configured"})
@@ -368,6 +427,49 @@ func (r *Router) handleGitSyncPush(w http.ResponseWriter, req *http.Request, tar
 	syncer := r.getGitSyncer()
 	if syncer == nil {
 		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+		return
+	}
+
+	isWorkflowTarget := target == "workflows" || strings.HasPrefix(target, "workflows:")
+
+	if isWorkflowTarget {
+		// Extract collection ID from target format "workflows:<collection_id>" or default to "default"
+		targetCollectionID := store.DefaultWorkflowCollectionID
+		if strings.HasPrefix(target, "workflows:") {
+			targetCollectionID = strings.TrimPrefix(target, "workflows:")
+		}
+		if targetCollectionID == "" {
+			targetCollectionID = store.DefaultWorkflowCollectionID
+		}
+
+		filename := "workflows.json"
+		payload, err := r.store.ExportWorkflowCollection(ctx, targetCollectionID)
+		if err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+
+		contentBytes, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+		contentBytes = append(contentBytes, '\n')
+
+		commitMsg := "Update workflows.json from app"
+		if err := syncer.Push(ctx, targetConfig.RepoURL, filename, contentBytes, commitMsg); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Git push failed: %v", err),
+			})
+			return
+		}
+
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target":  target,
+			"success": true,
+			"count":   len(payload.Workflows),
+		})
 		return
 	}
 
@@ -406,36 +508,6 @@ func (r *Router) handleGitSyncPush(w http.ResponseWriter, req *http.Request, tar
 		r.writeJSON(w, http.StatusOK, map[string]any{
 			"success": true,
 			"count":   len(templates),
-		})
-
-	case "workflows":
-		filename := "workflows.json"
-		payload, err := r.store.ExportAllWorkflows(ctx)
-		if err != nil {
-			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-			return
-		}
-
-		contentBytes, err := json.MarshalIndent(payload, "", "  ")
-		if err != nil {
-			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
-			return
-		}
-		contentBytes = append(contentBytes, '\n')
-
-		commitMsg := "Update workflows.json from app"
-		if err := syncer.Push(ctx, targetConfig.RepoURL, filename, contentBytes, commitMsg); err != nil {
-			r.writeJSON(w, http.StatusOK, map[string]any{
-				"success": false,
-				"error":   fmt.Sprintf("Git push failed: %v", err),
-			})
-			return
-		}
-
-		r.writeJSON(w, http.StatusOK, map[string]any{
-			"target":  "workflows",
-			"success": true,
-			"count":   len(payload.Workflows),
 		})
 
 	case "kb":

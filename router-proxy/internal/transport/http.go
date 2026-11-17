@@ -78,6 +78,12 @@ var errorMessages = map[string]string{
 	"invalid_workflow":                  "Workflow request is invalid.",
 	"workflow_name_conflict":            "Workflow name already exists.",
 	"workflow_not_found":                "Workflow was not found.",
+	"invalid_workflow_collection":        "Workflow collection request is invalid.",
+	"workflow_collection_name_conflict": "Workflow collection name already exists.",
+	"workflow_collection_not_found":     "Workflow collection was not found.",
+	"cannot_modify_default_collection":  "Cannot modify default workflow collection.",
+	"cannot_delete_default_collection":  "Cannot delete default workflow collection.",
+	"collection_not_empty":              "Workflow collection is not empty.",
 	"reminder_idempotency_conflict":     "Reminder ID already belongs to a different request.",
 	"reminder_not_cancelable":           "Reminder is already linked to a delivery.",
 	"reminder_target_unavailable":       "Reminder target has never connected.",
@@ -216,6 +222,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/prompt-templates":
 		r.handlePromptCollection(w, req)
 		return
+	case path == "/v1/workflow-collections":
+		r.handleWorkflowCollections(w, req)
+		return
 	case path == "/v1/workflows":
 		r.handleWorkflowsCollection(w, req)
 		return
@@ -329,6 +338,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-states/"); ok {
 		r.handleWorkflowStateItem(w, req, id)
+		return
+	}
+	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-collections/"); ok {
+		r.handleWorkflowCollectionItem(w, req, id)
 		return
 	}
 	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-schedules/"); ok {
@@ -1683,6 +1696,18 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = &httpError{409, "workflow_name_conflict", 0}
 	case *store.WorkflowNotFoundError:
 		value = &httpError{404, "workflow_not_found", 0}
+	case *store.WorkflowCollectionValidationError:
+		value = &httpError{400, "invalid_workflow_collection", 0}
+	case *store.WorkflowCollectionNameConflictError:
+		value = &httpError{409, "workflow_collection_name_conflict", 0}
+	case *store.WorkflowCollectionNotFoundError:
+		value = &httpError{404, "workflow_collection_not_found", 0}
+	case *store.CannotModifyDefaultCollectionError:
+		value = &httpError{400, "cannot_modify_default_collection", 0}
+	case *store.CannotDeleteDefaultCollectionError:
+		value = &httpError{400, "cannot_delete_default_collection", 0}
+	case *store.CollectionNotEmptyError:
+		value = &httpError{409, "collection_not_empty", 0}
 	default:
 		if coded, ok := err.(interface{ Code() string }); ok {
 			value = &httpError{httpCode(coded.Code()), coded.Code(), 0}

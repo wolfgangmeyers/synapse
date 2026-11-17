@@ -84,6 +84,8 @@ func (s *Store) ExportAllWorkflows(ctx context.Context) (*WorkflowsExportPayload
 }
 
 // ReplaceAllWorkflows atomically replaces all existing workflows with the given bundles.
+// Pre-existing workflows are deleted and the imported bundles are placed into the 'default' collection.
+// Transitions are remapped from local portable state keys to freshly generated UUIDs.
 func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExportBundle) error {
 	// 1. Validate all bundles upfront before entering the transaction
 	names := make(map[string]bool, len(bundles))
@@ -172,7 +174,7 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 			}
 
 			// Insert workflow first (with NULL entry_state_id to satisfy FK constraint)
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, 'default', ?, ?, NULL, ?, ?, ?, ?)`,
 				newWfID, workflowName, workflowDesc, snoozeDurationMS, variablesJSON, now, now)
 			if err != nil {
 				return fmt.Errorf("insert workflow %s: %w", workflowName, err)
@@ -582,7 +584,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 		candidateName := desiredName
 
 		var existingID string
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE name = ?`, candidateName).Scan(&existingID)
+		err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = 'default' AND name = ?`, candidateName).Scan(&existingID)
 		if err == nil {
 			// Name exists; generate unique suffix: "Name (Imported)" or "Name (Imported 2)", etc.
 			for suffix := 1; ; suffix++ {
@@ -592,7 +594,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 					candidateName = fmt.Sprintf("%s (Imported %d)", desiredName, suffix)
 				}
 				var dummy string
-				err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE name = ?`, candidateName).Scan(&dummy)
+				err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = 'default' AND name = ?`, candidateName).Scan(&dummy)
 				if errors.Is(err, sql.ErrNoRows) {
 					break
 				}
@@ -653,7 +655,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 		}
 
 		// Insert workflow first (with NULL entry_state_id to satisfy FK constraint)
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, 'default', ?, ?, NULL, ?, ?, ?, ?)`,
 			newWfID, candidateName, strings.TrimSpace(bundle.Workflow.Description), snoozeDurationMS, variablesJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
@@ -748,6 +750,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 
 		createdWorkflow = &Workflow{
 			ID:               newWfID,
+			CollectionID:     DefaultWorkflowCollectionID,
 			Name:             candidateName,
 			Description:      strings.TrimSpace(bundle.Workflow.Description),
 			EntryStateID:     newEntryStateID,

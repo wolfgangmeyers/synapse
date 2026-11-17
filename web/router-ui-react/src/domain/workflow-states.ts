@@ -72,6 +72,7 @@ export interface Workflow {
   name: string;
   description: string;
   entry_state_id: string | null;
+  collection_id?: string;
   snooze_duration_ms?: number;
   variables?: WorkflowVariableDefinition[];
   created_at: string;
@@ -82,6 +83,7 @@ export interface Workflow {
 export interface CreateWorkflowRequest {
   name: string;
   description?: string;
+  collection_id?: string;
   snooze_duration_ms?: number;
   variables?: WorkflowVariableDefinition[];
 }

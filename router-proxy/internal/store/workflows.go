@@ -16,6 +16,7 @@ const (
 
 type Workflow struct {
 	ID               string                       `json:"id"`
+	CollectionID     string                       `json:"collection_id"`
 	Name             string                       `json:"name"`
 	Description      string                       `json:"description"`
 	EntryStateID     *string                      `json:"entry_state_id,omitempty"`
@@ -27,6 +28,7 @@ type Workflow struct {
 }
 
 type WorkflowRequest struct {
+	CollectionID     string                        `json:"collection_id,omitempty"`
 	Name             string                        `json:"name"`
 	Description      string                        `json:"description"`
 	EntryStateID     *string                       `json:"entry_state_id,omitempty"`
@@ -108,11 +110,26 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 		return nil, err
 	}
 
+	collectionID := strings.TrimSpace(req.CollectionID)
+	if collectionID == "" {
+		collectionID = DefaultWorkflowCollectionID
+	}
+
 	var wf *Workflow
 	err := s.runImmediate(ctx, func() error {
+		// Validate collection exists
+		var colExists int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_collections WHERE id = ?`, collectionID).Scan(&colExists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &WorkflowCollectionNotFoundError{ID: collectionID}
+		}
+		if err != nil {
+			return err
+		}
+
 		name := strings.TrimSpace(req.Name)
 		var existingID string
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE name = ?`, name).Scan(&existingID)
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = ? AND name = ?`, collectionID, name).Scan(&existingID)
 		if err == nil {
 			return &WorkflowNameConflictError{Name: name}
 		}
@@ -163,8 +180,8 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 			entryStateIDVal = &trimmed
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, name, desc, entryStateIDVal, snoozeDurationMS, variablesJSON, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, collectionID, name, desc, entryStateIDVal, snoozeDurationMS, variablesJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowNameConflictError{Name: name}
@@ -174,6 +191,7 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 
 		wf = &Workflow{
 			ID:               id,
+			CollectionID:     collectionID,
 			Name:             name,
 			Description:      desc,
 			EntryStateID:     entryStateIDVal,
@@ -194,12 +212,12 @@ func (s *Store) GetWorkflow(ctx context.Context, id string) (*Workflow, error) {
 	var entryStateID sql.NullString
 	var variablesJSON sql.NullString
 	query := `
-		SELECT w.id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
+		SELECT w.id, w.collection_id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
 		       (SELECT COUNT(*) FROM workflow_states ws WHERE ws.workflow_id = w.id) AS state_count
 		FROM workflows w
 		WHERE w.id = ?`
 	err := s.db.QueryRowContext(ctx, query, id).
-		Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount)
+		Scan(&wf.ID, &wf.CollectionID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -215,7 +233,7 @@ func (s *Store) GetWorkflow(ctx context.Context, id string) (*Workflow, error) {
 
 func (s *Store) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 	query := `
-		SELECT w.id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
+		SELECT w.id, w.collection_id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
 		       (SELECT COUNT(*) FROM workflow_states ws WHERE ws.workflow_id = w.id) AS state_count
 		FROM workflows w
 		ORDER BY w.name ASC, w.id ASC`
@@ -230,7 +248,7 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 		var wf Workflow
 		var entryStateID sql.NullString
 		var variablesJSON sql.NullString
-		if err := rows.Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount); err != nil {
+		if err := rows.Scan(&wf.ID, &wf.CollectionID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount); err != nil {
 			return nil, err
 		}
 		if entryStateID.Valid {
@@ -258,8 +276,8 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 		var existing Workflow
 		var existingEntryStateID sql.NullString
 		var existingVariablesJSON sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
-			Scan(&existing.ID, &existing.Name, &existing.Description, &existingEntryStateID, &existing.SnoozeDurationMS, &existingVariablesJSON, &existing.CreatedAt, &existing.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
+			Scan(&existing.ID, &existing.CollectionID, &existing.Name, &existing.Description, &existingEntryStateID, &existing.SnoozeDurationMS, &existingVariablesJSON, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowNotFoundError{ID: id}
 		}
@@ -269,7 +287,7 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 
 		name := strings.TrimSpace(req.Name)
 		var conflictID string
-		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE name = ? AND id != ?`, name, id).Scan(&conflictID)
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = ? AND name = ? AND id != ?`, existing.CollectionID, name, id).Scan(&conflictID)
 		if err == nil {
 			return &WorkflowNameConflictError{Name: name}
 		}
@@ -336,6 +354,7 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 
 		wf = &Workflow{
 			ID:               id,
+			CollectionID:     existing.CollectionID,
 			Name:             name,
 			Description:      desc,
 			EntryStateID:     entryStateIDVal,
@@ -455,26 +474,24 @@ func (s *Store) UpdateWorkflowStatePositions(ctx context.Context, workflowID str
 	})
 }
 
-func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string) (*Workflow, error) {
-	trimmedName := strings.TrimSpace(newName)
-	if trimmedName == "" {
-		return nil, &WorkflowValidationError{Field: "name", Message: "name must not be empty"}
-	}
-	if len([]byte(trimmedName)) > maxWorkflowNameBytes {
-		return nil, &WorkflowValidationError{Field: "name", Message: "name exceeds maximum byte length"}
-	}
-	if !utf8.ValidString(trimmedName) || strings.ContainsRune(trimmedName, 0) {
-		return nil, &WorkflowValidationError{Field: "name", Message: "name contains invalid characters"}
-	}
-
+// DuplicateWorkflow duplicates a workflow. If destCollectionID is provided and non-empty,
+// it duplicates into that collection; otherwise it duplicates into the workflow's current collection.
+// If newName is empty, it uses the original workflow's name.
+// If the target name conflicts in the destination collection, it automatically appends " (Copy)"
+// or " (Copy %d)" to make the name unique unless an explicit name was requested within the same collection.
+//
+// During cloning, all child states are duplicated with freshly minted UUIDs, and transition
+// references (tr.TargetStateID) are remapped from the old state UUIDs to the newly minted state UUIDs
+// so the cloned workflow graph remains self-contained.
+func (s *Store) DuplicateWorkflow(ctx context.Context, id string, destCollectionID string, newName string) (*Workflow, error) {
 	var duplicated *Workflow
 	err := s.runImmediate(ctx, func() error {
 		// 1. Fetch original workflow
 		var original Workflow
 		var originalEntryStateID sql.NullString
 		var originalVariablesJSON sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
-			Scan(&original.ID, &original.Name, &original.Description, &originalEntryStateID, &original.SnoozeDurationMS, &originalVariablesJSON, &original.CreatedAt, &original.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
+			Scan(&original.ID, &original.CollectionID, &original.Name, &original.Description, &originalEntryStateID, &original.SnoozeDurationMS, &originalVariablesJSON, &original.CreatedAt, &original.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowNotFoundError{ID: id}
 		}
@@ -482,13 +499,63 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			return err
 		}
 
-		// 2. Check name collision for new workflow
-		var conflictID string
-		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE name = ?`, trimmedName).Scan(&conflictID)
-		if err == nil {
-			return &WorkflowNameConflictError{Name: trimmedName}
+		targetCollectionID := strings.TrimSpace(destCollectionID)
+		if targetCollectionID == "" {
+			targetCollectionID = original.CollectionID
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
+
+		// Verify target collection exists
+		var colExists int
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_collections WHERE id = ?`, targetCollectionID).Scan(&colExists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &WorkflowCollectionNotFoundError{ID: targetCollectionID}
+		}
+		if err != nil {
+			return err
+		}
+
+		targetName := strings.TrimSpace(newName)
+		if targetName == "" {
+			targetName = original.Name
+		}
+		if len([]byte(targetName)) > maxWorkflowNameBytes {
+			return &WorkflowValidationError{Field: "name", Message: "name exceeds maximum byte length"}
+		}
+		if !utf8.ValidString(targetName) || strings.ContainsRune(targetName, 0) {
+			return &WorkflowValidationError{Field: "name", Message: "name contains invalid characters"}
+		}
+
+		// 2. Check name collision in destination collection.
+		// Composite uniqueness is scoped to (collection_id, name).
+		// If explicit newName was provided AND targetCollectionID == original.CollectionID, return conflict error on match
+		// to retain backward compatibility with duplicate tests.
+		// If newName is empty or duplicated across collections, auto-resolve unique name by appending " (Copy)" or " (Copy %d)".
+		var conflictID string
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = ? AND name = ?`, targetCollectionID, targetName).Scan(&conflictID)
+		if err == nil {
+			if strings.TrimSpace(newName) != "" && (targetCollectionID == original.CollectionID || targetName != original.Name) {
+				return &WorkflowNameConflictError{Name: targetName}
+			}
+			// Auto-resolve unique name
+			baseName := targetName
+			for suffix := 1; ; suffix++ {
+				var candidate string
+				if suffix == 1 {
+					candidate = fmt.Sprintf("%s (Copy)", baseName)
+				} else {
+					candidate = fmt.Sprintf("%s (Copy %d)", baseName, suffix)
+				}
+				var dummy string
+				err := s.db.QueryRowContext(ctx, `SELECT id FROM workflows WHERE collection_id = ? AND name = ?`, targetCollectionID, candidate).Scan(&dummy)
+				if errors.Is(err, sql.ErrNoRows) {
+					targetName = candidate
+					break
+				}
+				if err != nil {
+					return err
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 
@@ -506,7 +573,7 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			return err
 		}
 
-		// 5. Map old state UUID to new state UUID and unique name
+		// 5. Map old state UUID to new state UUID
 		oldToNewID := make(map[string]string, len(states))
 		for _, st := range states {
 			newID, err := s.ids.Next()
@@ -534,22 +601,22 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			snoozeDurationMS = 600000
 		}
 
-		// 7. Insert new workflow first with NULL entry_state_id so workflow_states foreign key (workflow_id REFERENCES workflows(id)) is satisfied!
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
-			newWfID, trimmedName, original.Description, snoozeDurationMS, varsJSON, now, now)
+		// 7. Insert new workflow first with NULL entry_state_id
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, collection_id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+			newWfID, targetCollectionID, targetName, original.Description, snoozeDurationMS, varsJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
-				return &WorkflowNameConflictError{Name: trimmedName}
+				return &WorkflowNameConflictError{Name: targetName}
 			}
 			return err
 		}
 
-		// State names are unique per workflow. In the new workflow (newWfID), original names can be preserved.
+		// Insert states with remapped transition pointers
 		for _, st := range states {
 			newStateID := oldToNewID[st.ID]
 			candidateName := st.Name
 
-			// Remap transitions
+			// Remap transitions: replace old state UUIDs with their corresponding new state UUIDs
 			newTransitions := make([]WorkflowTransitionConfig, 0, len(st.Transitions))
 			for _, tr := range st.Transitions {
 				mappedTarget, ok := oldToNewID[tr.TargetStateID]
@@ -559,7 +626,6 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 						Description:   tr.Description,
 					})
 				} else {
-					// If the target state wasn't in this workflow, keep original target
 					newTransitions = append(newTransitions, tr)
 				}
 			}
@@ -606,7 +672,8 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 
 		duplicated = &Workflow{
 			ID:               newWfID,
-			Name:             trimmedName,
+			CollectionID:     targetCollectionID,
+			Name:             targetName,
 			Description:      original.Description,
 			EntryStateID:     newEntryStateID,
 			SnoozeDurationMS: snoozeDurationMS,

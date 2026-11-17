@@ -1,5 +1,6 @@
 import { useState, useEffect, type ReactElement } from "react";
-import type { RouterHttpClient } from "../transport/http-client";
+import type { RouterHttpClient, WorkflowCollection } from "../transport/http-client";
+import "./WorkflowCollections.css";
 import type { Workflow, WorkflowExportBundle } from "../domain/workflow-states";
 import { DialogShell } from "./DialogShell";
 import { WorkflowCanvas } from "./WorkflowCanvas";
@@ -19,6 +20,37 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+
+  // Workflow Collections state
+  const [collections, setCollections] = useState<WorkflowCollection[]>([]);
+  const [activeCollectionId, setActiveCollectionId] = useState<string>("default");
+  const [collectionModalOpen, setCollectionModalOpen] = useState(false);
+  const [collectionModalMode, setCollectionModalMode] = useState<"list" | "create" | "edit">("list");
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionDesc, setNewCollectionDesc] = useState("");
+  const [creatingCollection, setCreatingCollection] = useState(false);
+  const [createCollectionError, setCreateCollectionError] = useState<string | undefined>(undefined);
+  const [editingCollection, setEditingCollection] = useState<WorkflowCollection | null>(null);
+  const [editCollectionName, setEditCollectionName] = useState("");
+  const [editCollectionDesc, setEditCollectionDesc] = useState("");
+  const [updatingCollection, setUpdatingCollection] = useState(false);
+  const [editCollectionError, setEditCollectionError] = useState<string | undefined>(undefined);
+  const [deletingCollection, setDeletingCollection] = useState<WorkflowCollection | null>(null);
+  const [deletingCollectionLoading, setDeletingCollectionLoading] = useState(false);
+  const [deleteCollectionError, setDeleteCollectionError] = useState<string | undefined>(undefined);
+  const [collectionModalError, setCollectionModalError] = useState<string | undefined>(undefined);
+
+  // Move & Copy workflow states
+  const [moveModalWorkflow, setMoveModalWorkflow] = useState<Workflow | null>(null);
+  const [moveTargetCollectionId, setMoveTargetCollectionId] = useState<string>("");
+  const [moving, setMoving] = useState(false);
+  const [moveError, setMoveError] = useState<string | undefined>(undefined);
+
+  const [copyModalWorkflow, setCopyModalWorkflow] = useState<Workflow | null>(null);
+  const [copyTargetCollectionId, setCopyTargetCollectionId] = useState<string>("");
+  const [copyWorkflowName, setCopyWorkflowName] = useState<string>("");
+  const [copying, setCopying] = useState(false);
+  const [copyError, setCopyError] = useState<string | undefined>(undefined);
 
   // Modal states for Workflow CRUD
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -50,11 +82,21 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<{ message: string; error?: boolean }>({ message: "" });
 
-  const fetchWorkflows = async () => {
+  const fetchCollections = async () => {
+    try {
+      if (!client || typeof client.listWorkflowCollections !== "function") return;
+      const list = await client.listWorkflowCollections();
+      setCollections(Array.isArray(list) ? list : []);
+    } catch (err: unknown) {
+      console.error("Failed to load collections", err);
+    }
+  };
+
+  const fetchWorkflows = async (colId = activeCollectionId) => {
     try {
       setLoading(true);
       setError(undefined);
-      const list = await client.listWorkflows();
+      const list = await client.listWorkflows(colId);
       setWorkflows(Array.isArray(list) ? list : []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load workflows");
@@ -65,14 +107,27 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   };
 
   useEffect(() => {
-    void fetchWorkflows();
+    void fetchCollections();
   }, []);
 
-  // Load git sync target on mount
   useEffect(() => {
+    void fetchWorkflows(activeCollectionId);
+  }, [activeCollectionId]);
+
+  // Derive git sync target for the active collection.
+  // The default collection uses the legacy target key "workflows" for backward compatibility,
+  // while user collections use "workflows:<collectionId>".
+  const currentSyncTarget = activeCollectionId === "default" ? "workflows" : `workflows:${activeCollectionId}`;
+
+  // Load git sync target on mount or active collection change
+  useEffect(() => {
+    setGitRepoUrl("");
+    setSavedRepoUrl("");
+    setSyncStatus({ message: "" });
+    setSyncWarning(null);
     if (!client || typeof client.getGitSyncTarget !== "function") return;
     let active = true;
-    client.getGitSyncTarget("workflows").then((res) => {
+    client.getGitSyncTarget(currentSyncTarget).then((res) => {
       if (!active) return;
       if (res && res.repo_url) {
         setGitRepoUrl(res.repo_url);
@@ -83,7 +138,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
       }
     }).catch(() => {});
     return () => { active = false; };
-  }, [client]);
+  }, [client, currentSyncTarget]);
 
   const handleSaveRepoUrl = async (newUrl?: string): Promise<void> => {
     const urlToSave = (newUrl !== undefined ? newUrl : gitRepoUrl).trim();
@@ -95,7 +150,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     }
     setSavingTarget(true);
     try {
-      const res = await client.setGitSyncTarget("workflows", urlToSave);
+      const res = await client.setGitSyncTarget(currentSyncTarget, urlToSave);
       setGitRepoUrl(res.repo_url);
       setSavedRepoUrl(res.repo_url);
       setSyncStatus({ message: "Repository URL saved." });
@@ -112,7 +167,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     setSavingTarget(true);
     try {
       if (savedRepoUrl && typeof client.clearGitSyncTarget === "function") {
-        await client.clearGitSyncTarget("workflows");
+        await client.clearGitSyncTarget(currentSyncTarget);
       }
       setGitRepoUrl("");
       setSavedRepoUrl("");
@@ -131,7 +186,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     setSyncWarning(null);
     setSyncStatus({ message: "" });
     try {
-      const res = await client.pullGitSync("workflows");
+      const res = await client.pullGitSync(currentSyncTarget);
       if (res.exists === false) {
         setSyncWarning("No workflows.json found in this repository. Nothing was changed.");
       } else if (res.success === false) {
@@ -139,7 +194,8 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
       } else {
         const count = typeof res.count === "number" ? res.count : 0;
         setSyncStatus({ message: `Successfully pulled ${count} workflow${count === 1 ? "" : "s"} from GitHub.` });
-        await fetchWorkflows();
+        await fetchWorkflows(activeCollectionId);
+        await fetchCollections();
       }
     } catch (err) {
       setSyncStatus({ message: err instanceof Error ? err.message : "Git pull failed.", error: true });
@@ -154,7 +210,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     setSyncWarning(null);
     setSyncStatus({ message: "" });
     try {
-      const res = await client.pushGitSync("workflows");
+      const res = await client.pushGitSync(currentSyncTarget);
       if (res.success === false) {
         setSyncStatus({ message: res.error || "Git push failed.", error: true });
       } else {
@@ -182,12 +238,14 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
         name: newWorkflowName.trim(),
         description: newWorkflowDesc.trim(),
         snooze_duration_ms: snoozeDurationMS,
+        collection_id: activeCollectionId,
       });
       setCreateDialogOpen(false);
       setNewWorkflowName("");
       setNewWorkflowDesc("");
       setNewWorkflowSnoozeMinutes(10);
-      await fetchWorkflows();
+      await fetchWorkflows(activeCollectionId);
+      await fetchCollections();
       setSelectedWorkflowId(created.id);
     } catch (err: unknown) {
       setCreateError(err instanceof Error ? err.message : "Failed to create workflow");
@@ -247,8 +305,9 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const handleDuplicate = async (wf: Workflow) => {
     try {
       setError(undefined);
-      const dup = await client.duplicateWorkflow(wf.id);
-      await fetchWorkflows();
+      const dup = await client.duplicateWorkflow(wf.id, { destination_collection_id: activeCollectionId });
+      await fetchWorkflows(activeCollectionId);
+      await fetchCollections();
       setSelectedWorkflowId(dup.id);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to duplicate workflow");
@@ -261,11 +320,129 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     try {
       await client.deleteWorkflow(deleteWorkflowId);
       setDeleteWorkflowId(null);
-      await fetchWorkflows();
+      await fetchWorkflows(activeCollectionId);
+      await fetchCollections();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to delete workflow");
     } finally {
       setDeleting(false);
+    }
+  };
+
+
+  const handleCreateCollection = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newCollectionName.trim()) {
+      setCreateCollectionError("Collection name is required");
+      return;
+    }
+    setCreatingCollection(true);
+    setCreateCollectionError(undefined);
+    try {
+      const payload: { name: string; description?: string } = {
+        name: newCollectionName.trim(),
+      };
+      if (newCollectionDesc.trim()) {
+        payload.description = newCollectionDesc.trim();
+      }
+      const created = await client.createWorkflowCollection(payload);
+      setNewCollectionName("");
+      setNewCollectionDesc("");
+      await fetchCollections();
+      setActiveCollectionId(created.id);
+      setCollectionModalMode("list");
+    } catch (err: unknown) {
+      setCreateCollectionError(err instanceof Error ? err.message : "Failed to create collection");
+    } finally {
+      setCreatingCollection(false);
+    }
+  };
+
+  const handleUpdateCollection = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editingCollection) return;
+    if (!editCollectionName.trim()) {
+      setEditCollectionError("Collection name is required");
+      return;
+    }
+    setUpdatingCollection(true);
+    setEditCollectionError(undefined);
+    try {
+      const payload: { name: string; description?: string } = {
+        name: editCollectionName.trim(),
+      };
+      if (editCollectionDesc.trim()) {
+        payload.description = editCollectionDesc.trim();
+      }
+      await client.updateWorkflowCollection(editingCollection.id, payload);
+      setEditingCollection(null);
+      await fetchCollections();
+      await fetchWorkflows(activeCollectionId);
+      setCollectionModalMode("list");
+    } catch (err: unknown) {
+      setEditCollectionError(err instanceof Error ? err.message : "Failed to update collection");
+    } finally {
+      setUpdatingCollection(false);
+    }
+  };
+
+  const handleConfirmDeleteCollection = async () => {
+    if (!deletingCollection) return;
+    setDeletingCollectionLoading(true);
+    setDeleteCollectionError(undefined);
+    try {
+      // Pass cascade=true if collection contains workflows, triggering clean cascade deletion in backend
+      await client.deleteWorkflowCollection(deletingCollection.id, deletingCollection.workflow_count > 0);
+      if (deletingCollection.id === activeCollectionId) {
+        setActiveCollectionId("default");
+      }
+      setDeletingCollection(null);
+      await fetchCollections();
+      await fetchWorkflows("default");
+    } catch (err: unknown) {
+      setDeleteCollectionError(err instanceof Error ? err.message : "Failed to delete collection");
+    } finally {
+      setDeletingCollectionLoading(false);
+    }
+  };
+
+  const handleMoveWorkflow = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!moveModalWorkflow || !moveTargetCollectionId) return;
+    setMoving(true);
+    setMoveError(undefined);
+    try {
+      await client.moveWorkflow(moveModalWorkflow.id, moveTargetCollectionId);
+      setMoveModalWorkflow(null);
+      await fetchWorkflows(activeCollectionId);
+      await fetchCollections();
+    } catch (err: unknown) {
+      setMoveError(err instanceof Error ? err.message : "Failed to move workflow");
+    } finally {
+      setMoving(false);
+    }
+  };
+
+  const handleCopyWorkflow = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!copyModalWorkflow || !copyTargetCollectionId) return;
+    setCopying(true);
+    setCopyError(undefined);
+    try {
+      const payload: { destination_collection_id?: string; name?: string } = {
+        destination_collection_id: copyTargetCollectionId,
+      };
+      if (copyWorkflowName.trim()) {
+        payload.name = copyWorkflowName.trim();
+      }
+      await client.duplicateWorkflow(copyModalWorkflow.id, payload);
+      setCopyModalWorkflow(null);
+      await fetchWorkflows(activeCollectionId);
+      await fetchCollections();
+    } catch (err: unknown) {
+      setCopyError(err instanceof Error ? err.message : "Failed to copy workflow");
+    } finally {
+      setCopying(false);
     }
   };
 
@@ -359,7 +536,45 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
         </div>
       ) : (
       <div className="workflows-content">
-        <section className="workflows-github-sync" aria-label="GitHub Sync">
+                {/* Collection Switcher Bar */}
+        <div className="workflow-collections-bar" aria-label="Workflow collections">
+          <div className="workflow-collection-pills" role="tablist" aria-label="Workflow Collections">
+            <span className="workflow-collection-label" style={{ fontSize: "12.5px", fontWeight: 600, color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", gap: "6px", marginRight: "4px" }}>
+              <i className="fa-solid fa-folder-tree" aria-hidden="true" style={{ color: "var(--accent, #60a5fa)" }} />
+              Collection:
+            </span>
+            {(collections.length > 0 ? collections : [{ id: "default", name: "Default", description: "", created_at: "", updated_at: "", workflow_count: workflows.length }]).map((col) => {
+              const isActive = col.id === activeCollectionId;
+              return (
+                <button
+                  key={col.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  className={`workflow-collection-pill${isActive ? " active" : ""}`}
+                  onClick={() => setActiveCollectionId(col.id)}
+                  title={col.description ? `${col.name}: ${col.description}` : col.name}
+                >
+                  <span>{col.name}</span>
+                  <span className="pill-count">{col.workflow_count ?? 0}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="workflow-collection-manage-btn"
+            onClick={() => {
+              setCollectionModalMode("list");
+              setCollectionModalOpen(true);
+            }}
+          >
+            <i className="fa-solid fa-gear" aria-hidden="true" />
+            <span>Manage Collections</span>
+          </button>
+        </div>
+
+<section className="workflows-github-sync" aria-label="GitHub Sync">
           <div className="workflows-github-sync-header">
             <i className="fa-brands fa-github" aria-hidden="true" />
             <span>GitHub Sync</span>
@@ -527,6 +742,33 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                       onClick={() => void handleDuplicate(wf)}
                     >
                       <i className="fa-solid fa-copy" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn-round"
+                      title="Move to collection"
+                      aria-label="Move workflow to another collection"
+                      onClick={() => {
+                        setMoveTargetCollectionId(collections.find(c => c.id !== (wf.collection_id || activeCollectionId))?.id || "");
+                        setMoveError(undefined);
+                        setMoveModalWorkflow(wf);
+                      }}
+                    >
+                      <i className="fa-solid fa-arrow-right-arrow-left" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn-round"
+                      title="Copy to collection"
+                      aria-label="Copy workflow to another collection"
+                      onClick={() => {
+                        setCopyTargetCollectionId(collections.find(c => c.id !== (wf.collection_id || activeCollectionId))?.id || (wf.collection_id || activeCollectionId));
+                        setCopyWorkflowName("");
+                        setCopyError(undefined);
+                        setCopyModalWorkflow(wf);
+                      }}
+                    >
+                      <i className="fa-solid fa-clone" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -747,6 +989,333 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
             }
           }}
         />
+      ) : null}
+
+      {/* Manage Collections Modal */}
+      {collectionModalOpen ? (
+        <DialogShell
+          open={true}
+          title={
+            collectionModalMode === "create"
+              ? "New Collection"
+              : collectionModalMode === "edit"
+              ? "Edit Collection"
+              : "Workflow Collections"
+          }
+          titleId="workflow-collections-dialog-title"
+          description={
+            collectionModalMode === "create"
+              ? "Create a new collection to group related workflows."
+              : collectionModalMode === "edit"
+              ? "Update collection name and description."
+              : "Manage and organize your workflow collections."
+          }
+          onClose={() => {
+            setCollectionModalOpen(false);
+            setCollectionModalMode("list");
+            setDeletingCollection(null);
+          }}
+          closeLabel="Close collections dialog"
+          className="message-dialog workflow-collections-dialog"
+        >
+          {collectionModalMode === "list" ? (
+            <div className="workflow-collections-modal-content">
+              {collectionModalError ? <div className="alert alert-danger">{collectionModalError}</div> : null}
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "12px" }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setNewCollectionName("");
+                    setNewCollectionDesc("");
+                    setCreateCollectionError(undefined);
+                    setCollectionModalMode("create");
+                  }}
+                >
+                  <i className="fa-solid fa-plus" aria-hidden="true" style={{ marginRight: "6px" }} />
+                  New Collection
+                </button>
+              </div>
+
+              <div className="workflow-collections-list">
+                {collections.map((col) => {
+                  const isDefault = col.id === "default";
+                  return (
+                    <div key={col.id} className="workflow-collection-card">
+                      <div className="workflow-collection-info">
+                        <div className="workflow-collection-name-row">
+                          <span className="workflow-collection-name">{col.name}</span>
+                          {isDefault ? (
+                            <span className="badge" style={{ fontSize: "11px", padding: "2px 6px" }}>Default</span>
+                          ) : null}
+                          <span className="badge" style={{ fontSize: "11px", padding: "2px 6px" }}>
+                            {col.workflow_count ?? 0} {col.workflow_count === 1 ? "workflow" : "workflows"}
+                          </span>
+                        </div>
+                        {col.description ? <p className="workflow-collection-desc">{col.description}</p> : null}
+                      </div>
+                      <div className="workflow-collection-actions">
+                        {!isDefault ? (
+                          <>
+                            <button
+                              type="button"
+                              className="icon-btn-round"
+                              title="Edit collection"
+                              aria-label={`Edit collection ${col.name}`}
+                              onClick={() => {
+                                setEditingCollection(col);
+                                setEditCollectionName(col.name);
+                                setEditCollectionDesc(col.description || "");
+                                setEditCollectionError(undefined);
+                                setCollectionModalMode("edit");
+                              }}
+                            >
+                              <i className="fa-solid fa-pen-to-square" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-btn-round danger"
+                              title="Delete collection"
+                              aria-label={`Delete collection ${col.name}`}
+                              onClick={() => {
+                                setDeletingCollection(col);
+                                setDeleteCollectionError(undefined);
+                              }}
+                            >
+                              <i className="fa-solid fa-trash" aria-hidden="true" />
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {deletingCollection ? (
+                <div className="workflows-github-sync-confirm" role="alert" style={{ marginTop: "16px" }}>
+                  <p>
+                    Are you sure you want to delete collection <strong>{deletingCollection.name}</strong>?
+                    {deletingCollection.workflow_count > 0 ? (
+                      <span style={{ display: "block", marginTop: "4px", color: "var(--danger, #ef4444)" }}>
+                        Warning: This collection contains {deletingCollection.workflow_count} workflow{deletingCollection.workflow_count === 1 ? "" : "s"} which will also be permanently deleted!
+                      </span>
+                    ) : null}
+                  </p>
+                  {deleteCollectionError ? <div className="alert alert-danger" style={{ margin: "8px 0" }}>{deleteCollectionError}</div> : null}
+                  <div className="workflows-github-sync-confirm-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={deletingCollectionLoading}
+                      onClick={() => setDeletingCollection(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      disabled={deletingCollectionLoading}
+                      onClick={() => void handleConfirmDeleteCollection()}
+                    >
+                      {deletingCollectionLoading ? "Deleting…" : "Confirm Delete"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="dialog-actions workflow-dialog-actions" style={{ marginTop: "16px" }}>
+                <button type="button" className="btn btn-secondary" onClick={() => setCollectionModalOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          ) : collectionModalMode === "create" ? (
+            <form onSubmit={(e) => void handleCreateCollection(e)}>
+              {createCollectionError ? <div className="alert alert-danger">{createCollectionError}</div> : null}
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label htmlFor="create-col-name-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                  Collection Name *
+                </label>
+                <input
+                  id="create-col-name-input"
+                  type="text"
+                  className="form-control"
+                  placeholder="e.g. CI/CD Pipelines"
+                  value={newCollectionName}
+                  onChange={(e) => setNewCollectionName(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+                <label htmlFor="create-col-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                  Description (optional)
+                </label>
+                <input
+                  id="create-col-desc-input"
+                  type="text"
+                  className="form-control"
+                  placeholder="Purpose of this collection"
+                  value={newCollectionDesc}
+                  onChange={(e) => setNewCollectionDesc(e.target.value)}
+                />
+              </div>
+              <div className="dialog-actions workflow-dialog-actions">
+                <button type="button" className="btn btn-secondary" onClick={() => setCollectionModalMode("list")}>
+                  Back
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={creatingCollection}>
+                  {creatingCollection ? "Creating..." : "Create Collection"}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={(e) => void handleUpdateCollection(e)}>
+              {editCollectionError ? <div className="alert alert-danger">{editCollectionError}</div> : null}
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label htmlFor="edit-col-name-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                  Collection Name *
+                </label>
+                <input
+                  id="edit-col-name-input"
+                  type="text"
+                  className="form-control"
+                  value={editCollectionName}
+                  onChange={(e) => setEditCollectionName(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+                <label htmlFor="edit-col-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                  Description (optional)
+                </label>
+                <input
+                  id="edit-col-desc-input"
+                  type="text"
+                  className="form-control"
+                  value={editCollectionDesc}
+                  onChange={(e) => setEditCollectionDesc(e.target.value)}
+                />
+              </div>
+              <div className="dialog-actions workflow-dialog-actions">
+                <button type="button" className="btn btn-secondary" onClick={() => setCollectionModalMode("list")}>
+                  Back
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={updatingCollection}>
+                  {updatingCollection ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          )}
+        </DialogShell>
+      ) : null}
+
+      {/* Move Workflow Modal */}
+      {moveModalWorkflow ? (
+        <DialogShell
+          open={true}
+          title="Move Workflow to Collection"
+          titleId="move-workflow-dialog-title"
+          description={`Move "${moveModalWorkflow.name}" to another collection.`}
+          onClose={() => setMoveModalWorkflow(null)}
+          closeLabel="Close move workflow dialog"
+          className="message-dialog"
+        >
+          <form onSubmit={(e) => void handleMoveWorkflow(e)}>
+            {moveError ? <div className="alert alert-danger">{moveError}</div> : null}
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="move-target-collection" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Destination Collection *
+              </label>
+              <select
+                id="move-target-collection"
+                className="form-control"
+                value={moveTargetCollectionId}
+                onChange={(e) => setMoveTargetCollectionId(e.target.value)}
+                required
+              >
+                <option value="" disabled>Select destination collection</option>
+                {collections
+                  .filter((c) => c.id !== (moveModalWorkflow.collection_id || activeCollectionId))
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="dialog-actions workflow-dialog-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setMoveModalWorkflow(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={moving || !moveTargetCollectionId}>
+                {moving ? "Moving..." : "Move Workflow"}
+              </button>
+            </div>
+          </form>
+        </DialogShell>
+      ) : null}
+
+      {/* Copy Workflow Modal */}
+      {copyModalWorkflow ? (
+        <DialogShell
+          open={true}
+          title="Copy Workflow to Collection"
+          titleId="copy-workflow-dialog-title"
+          description={`Create a copy of "${copyModalWorkflow.name}" in a collection.`}
+          onClose={() => setCopyModalWorkflow(null)}
+          closeLabel="Close copy workflow dialog"
+          className="message-dialog"
+        >
+          <form onSubmit={(e) => void handleCopyWorkflow(e)}>
+            {copyError ? <div className="alert alert-danger">{copyError}</div> : null}
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="copy-target-collection" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Destination Collection *
+              </label>
+              <select
+                id="copy-target-collection"
+                className="form-control"
+                value={copyTargetCollectionId}
+                onChange={(e) => setCopyTargetCollectionId(e.target.value)}
+                required
+              >
+                <option value="" disabled>Select destination collection</option>
+                {collections.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} {c.id === (copyModalWorkflow.collection_id || activeCollectionId) ? "(Current)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="copy-workflow-name" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                New Workflow Name (optional)
+              </label>
+              <input
+                id="copy-workflow-name"
+                type="text"
+                className="form-control"
+                placeholder={`${copyModalWorkflow.name} (Copy)`}
+                value={copyWorkflowName}
+                onChange={(e) => setCopyWorkflowName(e.target.value)}
+              />
+              <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", display: "block", marginTop: "0.25rem" }}>
+                Leave blank to automatically generate a unique name.
+              </span>
+            </div>
+            <div className="dialog-actions workflow-dialog-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setCopyModalWorkflow(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={copying || !copyTargetCollectionId}>
+                {copying ? "Copying..." : "Copy Workflow"}
+              </button>
+            </div>
+          </form>
+        </DialogShell>
       ) : null}
     </div>
   );

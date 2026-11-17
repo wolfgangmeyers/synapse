@@ -282,7 +282,7 @@ func TestWorkflowDuplicate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Duplicate workflow
-	dup, err := s.DuplicateWorkflow(ctx, wf.ID, "duplicated-wf")
+	dup, err := s.DuplicateWorkflow(ctx, wf.ID, "", "duplicated-wf")
 	require.NoError(t, err)
 	require.NotNil(t, dup)
 	require.NotEqual(t, wf.ID, dup.ID)
@@ -326,7 +326,7 @@ func TestWorkflowDuplicate(t *testing.T) {
 	require.Equal(t, "Go back to stage one", clonedState2.Transitions[0].Description)
 
 	// Duplicate with name conflict
-	_, err = s.DuplicateWorkflow(ctx, wf.ID, "duplicated-wf")
+	_, err = s.DuplicateWorkflow(ctx, wf.ID, "", "duplicated-wf")
 	require.Error(t, err)
 	var nameConflict *WorkflowNameConflictError
 	require.ErrorAs(t, err, &nameConflict)
@@ -337,7 +337,7 @@ func TestWorkflowDuplicate(t *testing.T) {
 
 	// Duplicate non-existent workflow
 
-	_, err = s.DuplicateWorkflow(ctx, "non-existent", "another-wf")
+	_, err = s.DuplicateWorkflow(ctx, "non-existent", "", "another-wf")
 	require.Error(t, err)
 	var notFound *WorkflowNotFoundError
 	require.ErrorAs(t, err, &notFound)

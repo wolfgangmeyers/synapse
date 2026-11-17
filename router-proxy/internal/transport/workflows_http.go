@@ -40,9 +40,16 @@ func (r *Router) handleWorkflowImport(w http.ResponseWriter, req *http.Request) 
 func (r *Router) handleWorkflowsCollection(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:
-		workflows, err := r.store.ListWorkflows(req.Context())
+		collectionID := req.URL.Query().Get("collection_id")
+		var workflows []store.Workflow
+		var err error
+		if collectionID != "" {
+			workflows, err = r.store.ListWorkflowsByCollection(req.Context(), collectionID)
+		} else {
+			workflows, err = r.store.ListWorkflows(req.Context())
+		}
 		if err != nil {
-			r.writeError(w, &httpError{status: 500, code: "internal_error"})
+			r.writeError(w, storeError(err))
 			return
 		}
 		r.writeJSON(w, http.StatusOK, workflows)
@@ -228,12 +235,43 @@ func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id
 				return
 			}
 		}
-		wf, err := r.store.DuplicateWorkflow(req.Context(), id, name)
+		var destinationCollectionID string
+		if raw, exists := payload["destination_collection_id"]; exists && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &destinationCollectionID); err != nil {
+				r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+				return
+			}
+		}
+		wf, err := r.store.DuplicateWorkflow(req.Context(), id, destinationCollectionID, name)
 		if err != nil {
 			r.writeError(w, storeError(err))
 			return
 		}
 		r.writeJSON(w, http.StatusCreated, wf)
+
+	case "move":
+		// Moves a workflow to another collection specified by destination_collection_id.
+		// Enforces composite uniqueness (collection_id, name) in the destination collection.
+		if req.Method != http.MethodPost {
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+			return
+		}
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		destID, err := rawString(payload, "destination_collection_id", true)
+		if err != nil {
+			r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+			return
+		}
+		movedWf, err := r.store.MoveWorkflow(req.Context(), id, destID)
+		if err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+		r.writeJSON(w, http.StatusOK, movedWf)
 
 	case "layout":
 		if req.Method != http.MethodPut {
@@ -284,6 +322,7 @@ func parseWorkflowRequest(payload map[string]json.RawMessage) (store.WorkflowReq
 		return store.WorkflowRequest{}, &httpError{status: 400, code: "invalid_request"}
 	}
 	desc, _ := rawString(payload, "description", false)
+	collectionID, _ := rawString(payload, "collection_id", false)
 
 	var entryStateID *string
 	if raw, exists := payload["entry_state_id"]; exists && len(raw) > 0 && string(raw) != "null" {
@@ -311,6 +350,7 @@ func parseWorkflowRequest(payload map[string]json.RawMessage) (store.WorkflowReq
 	}
 
 	return store.WorkflowRequest{
+		CollectionID:     collectionID,
 		Name:             name,
 		Description:      desc,
 		EntryStateID:     entryStateID,
