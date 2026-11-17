@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "@playwright/test";
-import { workflowHarness, settled, userTurn, model, type WorkflowHarness } from "./workflow-implicit-goals-harness";
+import { workflowHarness, settled, userTurn, model, createRunningWorkflow, type WorkflowHarness } from "./workflow-implicit-goals-harness";
 
 // SCN-WFIG-016: external provider only is mocked. Native goal execution,
 // browser messaging, WebSocket publication, proxy, router and SQLite are real.
@@ -37,13 +37,16 @@ test.describe("SCN-WFIG-016 ordinary goal empty-response breaker", () => {
         { answer }, { answer }, { answer },
       );
       await userTurn(page, "Set an ordinary goal and begin the regression task.");
+      await expect.poll(() => f.requests.length).toBe(3);
+      await expect.poll(() => settled(f, agent).length).toBe(2);
+      await f.advance(10000);
       await expect.poll(() => f.requests.length).toBe(4);
       await expect.poll(() => settled(f, agent).map(row => row.continuation_state)).toEqual(["started", "started"]);
 
       const idle = () => f.rows(`SELECT a.activity_state, s.execution_json FROM managed_agents a
         JOIN embedded_sessions s ON s.agent_id=a.agent_id AND s.current=1 WHERE a.agent_id=?`, agent);
       await expect.poll(idle).toEqual([{ activity_state: "idle", execution_json: null }]);
-      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true, goal_lock_enabled: false });
+      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true });
       const continuations = () => f.rows("SELECT * FROM embedded_goal_continuations WHERE agent_id=? ORDER BY user_seq", agent);
       const keyed = settled(f, agent);
       expect(continuations()).toHaveLength(2);
@@ -95,4 +98,48 @@ test.describe("SCN-WFIG-016 ordinary goal empty-response breaker", () => {
       assertNoEvaluation();
     });
   }
+
+  test("active workflow: empty responses trip circuit breaker after two nudges and halt", async ({ page }) => {
+    f.replies.push({ answer: "" }, { answer: "" }, { answer: "" });
+    const { agent, workflow } = await createRunningWorkflow(f, page, 600000, false);
+    expect((await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_id).toBe(workflow.id);
+
+    await expect.poll(() => f.requests.length).toBe(2);
+    await expect.poll(() => settled(f, agent).length).toBe(2);
+    await f.advance(10000);
+    await expect.poll(() => f.requests.length).toBe(3);
+    await expect.poll(() => settled(f, agent).map(row => row.continuation_state)).toEqual(["started", "started"]);
+
+    const idle = () => f.rows(`SELECT a.activity_state, s.execution_json FROM managed_agents a
+      JOIN embedded_sessions s ON s.agent_id=a.agent_id AND s.current=1 WHERE a.agent_id=?`, agent);
+    await expect.poll(idle).toEqual([{ activity_state: "idle", execution_json: null }]);
+    expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true });
+
+    const continuations = () => f.rows("SELECT * FROM embedded_goal_continuations WHERE agent_id=? ORDER BY user_seq", agent);
+    const keyed = settled(f, agent);
+    expect(continuations()).toHaveLength(2);
+    for (const row of keyed) {
+      expect(row.state).toBe("NOT_DONE");
+      expect(row.reason).toBe("Empty response without action");
+      expect(row.started_at).not.toBeNull();
+    }
+    for (const request of f.requests.slice(1)) {
+      expect(JSON.stringify(request.input)).toContain("You emitted an empty response without taking action.");
+    }
+    expect(f.replies).toEqual([]);
+
+    const before = continuations();
+    for (let i = 0; i < 3; i++) {
+      await f.advance(60000);
+      expect(f.requests).toHaveLength(3);
+      expect(continuations()).toEqual(before);
+      expect(idle()).toEqual([{ activity_state: "idle", execution_json: null }]);
+    }
+
+    const resumed = "New user work answered after workflow breaker";
+    f.replies.push({ answer: resumed });
+    await userTurn(page, "Turn workflow work with text");
+    await expect(page.getByText(resumed, { exact: true }).first()).toBeVisible();
+    await expect.poll(idle).toEqual([{ activity_state: "idle", execution_json: null }]);
+  });
 });

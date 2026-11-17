@@ -1847,7 +1847,6 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	if err != nil {
 		return err
 	}
-	hasActiveWorkflow := curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "")
 	if curAgent != nil && curAgent.Blocked {
 		log.Printf("[embedded:%s] Suppressing goal evaluation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
 		return nil
@@ -2029,7 +2028,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	if lane.claudeRestartGeneration.Load() != claudeRestartGeneration {
 		return nil
 	}
-	if !hasActiveWorkflow && toolCalls == 0 && !hasText && !calledGoalSnooze {
+	if toolCalls == 0 && !hasText && !calledGoalSnooze {
 		lane.consecutiveEmptyTurns.Add(1)
 		if lane.consecutiveEmptyTurns.Load() < 3 {
 			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns.Load())
