@@ -722,84 +722,87 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 					}
 				}
 			}
-			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
-				continue
-			}
-
 			var parts []any
-			for _, c := range am.Content {
-				if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
-					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" && cleaned != "(empty response)" {
-						parts = append(parts, map[string]any{"text": cleaned})
-					}
-				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" && cleaned != "(empty response)" {
-						parts = append(parts, map[string]any{"text": cleaned})
-					}
-				} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
-					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
-				} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
-					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
-				} else if call, ok := c.(ai.ToolCall); ok {
-					callID := call.ID
-					if callID == "" {
-						callID = call.Name
-					}
-					argsJSON, _ := json.Marshal(call.Arguments)
-					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-						label = fmt.Sprintf("`%s`", call.Name)
-					}
-					droppedToolCalls[callID] = label
-					droppedToolCalls[call.Name] = label
+			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
+				parts = append(parts, map[string]any{"text": "(empty response)"})
+			} else {
+				for _, c := range am.Content {
+					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+						cleaned := stripSimulatedObservations(tc.Text)
+						if cleaned != "" && cleaned != "(empty response)" {
+							parts = append(parts, map[string]any{"text": cleaned})
+						}
+					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+						cleaned := stripSimulatedObservations(tc.Text)
+						if cleaned != "" && cleaned != "(empty response)" {
+							parts = append(parts, map[string]any{"text": cleaned})
+						}
+					} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
+						parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
+					} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
+						parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
+					} else if call, ok := c.(ai.ToolCall); ok {
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
+						}
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
+						}
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 
-					if call.ID != "" {
-						toolCallNames[call.ID] = call.Name
-					}
+						if call.ID != "" {
+							toolCallNames[call.ID] = call.Name
+						}
 
-					args := call.Arguments
-					if args == nil {
-						args = map[string]any{}
-					}
-					parts = append(parts, map[string]any{
-						"functionCall": map[string]any{
-							"name": call.Name,
-							"args": args,
-						},
-						"thought_signature": "skip_thought_signature_validator",
-						"thoughtSignature":  "skip_thought_signature_validator",
-					})
-				} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
-					callID := call.ID
-					if callID == "" {
-						callID = call.Name
-					}
-					argsJSON, _ := json.Marshal(call.Arguments)
-					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-						label = fmt.Sprintf("`%s`", call.Name)
-					}
-					droppedToolCalls[callID] = label
-					droppedToolCalls[call.Name] = label
+						args := call.Arguments
+						if args == nil {
+							args = map[string]any{}
+						}
+						parts = append(parts, map[string]any{
+							"functionCall": map[string]any{
+								"name": call.Name,
+								"args": args,
+							},
+							"thought_signature": "skip_thought_signature_validator",
+							"thoughtSignature":  "skip_thought_signature_validator",
+						})
+					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
+						}
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
+						}
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 
-					if call.ID != "" {
-						toolCallNames[call.ID] = call.Name
-					}
+						if call.ID != "" {
+							toolCallNames[call.ID] = call.Name
+						}
 
-					args := call.Arguments
-					if args == nil {
-						args = map[string]any{}
+						args := call.Arguments
+						if args == nil {
+							args = map[string]any{}
+						}
+						parts = append(parts, map[string]any{
+							"functionCall": map[string]any{
+								"name": call.Name,
+								"args": args,
+							},
+							"thought_signature": "skip_thought_signature_validator",
+							"thoughtSignature":  "skip_thought_signature_validator",
+						})
 					}
-					parts = append(parts, map[string]any{
-						"functionCall": map[string]any{
-							"name": call.Name,
-							"args": args,
-						},
-						"thought_signature": "skip_thought_signature_validator",
-						"thoughtSignature":  "skip_thought_signature_validator",
-					})
+				}
+				if len(parts) == 0 {
+					parts = append(parts, map[string]any{"text": "(empty response)"})
 				}
 			}
 			if len(parts) > 0 {
@@ -837,6 +840,15 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						}
 					}
 					if canMerge {
+						// If consecutive model turns both consist only of "(empty response)",
+						// avoid duplicating "(empty response)" repeatedly.
+						if role == "model" && len(lastParts) == 1 && len(parts) == 1 {
+							lp, ok1 := lastParts[0].(map[string]any)
+							cp, ok2 := parts[0].(map[string]any)
+							if ok1 && ok2 && lp["text"] == "(empty response)" && cp["text"] == "(empty response)" {
+								continue
+							}
+						}
 						lastTurn["parts"] = append(lastParts, parts...)
 						continue
 					}

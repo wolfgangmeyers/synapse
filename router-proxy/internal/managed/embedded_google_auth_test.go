@@ -783,15 +783,20 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 	contents := convertMessagesToGoogleContents(messages)
 
 	// The first assistant message was entirely simulated subagent observation,
-	// so its text is stripped completely and the assistant turn is removed.
-	// The two user messages are merged into a single user turn.
+	// so its text is stripped completely, normalizing to "(empty response)" to preserve turn alternation.
 	// The second assistant message has the observation lines stripped, leaving only the real response.
-	require.Len(t, contents, 2)
+	require.Len(t, contents, 4)
 
 	require.Equal(t, "user", contents[0]["role"])
 	require.Equal(t, "model", contents[1]["role"])
+	parts1 := contents[1]["parts"].([]any)
+	require.Len(t, parts1, 1)
+	require.Equal(t, "(empty response)", parts1[0].(map[string]any)["text"])
 
-	modelParts := contents[1]["parts"].([]any)
+	require.Equal(t, "user", contents[2]["role"])
+	require.Equal(t, "model", contents[3]["role"])
+
+	modelParts := contents[3]["parts"].([]any)
 	require.Len(t, modelParts, 1)
 	textPart := modelParts[0].(map[string]any)
 	require.Equal(t, "I am actively working on the task now.", textPart["text"])
@@ -800,13 +805,11 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 }
 
 func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlternation(t *testing.T) {
-	// Case 1: user -> empty assistant -> user continuation prompt
-	// Empty assistant message must be omitted so the model never sees empty responses,
-	// and consecutive user messages are merged into a single valid user turn.
+	// SCN-001: Empty assistant turn between user prompt and goal reminder retains model turn and prevents user message merger.
 	messages1 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
-				ai.TextContent{Text: "Please start the task."},
+				ai.TextContent{Text: "Task completion notification"},
 			},
 		},
 		ai.AssistantMessage{
@@ -814,22 +817,31 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 		},
 		ai.UserMessage{
 			Content: []ai.Content{
-				ai.TextContent{Text: "Continue working on the current goal."},
+				ai.TextContent{Text: "NOT_DONE: Please finish the remaining subgoals"},
 			},
 		},
 	}
 
 	contents1 := convertMessagesToGoogleContents(messages1)
-	// Must omit the empty assistant message and merge the user turns
-	require.Len(t, contents1, 1)
+	// Must retain the model turn as "(empty response)" and preserve 3 distinct turns: user -> model -> user
+	require.Len(t, contents1, 3)
 	require.Equal(t, "user", contents1[0]["role"])
 	parts1 := contents1[0]["parts"].([]any)
-	require.Len(t, parts1, 2)
-	require.Equal(t, "Please start the task.", parts1[0].(map[string]any)["text"])
-	require.Equal(t, "Continue working on the current goal.", parts1[1].(map[string]any)["text"])
+	require.Len(t, parts1, 1)
+	require.Equal(t, "Task completion notification", parts1[0].(map[string]any)["text"])
 
-	// Case 2: tool response -> empty assistant -> user continuation prompt
-	// Tool result (role user) and user prompt (role user) merge into a single user turn.
+	require.Equal(t, "model", contents1[1]["role"])
+	parts2 := contents1[1]["parts"].([]any)
+	require.Len(t, parts2, 1)
+	require.Equal(t, "(empty response)", parts2[0].(map[string]any)["text"])
+
+	require.Equal(t, "user", contents1[2]["role"])
+	parts3 := contents1[2]["parts"].([]any)
+	require.Len(t, parts3, 1)
+	require.Equal(t, "NOT_DONE: Please finish the remaining subgoals", parts3[0].(map[string]any)["text"])
+
+	// SCN-002: Tool response -> empty assistant -> user continuation prompt
+	// Tool result (role user) and user prompt (role user) are separated by model turn "(empty response)".
 	messages2 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -859,15 +871,19 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	}
 
 	contents2 := convertMessagesToGoogleContents(messages2)
-	// Must produce 4 turns: user -> model ("Calling tool") -> user (tool result) -> user (prompt)
-	// functionResponse and user text must not be merged into the same user turn.
-	require.Len(t, contents2, 4)
+	// Must produce 5 turns: user -> model ("Calling tool") -> user (tool result) -> model ("(empty response)") -> user (prompt)
+	require.Len(t, contents2, 5)
 	require.Equal(t, "user", contents2[0]["role"])
 	require.Equal(t, "model", contents2[1]["role"])
 	require.Equal(t, "user", contents2[2]["role"])
-	require.Equal(t, "user", contents2[3]["role"])
+	require.Equal(t, "model", contents2[3]["role"])
+	modelEmpty := contents2[3]["parts"].([]any)
+	require.Len(t, modelEmpty, 1)
+	require.Equal(t, "(empty response)", modelEmpty[0].(map[string]any)["text"])
+	require.Equal(t, "user", contents2[4]["role"])
+	require.Equal(t, "Continue working on the current goal.", contents2[4]["parts"].([]any)[0].(map[string]any)["text"])
 
-	// Case 3: assistant with "(empty response)" text or whitespace-only is also omitted
+	// SCN-003: Assistant turn with only whitespace or "(empty response)" is normalized to model turn with "(empty response)"
 	messages3 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -891,8 +907,35 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 		},
 	}
 	contents3 := convertMessagesToGoogleContents(messages3)
-	require.Len(t, contents3, 1)
+	// Consecutive empty assistant turns merge into a single model turn with "(empty response)"
+	require.Len(t, contents3, 3)
 	require.Equal(t, "user", contents3[0]["role"])
+	require.Equal(t, "model", contents3[1]["role"])
+	mParts3 := contents3[1]["parts"].([]any)
+	require.Len(t, mParts3, 1)
+	require.Equal(t, "(empty response)", mParts3[0].(map[string]any)["text"])
+	require.Equal(t, "user", contents3[2]["role"])
+
+	// SCN-004: Consecutive user messages without intervening assistant turn continue to merge
+	messages4 := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "User message 1"},
+			},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "User message 2"},
+			},
+		},
+	}
+	contents4 := convertMessagesToGoogleContents(messages4)
+	require.Len(t, contents4, 1)
+	require.Equal(t, "user", contents4[0]["role"])
+	parts4 := contents4[0]["parts"].([]any)
+	require.Len(t, parts4, 2)
+	require.Equal(t, "User message 1", parts4[0].(map[string]any)["text"])
+	require.Equal(t, "User message 2", parts4[1].(map[string]any)["text"])
 }
 
 func TestGoogleAuth_ConvertMessagesToGoogleContents_AssistantThinkingOnlyPreserved(t *testing.T) {
