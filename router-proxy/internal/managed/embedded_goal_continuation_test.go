@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -632,6 +633,121 @@ func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
 				require.Equal(t, 2, contCount)
 			})
 		}
+	}
+}
+
+func TestEmbeddedGoalCircuitBreakerActiveWorkflowEmptyAssistantHalts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var requests atomic.Int32
+	var turnNudges []string
+	var nudgesMu sync.Mutex
+	reg.SetResponses([]providers.FauxResponseStep{
+		// Turn 1: empty assistant message (empty turn 1/3 -> re-nudge with actionable prompt)
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		},
+		// Turn 2: empty assistant message (empty turn 2/3 -> re-nudge with actionable prompt)
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			if len(h.Messages) > 0 {
+				if u, ok := h.Messages[len(h.Messages)-1].(ai.UserMessage); ok && len(u.Content) == 1 {
+					if text, ok := u.Content[0].(ai.TextContent); ok {
+						nudgesMu.Lock()
+						turnNudges = append(turnNudges, text.Text)
+						nudgesMu.Unlock()
+					}
+				}
+			}
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		},
+		// Turn 3: empty assistant message (empty turn 3/3 -> circuit breaker halts!)
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			if len(h.Messages) > 0 {
+				if u, ok := h.Messages[len(h.Messages)-1].(ai.UserMessage); ok && len(u.Content) == 1 {
+					if text, ok := u.Content[0].(ai.TextContent); ok {
+						nudgesMu.Lock()
+						turnNudges = append(turnNudges, text.Text)
+						nudgesMu.Unlock()
+					}
+				}
+			}
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		},
+		// Step 4: should NOT be reached
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "unreachable"}}, ai.StopStop)
+		},
+	})
+
+	m, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		GoalContinuationDelay: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+	setEmbeddedRecoveryGeneration(t, ctx, db, m)
+
+	wf, err := db.CreateWorkflow(ctx, store.WorkflowRequest{Name: "Circuit Breaker Workflow"})
+	require.NoError(t, err)
+	state, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{Name: "Active State", WorkflowID: &wf.ID})
+	require.NoError(t, err)
+	_, err = db.UpdateWorkflow(ctx, wf.ID, store.WorkflowRequest{Name: "Circuit Breaker Workflow", EntryStateID: &state.ID})
+	require.NoError(t, err)
+
+	agent, err := m.LaunchBackgroundWorkflow(ctx, wf.ID, nil, root, &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"})
+	require.NoError(t, err)
+
+	// Wait for 3 empty turns to complete (exactly 3 requests)
+	require.Eventually(t, func() bool {
+		return requests.Load() == 3
+	}, 3*time.Second, 10*time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Repeated idle wake offers must not bypass the settled breaker
+	for i := 0; i < 3; i++ {
+		m.kickoffIdleGoalContinuation(store.EmbeddedBinding{AgentID: agent.AgentID})
+	}
+	require.Equal(t, int32(3), requests.Load(), "no continuation request should have been dispatched after breaker tripped")
+
+	// Agent settles cleanly to idle
+	require.Eventually(t, func() bool {
+		a, err := db.ManagedAgent(ctx, agent.AgentID)
+		return err == nil && a.ActivityState == "idle"
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// Verify exactly 2 continuations were dispatched (not 20)
+	readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer readOnly.Close()
+	var contCount int
+	require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, agent.AgentID).Scan(&contCount))
+	require.Equal(t, 2, contCount, "exactly 2 continuations are dispatched before halting (not 20)")
+
+	// Verify re-nudges contain actionable prompt
+	nudgesMu.Lock()
+	defer nudgesMu.Unlock()
+	require.Len(t, turnNudges, 2)
+	for _, nudge := range turnNudges {
+		require.Contains(t, nudge, "You emitted an empty response without taking action. You must take concrete action now on this goal:")
 	}
 }
 
