@@ -119,7 +119,13 @@ export interface MonitorEvaluationResult {
 }
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
-export interface ProviderModel { provider: AnyProvider | "claude-code"; id: string; name: string; available: boolean }
+export interface ProviderModel {
+  provider: ManagedProvider | (string & {});
+  id: string;
+  name?: string;
+  available?: boolean;
+  recommended?: boolean;
+}
 export interface ProviderStatus { provider: ManagedProvider; label: string; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
@@ -415,16 +421,17 @@ function providerName(value: unknown): value is AnyProvider {
   return isBuiltinManagedProvider(value) || (typeof value === "string" && value.startsWith("custom-"));
 }
 function providerModel(value: unknown): value is ProviderModel {
-  const item = recordValue(value);
-  const nameValid = typeof item?.name === "string" ? nonEmptyString(item.name) : true;
-  return !!item && providerName(item.provider) && nonEmptyString(item.id) && nameValid;
+  return modelChoice(value);
 }
-// Catalog choices include local engines (claude-code, antigravity) without adding an auth provider.
+// Catalog choices include local engines (claude-code, antigravity) and custom/future providers.
 function modelChoice(value: unknown): value is ProviderModel {
-  if (providerModel(value)) return true;
   const item = recordValue(value);
-  return !!item && (item.provider === "claude-code" || item.provider === "antigravity") && nonEmptyString(item.id)
-    && (typeof item.name !== "string" || nonEmptyString(item.name));
+  if (!item) return false;
+  if (!nonEmptyString(item.provider) || !nonEmptyString(item.id)) return false;
+  if (item.name !== undefined && (typeof item.name !== "string" || !nonEmptyString(item.name))) return false;
+  if (item.available !== undefined && typeof item.available !== "boolean") return false;
+  if (item.recommended !== undefined && typeof item.recommended !== "boolean") return false;
+  return true;
 }
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
@@ -450,8 +457,9 @@ function savedModel(value: unknown): { provider: string; id: string; name?: stri
 }
 function models(value: unknown): ModelsResponse {
   const root = recordValue(value); const defaultModel = savedModel(root?.default_model);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(modelChoice) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
-  return { auth_revision: root.auth_revision, models: root.models, default_model: defaultModel };
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
+  const validModels = root.models.filter(modelChoice);
+  return { auth_revision: root.auth_revision, models: validModels, default_model: defaultModel };
 }
 function defaultModel(value: unknown): DefaultModelResponse {
   const root = recordValue(value); const saved = savedModel(root?.default_model);

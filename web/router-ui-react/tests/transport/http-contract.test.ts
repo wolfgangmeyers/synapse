@@ -166,27 +166,22 @@ describe("direct HTTP transport", () => {
     await expect(unknownProviderClient.providerAuth()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
-  it("decodes provider models for supported providers and rejects invalid provider models", async () => {
+  it("decodes provider models for supported and unknown providers without rejecting catalog", async () => {
     const catalogData = {
       auth_revision: 1,
       models: [
         { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
         { provider: "google", id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", available: true },
         { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)", available: true },
+        { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)", available: true },
+        { provider: "claude-code", id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", available: true },
+        { provider: "aws-bedrock", id: "claude-3-haiku", name: "Claude 3 Haiku", available: true },
+        { provider: "custom-ollama", id: "llama-3-8b", name: "Llama 3 8B", available: true },
       ],
       default_model: { provider: "google-vertex", id: "gemini-2.5-flash" },
     };
     const catalogClient = createHttpClient("http://router.test", async () => response(catalogData));
     await expect(catalogClient.models()).resolves.toEqual(catalogData);
-
-    const invalidCatalogClient = createHttpClient("http://router.test", async () => response({
-      ...catalogData,
-      models: [
-        ...catalogData.models,
-        { provider: "aws-bedrock", id: "claude-3-haiku", name: "Claude 3 Haiku", available: true },
-      ],
-    }));
-    await expect(invalidCatalogClient.models()).rejects.toMatchObject({ code: "invalid_response" });
 
     const maxCatalogData = {
       auth_revision: 1,
@@ -209,6 +204,32 @@ describe("direct HTTP transport", () => {
       ],
     }));
     await expect(oversizedCatalogClient.models()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("filters malformed model items from catalog instead of rejecting entire response", async () => {
+    const rawCatalog = {
+      auth_revision: 2,
+      models: [
+        { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
+        null, // null entry
+        { provider: "", id: "missing-provider", available: true }, // empty provider
+        { provider: "google", id: "", available: true }, // empty id
+        { provider: 123, id: "bad-types" }, // non-string provider
+        { id: "no-provider" }, // missing provider
+        { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", available: true, extra_field: "ignored" },
+        { provider: "custom-test", id: "custom-model", name: "Custom Model", available: false },
+      ],
+      default_model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+    };
+    const client = createHttpClient("http://router.test", async () => response(rawCatalog));
+    const result = await client.models();
+    expect(result.auth_revision).toBe(2);
+    expect(result.default_model).toEqual({ provider: "openai-codex", id: "gpt-5.6-terra" });
+    expect(result.models).toEqual([
+      { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
+      { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", available: true, extra_field: "ignored" },
+      { provider: "custom-test", id: "custom-model", name: "Custom Model", available: false },
+    ]);
   });
 
   it("accepts an RFC3339Nano managed-agent snapshot", async () => {
