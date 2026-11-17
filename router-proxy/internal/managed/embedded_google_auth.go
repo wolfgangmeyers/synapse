@@ -689,6 +689,10 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 				rawContents = append(rawContents, map[string]any{"role": "user", "parts": imgTurnParts})
 			}
 		} else if am, ok := asAssistantMsg(msg); ok {
+			// Scan assistant turn parts to count tool calls, non-empty text, and thinking content.
+			// Gemini requires that assistant messages with no meaningful content (e.g. after stripping
+			// observations or turns that yielded no text/tool calls) are not completely omitted,
+			// because omitting them collapses surrounding user messages into compound turns.
 			toolCallCount := 0
 			hasNonEmptyText := false
 			hasThinking := false
@@ -722,84 +726,94 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 					}
 				}
 			}
-			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
-				continue
-			}
-
 			var parts []any
-			for _, c := range am.Content {
-				if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
-					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" && cleaned != "(empty response)" {
-						parts = append(parts, map[string]any{"text": cleaned})
-					}
-				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" && cleaned != "(empty response)" {
-						parts = append(parts, map[string]any{"text": cleaned})
-					}
-				} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
-					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
-				} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
-					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
-				} else if call, ok := c.(ai.ToolCall); ok {
-					callID := call.ID
-					if callID == "" {
-						callID = call.Name
-					}
-					argsJSON, _ := json.Marshal(call.Arguments)
-					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-						label = fmt.Sprintf("`%s`", call.Name)
-					}
-					droppedToolCalls[callID] = label
-					droppedToolCalls[call.Name] = label
+			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
+				// Empty assistant turn: emit "(empty response)" placeholder to preserve turn alternation.
+				// Dropping the turn entirely would cause preceding and subsequent user turns to merge
+				// (e.g. background notices merging with goal reminders), violating Gemini's conversational flow.
+				parts = append(parts, map[string]any{"text": "(empty response)"})
+			} else {
+				for _, c := range am.Content {
+					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+						// Strip simulated subagent observations (e.g., "[Observation: ...]")
+						// which are harness artifacts, not model-generated text.
+						cleaned := stripSimulatedObservations(tc.Text)
+						if cleaned != "" && cleaned != "(empty response)" {
+							parts = append(parts, map[string]any{"text": cleaned})
+						}
+					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+						cleaned := stripSimulatedObservations(tc.Text)
+						if cleaned != "" && cleaned != "(empty response)" {
+							parts = append(parts, map[string]any{"text": cleaned})
+						}
+					} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
+						parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
+					} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
+						parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
+					} else if call, ok := c.(ai.ToolCall); ok {
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
+						}
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
+						}
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 
-					if call.ID != "" {
-						toolCallNames[call.ID] = call.Name
-					}
+						if call.ID != "" {
+							toolCallNames[call.ID] = call.Name
+						}
 
-					args := call.Arguments
-					if args == nil {
-						args = map[string]any{}
-					}
-					parts = append(parts, map[string]any{
-						"functionCall": map[string]any{
-							"name": call.Name,
-							"args": args,
-						},
-						"thought_signature": "skip_thought_signature_validator",
-						"thoughtSignature":  "skip_thought_signature_validator",
-					})
-				} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
-					callID := call.ID
-					if callID == "" {
-						callID = call.Name
-					}
-					argsJSON, _ := json.Marshal(call.Arguments)
-					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-						label = fmt.Sprintf("`%s`", call.Name)
-					}
-					droppedToolCalls[callID] = label
-					droppedToolCalls[call.Name] = label
+						args := call.Arguments
+						if args == nil {
+							args = map[string]any{}
+						}
+						parts = append(parts, map[string]any{
+							"functionCall": map[string]any{
+								"name": call.Name,
+								"args": args,
+							},
+							"thought_signature": "skip_thought_signature_validator",
+							"thoughtSignature":  "skip_thought_signature_validator",
+						})
+					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
+						}
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
+						}
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 
-					if call.ID != "" {
-						toolCallNames[call.ID] = call.Name
-					}
+						if call.ID != "" {
+							toolCallNames[call.ID] = call.Name
+						}
 
-					args := call.Arguments
-					if args == nil {
-						args = map[string]any{}
+						args := call.Arguments
+						if args == nil {
+							args = map[string]any{}
+						}
+						parts = append(parts, map[string]any{
+							"functionCall": map[string]any{
+								"name": call.Name,
+								"args": args,
+							},
+							"thought_signature": "skip_thought_signature_validator",
+							"thoughtSignature":  "skip_thought_signature_validator",
+						})
 					}
-					parts = append(parts, map[string]any{
-						"functionCall": map[string]any{
-							"name": call.Name,
-							"args": args,
-						},
-						"thought_signature": "skip_thought_signature_validator",
-						"thoughtSignature":  "skip_thought_signature_validator",
-					})
+				}
+				// If all text parts were stripped (e.g. only simulated observations or empty whitespace),
+				// fallback to "(empty response)" to retain the turn rather than producing an empty model turn.
+				if len(parts) == 0 {
+					parts = append(parts, map[string]any{"text": "(empty response)"})
 				}
 			}
 			if len(parts) > 0 {
@@ -837,6 +851,18 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						}
 					}
 					if canMerge {
+						// When two consecutive turns are both empty assistant responses (each having only
+						// a single "(empty response)" text part), deduplicate instead of concatenating
+						// multiple "(empty response)" parts into a single model turn.
+						// Multiple empty turns can occur when multiple empty assistant messages or
+						// stripped turns occur in sequence before user input.
+						if role == "model" && len(lastParts) == 1 && len(parts) == 1 {
+							lp, ok1 := lastParts[0].(map[string]any)
+							cp, ok2 := parts[0].(map[string]any)
+							if ok1 && ok2 && lp["text"] == "(empty response)" && cp["text"] == "(empty response)" {
+								continue
+							}
+						}
 						lastTurn["parts"] = append(lastParts, parts...)
 						continue
 					}
