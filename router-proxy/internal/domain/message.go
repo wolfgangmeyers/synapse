@@ -100,13 +100,17 @@ type Lease struct {
 	Recovered  bool   `json:"recovered"`
 }
 
+// SystemNotificationForwardGuidanceFooter is appended to automated system notifications,
+// guiding agents to proceed with their next tool call or summarize results to the user.
+const SystemNotificationForwardGuidanceFooter = "---\n*Automated notification from system. Messages to 'system' are not accepted; proceed directly with your next action or tool call, or summarize the result to the user.*"
+
 // MailboxContent adds runtime reply instructions without changing the stored body.
 func MailboxContent(body, from string) string {
 	if from == "system" {
-		if strings.Contains(body, "Do not reply to this message") || strings.Contains(body, "Automated notification from system") || strings.Contains(body, "No mailbox reply is needed") || strings.Contains(body, "Automated system notification") {
+		if strings.Contains(body, "Messages to 'system' are not accepted") || strings.Contains(body, "Do not reply to this message") || strings.Contains(body, "Automated notification from system") || strings.Contains(body, "No mailbox reply is needed") || strings.Contains(body, "Automated system notification") {
 			return body
 		}
-		return body + "\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
+		return body + "\n\n" + SystemNotificationForwardGuidanceFooter
 	}
 	return body + "\n\nReply via mailbox to " + from
 }
@@ -117,10 +121,10 @@ func BatchItem(message Message) string {
 		parts = append(parts, "Subject: "+*message.Subject)
 	}
 	if message.From == "system" || message.Source.Kind == "system" {
-		if strings.Contains(message.Body, "Do not reply to this message") || strings.Contains(message.Body, "Automated notification from system") || strings.Contains(message.Body, "No mailbox reply is needed") || strings.Contains(message.Body, "Automated system notification") {
+		if strings.Contains(message.Body, "Messages to 'system' are not accepted") || strings.Contains(message.Body, "Do not reply to this message") || strings.Contains(message.Body, "Automated notification from system") || strings.Contains(message.Body, "No mailbox reply is needed") || strings.Contains(message.Body, "Automated system notification") {
 			parts = append(parts, "", message.Body)
 		} else {
-			parts = append(parts, "", message.Body, "", "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
+			parts = append(parts, "", message.Body, "", "["+SystemNotificationForwardGuidanceFooter+"]")
 		}
 	} else {
 		parts = append(parts, "", message.Body, "", "[Reply via mailbox to "+message.From+".]")

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -116,7 +117,7 @@ func FormatSubagentWakePromptWithActiveSiblings(record store.ManagedSubagentReco
 		b.WriteString("\n")
 	}
 
-	b.WriteString("Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\nNOTE: Subagents sometimes report completion prematurely or stop short of fulfilling all requirements. Please verify that the subagent actually completed the requested task before assuming it is done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	b.WriteString("Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\nNOTE: Subagents sometimes report completion prematurely or stop short of fulfilling all requirements. Please verify that the subagent actually completed the requested task before assuming it is done.\n\n" + domain.SystemNotificationForwardGuidanceFooter)
 	return b.String()
 }
 

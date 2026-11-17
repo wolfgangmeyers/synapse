@@ -58,11 +58,16 @@ func TestMailboxContentSystemNotice(t *testing.T) {
 	// Without existing footer
 	body := "Subagent subagent-1 finished with status completed: done."
 	result := MailboxContent(body, "system")
-	require.Equal(t, body+"\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*", result)
+	require.Equal(t, body+"\n\n"+SystemNotificationForwardGuidanceFooter, result)
 
-	// With existing footer - should not duplicate
+	// With existing new footer - should not duplicate
 	result2 := MailboxContent(result, "system")
 	require.Equal(t, result, result2)
+
+	// With legacy footer - should not duplicate
+	legacyBody := body + "\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
+	legacyResult := MailboxContent(legacyBody, "system")
+	require.Equal(t, legacyBody, legacyResult)
 
 	// Non-system sender
 	userResult := MailboxContent(body, "wolfgang")
@@ -81,8 +86,30 @@ func TestBatchItemSystemNotice(t *testing.T) {
 	item := BatchItem(msg)
 	require.Contains(t, item, "From: system")
 	require.Contains(t, item, "Subject: [System Notice] Subagent Completed: subagent-1")
-	require.Contains(t, item, "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
+	require.Contains(t, item, "["+SystemNotificationForwardGuidanceFooter+"]")
 	require.NotContains(t, item, "Reply via mailbox to system")
+
+	// Deduplication test when footer already present in body
+	msgWithFooter := Message{
+		From:    "system",
+		To:      "worker",
+		Subject: &subject,
+		Body:    "Subagent completed successfully.\n\n" + SystemNotificationForwardGuidanceFooter,
+		Source:  protocol.MessageSource{Kind: "system"},
+	}
+	itemWithFooter := BatchItem(msgWithFooter)
+	require.Equal(t, 1, strings.Count(itemWithFooter, "Messages to 'system' are not accepted"))
+
+	// Deduplication test when legacy footer is in body
+	legacyMsg := Message{
+		From:    "system",
+		To:      "worker",
+		Subject: &subject,
+		Body:    "Subagent completed successfully.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*",
+		Source:  protocol.MessageSource{Kind: "system"},
+	}
+	legacyItem := BatchItem(legacyMsg)
+	require.Equal(t, 0, strings.Count(legacyItem, "Messages to 'system' are not accepted"))
 }
 
 // The retired RPC fixture exercised these renderer boundaries before passing
