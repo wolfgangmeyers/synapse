@@ -689,6 +689,10 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 				rawContents = append(rawContents, map[string]any{"role": "user", "parts": imgTurnParts})
 			}
 		} else if am, ok := asAssistantMsg(msg); ok {
+			// Scan assistant turn parts to count tool calls, non-empty text, and thinking content.
+			// Gemini requires that assistant messages with no meaningful content (e.g. after stripping
+			// observations or turns that yielded no text/tool calls) are not completely omitted,
+			// because omitting them collapses surrounding user messages into compound turns.
 			toolCallCount := 0
 			hasNonEmptyText := false
 			hasThinking := false
@@ -724,10 +728,15 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 			}
 			var parts []any
 			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
+				// Empty assistant turn: emit "(empty response)" placeholder to preserve turn alternation.
+				// Dropping the turn entirely would cause preceding and subsequent user turns to merge
+				// (e.g. background notices merging with goal reminders), violating Gemini's conversational flow.
 				parts = append(parts, map[string]any{"text": "(empty response)"})
 			} else {
 				for _, c := range am.Content {
 					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+						// Strip simulated subagent observations (e.g., "[Observation: ...]")
+						// which are harness artifacts, not model-generated text.
 						cleaned := stripSimulatedObservations(tc.Text)
 						if cleaned != "" && cleaned != "(empty response)" {
 							parts = append(parts, map[string]any{"text": cleaned})
@@ -801,6 +810,8 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						})
 					}
 				}
+				// If all text parts were stripped (e.g. only simulated observations or empty whitespace),
+				// fallback to "(empty response)" to retain the turn rather than producing an empty model turn.
 				if len(parts) == 0 {
 					parts = append(parts, map[string]any{"text": "(empty response)"})
 				}
@@ -840,8 +851,11 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						}
 					}
 					if canMerge {
-						// If consecutive model turns both consist only of "(empty response)",
-						// avoid duplicating "(empty response)" repeatedly.
+						// When two consecutive turns are both empty assistant responses (each having only
+						// a single "(empty response)" text part), deduplicate instead of concatenating
+						// multiple "(empty response)" parts into a single model turn.
+						// Multiple empty turns can occur when multiple empty assistant messages or
+						// stripped turns occur in sequence before user input.
 						if role == "model" && len(lastParts) == 1 && len(parts) == 1 {
 							lp, ok1 := lastParts[0].(map[string]any)
 							cp, ok2 := parts[0].(map[string]any)

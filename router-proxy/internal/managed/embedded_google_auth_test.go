@@ -782,7 +782,14 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 
 	contents := convertMessagesToGoogleContents(messages)
 
-	// The first assistant message was entirely simulated subagent observation,
+	// Test explanation:
+	// In managed agent executions, background workers or subagents might output simulated
+	// tool harness observations in the model text channel (e.g. "[Observation: subagent ...]").
+	// The router strips these out via stripSimulatedObservations. When an assistant turn
+	// contains ONLY simulated observations, stripping leaves 0 text parts.
+	// Rather than dropping the assistant turn (which would merge adjacent user messages),
+	// the converter normalizes it to a valid model turn with "(empty response)".
+	// The first assistant message below was entirely simulated subagent observation,
 	// so its text is stripped completely, normalizing to "(empty response)" to preserve turn alternation.
 	// The second assistant message has the observation lines stripped, leaving only the real response.
 	require.Len(t, contents, 4)
@@ -805,7 +812,15 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 }
 
 func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlternation(t *testing.T) {
+	// Test suite covering SPEC-TRANSCRIPT-EMPTY-TURN-001 (Empty Assistant Turn Transcript Retention).
+	// Gemini requires strict turn role alternation (user -> model -> user) and rejects empty part arrays.
+	// If assistant turns are omitted when empty, surrounding user turns (e.g. subagent completions
+	// and goal wake-ups) accidentally concatenate into a single compound user prompt, confusing context.
+
 	// SCN-001: Empty assistant turn between user prompt and goal reminder retains model turn and prevents user message merger.
+	// Verifies that when an empty assistant turn occurs between two user messages,
+	// it is converted to {"role": "model", "parts": [{"text": "(empty response)"}]}
+	// instead of dropping the turn, preserving 3 separate turns.
 	messages1 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -841,7 +856,10 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	require.Equal(t, "NOT_DONE: Please finish the remaining subgoals", parts3[0].(map[string]any)["text"])
 
 	// SCN-002: Tool response -> empty assistant -> user continuation prompt
-	// Tool result (role user) and user prompt (role user) are separated by model turn "(empty response)".
+	// Tool results are mapped to role "user" with functionResponse parts. When followed by an
+	// empty assistant turn and then a user continuation prompt, retaining the "(empty response)"
+	// model turn ensures Gemini's protocol requirement: functionResponse parts are not mixed with
+	// regular user text parts in the same turn, and the tool response and user prompt remain separate.
 	messages2 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -884,6 +902,9 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	require.Equal(t, "Continue working on the current goal.", contents2[4]["parts"].([]any)[0].(map[string]any)["text"])
 
 	// SCN-003: Assistant turn with only whitespace or "(empty response)" is normalized to model turn with "(empty response)"
+	// Assistant turns may contain whitespace-only text or already-emitted "(empty response)" strings.
+	// When multiple empty assistant turns occur in succession without user intervention, they are
+	// merged and deduplicated so that consecutive identical "(empty response)" model turns do not multiply.
 	messages3 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -917,6 +938,8 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	require.Equal(t, "user", contents3[2]["role"])
 
 	// SCN-004: Consecutive user messages without intervening assistant turn continue to merge
+	// Validates the invariant that normal user message concatenation is preserved when there is NO
+	// assistant turn between them (standard multi-part user turn behavior).
 	messages4 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
