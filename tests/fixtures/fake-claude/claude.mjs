@@ -307,10 +307,32 @@ try {
         executionTurns = matches[0].turns;
       }
       const inputRule = config.turns_by_input?.find(rule => input.includes(rule.contains));
-      active = { inputID: next.value.uuid, steps: inputRule?.steps ?? (executionTurns ?? config.turns)?.[turn++] ?? [{ text: 'fake answer' }], index: 0, text: '' };
+      if (turn === 0 && config.turns && config.turns.length > 1) {
+        const firstTurn = config.turns[0];
+        const isResumeNotice = Array.isArray(firstTurn) && firstTurn.some(step => {
+          const txt = (step.text || '').toLowerCase();
+          return txt.includes('notice:') || txt.includes('background') ||
+                 txt.includes('before the previous session ended') || txt.includes("didn't finish");
+        });
+        if (isResumeNotice) {
+          init();
+          let noticeText = '';
+          for (const step of firstTurn) {
+            if ('text' in step) {
+              noticeText += step.text;
+              assistant([{ type: 'text', text: step.text }]);
+            }
+          }
+          result(false, '');
+          turn++;
+        }
+      }
+      const steps = inputRule?.steps ?? (executionTurns ?? config.turns)?.[turn++] ?? [{ text: 'fake answer' }];
+      active = { inputID: next.value.uuid, steps, index: 0, text: '' };
       init();
       const proceed = () => {
-        if (options['--replay-user-messages'] && config.replay_control !== 'skip' && !next.echoed) {
+        const hasCrash = Array.isArray(steps) && steps.some(s => 'crash' in s);
+        if (options['--replay-user-messages'] && config.replay_control !== 'skip' && !next.echoed && !hasCrash) {
           emit({ ...next.value, isReplay: true, message: { ...next.value.message, role: config.replay_role ?? next.value.message.role } });
         }
         runSteps(active);

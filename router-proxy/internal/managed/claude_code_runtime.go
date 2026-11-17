@@ -859,6 +859,17 @@ func claudeUsageLimitDelay(now, reset time.Time) time.Duration {
 	return delay
 }
 
+// isClaudeResumeNoticeText identifies Claude's startup notice about killed
+// background tasks (or previous session cleanup) so it can be skipped before
+// user input admission.
+func isClaudeResumeNoticeText(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "notice:") ||
+		strings.Contains(lower, "background") ||
+		strings.Contains(lower, "before the previous session ended") ||
+		strings.Contains(lower, "didn't finish")
+}
+
 func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.UserMessage, pendingRaw map[string]json.RawMessage, continuing bool) (*embeddedOutcome, error) {
 	retryInputs := make(map[string]bool)
 	var lastRaw json.RawMessage
@@ -872,6 +883,21 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 	resolvedModel := ""
 	ambiguousModel := false
 	admitted := false
+	inResumeNotice := false
+
+	// If a turn fails before admission, Claude never consumed the delivered
+	// message on stdin, so the write-started fence is cleared and the error
+	// is classified as ErrClaudeUnconsumed.
+	stopTurn := func(err error) (*embeddedOutcome, error) {
+		if !admitted && err != nil {
+			if r.p.mail != nil {
+				_ = r.p.db.ResetClaudeMailWriteStarted(context.Background(), r.p.binding, r.p.mail.AttemptID)
+			}
+			err = fmt.Errorf("%w: %v", ErrClaudeUnconsumed, err)
+		}
+		return r.stop(err)
+	}
+
 	var limit *claudeCodeUsageLimitError
 	var cancelDrain context.CancelFunc
 	var lateDeadline time.Time
@@ -926,7 +952,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 	for {
 		if r.bridge != nil {
 			if err := r.bridge.err(); err != nil {
-				return r.stop(err)
+				return stopTurn(err)
 			}
 		}
 		if ctx.Err() != nil && cancelDrain == nil {
@@ -951,7 +977,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			if errors.Is(err, io.EOF) {
 				err = errors.New("Claude process exited before result")
 			}
-			return r.stop(err)
+			return stopTurn(err)
 		}
 		if event.ParentToolUseID != nil {
 			continue
@@ -975,7 +1001,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				} `json:"origin"`
 			}
 			if err := json.Unmarshal(event.Raw, &record); err != nil {
-				return r.stop(err)
+				return stopTurn(err)
 			}
 			if event.IsReplay && record.Origin != nil && record.Origin.Kind == "task-notification" {
 				r.process.mu.Lock()
@@ -984,14 +1010,11 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				if owned {
 					continue
 				}
-				if !admitted {
-					return r.stop(errors.New("Claude notification without admitted execution"))
-				}
 				var msg struct {
 					Content json.RawMessage `json:"content"`
 				}
 				if err := json.Unmarshal(event.Message, &msg); err != nil {
-					return r.stop(err)
+					return stopTurn(err)
 				}
 				var text string
 				if json.Unmarshal(msg.Content, &text) != nil {
@@ -1000,14 +1023,21 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 						Text string `json:"text"`
 					}
 					if json.Unmarshal(msg.Content, &blocks) != nil {
-						return r.stop(errors.New("malformed Claude notification content"))
+						return stopTurn(errors.New("malformed Claude notification content"))
 					}
 					for _, block := range blocks {
 						if block.Type != "text" {
-							return r.stop(errors.New("unsupported Claude notification block"))
+							return stopTurn(errors.New("unsupported Claude notification block"))
 						}
 						text += block.Text
 					}
+				}
+				if !admitted {
+					if isClaudeResumeNoticeText(text) {
+						inResumeNotice = true
+						continue
+					}
+					return stopTurn(errors.New("Claude notification without admitted execution"))
 				}
 				if err := r.appendCheckedNotice(ctx, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: text}}, Timestamp: time.Now().UnixMilli()}); err != nil {
 					return r.stop(err)
@@ -1025,20 +1055,20 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				}
 				original, ok := pending[event.UUID]
 				if !ok {
-					return r.stop(errors.New("Claude echo has no exact accepted input"))
+					return stopTurn(errors.New("Claude echo has no exact accepted input"))
 				}
 				delete(pending, event.UUID)
 				lastRaw = pendingRaw[event.UUID]
 				delete(pendingRaw, event.UUID)
 				if !retryInputs[event.UUID] {
 					if err := r.appendChecked(ctx, original); err != nil {
-						return r.stop(err)
+						return stopTurn(err)
 					}
 				} else if err := r.p.bindExecutionUser(ctx); err != nil {
-					return r.stop(err)
+					return stopTurn(err)
 				}
 				if err := r.checkedEcho(ctx); err != nil {
-					return r.stop(err)
+					return stopTurn(err)
 				}
 				admitted = true
 				if r.bridge != nil {
@@ -1058,7 +1088,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				continue
 			}
 			if !admitted {
-				return r.stop(errors.New("Claude user output before checked consumption"))
+				return stopTurn(errors.New("Claude user output before checked consumption"))
 			}
 			results, err := r.toolResults(event)
 			if err != nil {
@@ -1078,7 +1108,26 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			}
 		case "assistant":
 			if !admitted {
-				return r.stop(errors.New("Claude assistant before checked consumption"))
+				var msg struct {
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				}
+				_ = json.Unmarshal(event.Message, &msg)
+				var text string
+				for _, block := range msg.Content {
+					if block.Type == "text" {
+						text += block.Text
+					}
+				}
+				if isClaudeResumeNoticeText(text) || inResumeNotice {
+					inResumeNotice = true
+					held = nil
+					heldID = ""
+					continue
+				}
+				return stopTurn(fmt.Errorf("%w: Claude assistant before checked consumption", ErrClaudeUnconsumed))
 			}
 			var api struct {
 				IsAPIError bool   `json:"is_api_error_message"`
@@ -1140,7 +1189,13 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			}
 		case "result":
 			if !admitted {
-				return r.stop(errors.New("Claude result before checked consumption"))
+				if inResumeNotice {
+					inResumeNotice = false
+					held = nil
+					heldID = ""
+					continue
+				}
+				return stopTurn(fmt.Errorf("%w: Claude result before checked consumption", ErrClaudeUnconsumed))
 			}
 			// Unacknowledged steers stay reserved: a result without their echo is not
 			// an error here, so the held answer and original turn still settle.

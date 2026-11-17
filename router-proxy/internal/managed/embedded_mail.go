@@ -144,6 +144,32 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 		finalSeq, err := m.runEmbeddedMail(ctx, *saved, attempt)
 		if err != nil {
 			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, "mail", attempt.MessageID, err)
+			// Unconsumed mail was never ingested by Claude on stdin; safely retry
+			// with exponential backoff (up to 3 attempts before dead-lettering)
+			// rather than holding as outcome uncertain.
+			if errors.Is(err, ErrClaudeUnconsumed) {
+				_ = m.store.ResetClaudeMailWriteStarted(context.Background(), binding, attempt.AttemptID)
+				if releaseErr := m.store.ReleaseEmbeddedUnconsumedAttempt(context.Background(), binding, attempt.AttemptID); releaseErr != nil {
+					log.Printf("[embedded:%s] ERROR releasing unconsumed mail %s: %v", agentID, attempt.MessageID, releaseErr)
+				}
+				lane.mailAttempts[attempt.MessageID]++
+				attempts := lane.mailAttempts[attempt.MessageID]
+				if attempts >= 3 {
+					log.Printf("[embedded:%s] POISON PILL: message %s unconsumed 3 times; dead-lettering: %v", agentID, attempt.MessageID, err)
+					delete(lane.mailAttempts, attempt.MessageID)
+					if dismissErr := m.store.DismissMailboxMessage(context.Background(), attempt.MessageID); dismissErr != nil {
+						log.Printf("[embedded:%s] ERROR dismissing dead-lettered message %s: %v", agentID, attempt.MessageID, dismissErr)
+					}
+					return
+				}
+				baseBackoff := 5 * time.Second
+				if m.embeddedMailBackoff > 0 {
+					baseBackoff = m.embeddedMailBackoff
+				}
+				backoff := time.Duration(1<<(attempts-1)) * baseBackoff
+				m.scheduleClaudeMailRetry(agentID, backoff)
+				return
+			}
 			if errors.Is(err, errClaudeInputBounds) {
 				// runEmbeddedMail joins callbacks and closes the scoped process before
 				// returning. Only a definite pre-submission rejection is released.
