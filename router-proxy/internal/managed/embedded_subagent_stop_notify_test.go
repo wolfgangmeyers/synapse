@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/ai/providers"
@@ -75,6 +76,6 @@ func TestStopSubagentNotifiesParentWorker(t *testing.T) {
 	require.Equal(t, parent.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
 	require.Equal(t, "[System Notice] Subagent Terminated: "+childID, *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\").\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\").\n\n" + domain.SystemNotificationForwardGuidanceFooter
 	require.Equal(t, expectedBody, msg.Body)
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
@@ -730,7 +731,7 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 	m.recordSubagentCompletionHistory(targetParentID, childID, attempt, desc, "failed", "stopped", "", "Subagent stopped.")
 	m.publishProjection()
 	subject := fmt.Sprintf("[System Notice] Subagent Terminated: %s", childID)
-	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*", childID, desc, childID)
+	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").\n\n%s", childID, desc, childID, domain.SystemNotificationForwardGuidanceFooter)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, attempt)
 	now := formatManagedTime(m.clock.Now())
@@ -1422,7 +1423,7 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 		childID := rec.AgentID
 		m.recordSubagentCompletionHistory(rec.ParentAgentID, rec.AgentID, rec.Attempt, rec.Description, "failed", "failed", "", "Interrupted on restart")
 		subject := fmt.Sprintf("[System Notice] Subagent Interrupted: %s", childID)
-		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*", childID, rec.Description, childID)
+		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").\n\n%s", childID, rec.Description, childID, domain.SystemNotificationForwardGuidanceFooter)
 		source := protocol.MessageSource{Kind: "system"}
 		msgID := fmt.Sprintf("subagent-interrupted-%s-%s", childID, uuid.New().String()[:8])
 		now := formatManagedTime(m.clock.Now())

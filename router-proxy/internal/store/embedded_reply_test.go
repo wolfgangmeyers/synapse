@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
@@ -232,7 +233,7 @@ func TestEmbeddedReplySystemMessageRecordsHistoryWithoutOutbox(t *testing.T) {
 	b := redBind(t, s, "reply-worker-system", "reply-session-system", 1, "reply-generation-1", "worker")
 
 	// 1. Inbound system message from "system" with source_kind="system"
-	mail := testEnvelope("system-msg-1", "[Subagent Completed] Task subagent-1 (test) finished with status completed: done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	mail := testEnvelope("system-msg-1", "[Subagent Completed] Task subagent-1 (test) finished with status completed: done.\n\n"+domain.SystemNotificationForwardGuidanceFooter)
 	mail.From = "system"
 	mail.To = b.AgentID
 	_, err = s.Enqueue(ctx, mail)
@@ -299,7 +300,7 @@ func TestEmbeddedReplySystemMessageRoutesToLastHumanRecipient(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Inbound system message from "system" with source_kind="system"
-	sysMail := testEnvelope("system-msg-2", "[Subagent Completed] Task subagent-1 finished with status completed: done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	sysMail := testEnvelope("system-msg-2", "[Subagent Completed] Task subagent-1 finished with status completed: done.\n\n"+domain.SystemNotificationForwardGuidanceFooter)
 	sysMail.From = "system"
 	sysMail.To = b.AgentID
 	_, err = s.Enqueue(ctx, sysMail)

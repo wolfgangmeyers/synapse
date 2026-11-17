@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
 	"github.com/sky-valley/pi/ai"
@@ -101,7 +102,7 @@ func TestReconcileInterruptedSubagentsNotifiesParent(t *testing.T) {
 	require.Equal(t, parentBinding.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
 	require.Equal(t, "[System Notice] Subagent Interrupted: "+childID, *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"" + childID + "\").\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"" + childID + "\").\n\n" + domain.SystemNotificationForwardGuidanceFooter
 	require.Equal(t, expectedBody, msg.Body)
 
 	// Running ReconcileInterruptedSubagents again must be idempotent
