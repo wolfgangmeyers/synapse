@@ -44,17 +44,6 @@ func claudeStartCategorize(category claudeStartCategory, cause error) error {
 	return &claudeStartError{category: category, cause: cause}
 }
 func claudeStartCategoryOf(err error) claudeStartCategory {
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		if se, ok := e.(*claudeStartError); ok {
-			switch se.category {
-			case claudeStartAuth, claudeStartSpawn, claudeStartProbeDied, claudeStartPoolFenced, claudeStartGrantFailed:
-				return se.category
-			}
-		}
-		if _, ok := e.(*ClaudeAdmissionFencedError); ok {
-			return claudeStartPoolFenced
-		}
-	}
 	var e *claudeStartError
 	if errors.As(err, &e) {
 		switch e.category {

@@ -116,7 +116,7 @@ func (a *ClaudeCodeAdapter) Executable(ctx context.Context) (string, error) {
 func (a *ClaudeCodeAdapter) Preflight(ctx context.Context) error {
 	bin, err := a.Executable(ctx)
 	if err != nil {
-		return fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestonePreflightAuth, fmt.Errorf("install Claude CLI and sign in on the host: %w", err))
+		return fmt.Errorf("install Claude CLI and sign in on the host: %w", err)
 	}
 	pCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -125,13 +125,13 @@ func (a *ClaudeCodeAdapter) Preflight(ctx context.Context) error {
 	cmd.Env = a.CleanEnvironment(a.env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestonePreflightAuth, errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host"))
+		return errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host")
 	}
 	var status struct {
 		LoggedIn *bool `json:"loggedIn"`
 	}
 	if json.Unmarshal(out, &status) != nil || status.LoggedIn == nil || !*status.LoggedIn {
-		return fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestonePreflightAuth, errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host"))
+		return errors.New("Claude CLI unavailable or signed out; run claude auth status and sign in on the host")
 	}
 	return nil
 }

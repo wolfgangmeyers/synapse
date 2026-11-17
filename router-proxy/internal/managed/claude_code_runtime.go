@@ -831,7 +831,10 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 			if errors.Is(err, context.Canceled) {
 				return nil, err
 			}
-			return r.stop(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneInitialPromptSubmit, err))
+			if fresh {
+				return r.stop(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneInitialPromptSubmit, err))
+			}
+			return r.stop(err)
 		}
 		r.mu.Lock()
 		r.admissionBytes += len(rendered[i])
