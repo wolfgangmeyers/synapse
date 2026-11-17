@@ -40,8 +40,6 @@ func TestEmbeddedCommandBootstrapIsOffAndRejectsIncompleteAuthorityRED(t *testin
 	require.Error(t, err, "bootstrap cwd must be absolute")
 	_, err = parseConfig(append(append(append([]string{}, base...), flags...), "--embedded-root-request-id", "not-an-id"))
 	require.Error(t, err, "bootstrap ID must be stable and valid")
-	_, err = parseConfig(append(append(append([]string{}, base...), flags...), "--managed=false"))
-	require.Error(t, err, "a disabled manager cannot bootstrap a root")
 
 	opts, err := parseConfig(append(append([]string{}, base...), flags...))
 	require.NoError(t, err)

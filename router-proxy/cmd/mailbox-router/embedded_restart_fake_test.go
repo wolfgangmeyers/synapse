@@ -23,7 +23,7 @@ import (
 
 func TestEmbeddedRestartStartupRejectsBeforeDatabase(t *testing.T) {
 	if os.Getenv("EMBEDDED_RESTART_FAKE_TEST_CHILD") == "1" {
-		os.Args = []string{"mailbox-router", "--database", os.Getenv("EMBEDDED_RESTART_FAKE_DB"), "--host", os.Getenv("EMBEDDED_RESTART_FAKE_HOST"), "--managed=false"}
+		os.Args = []string{"mailbox-router", "--database", os.Getenv("EMBEDDED_RESTART_FAKE_DB"), "--host", os.Getenv("EMBEDDED_RESTART_FAKE_HOST")}
 		main()
 		return
 	}
@@ -42,7 +42,7 @@ func TestEmbeddedRestartStartupRejectsBeforeDatabase(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			db := filepath.Join(root, "router.sqlite")
-			command := exec.Command(os.Args[0], "-test.run=^TestEmbeddedRestartStartupRejectsBeforeDatabase$", "--", "--database", db, "--host", tc.host, "--managed=false")
+			command := exec.Command(os.Args[0], "-test.run=^TestEmbeddedRestartStartupRejectsBeforeDatabase$", "--", "--database", db, "--host", tc.host)
 			enable := "1"
 			if tc.name == "no opt-in" {
 				enable = "0"

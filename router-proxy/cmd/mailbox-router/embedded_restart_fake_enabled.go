@@ -37,9 +37,6 @@ func configureEmbeddedRestartFake(options config, out *managed.ManagerOptions) e
 	if options.host != "127.0.0.1" && options.host != "::1" {
 		return errors.New("embedded restart fake requires a loopback router listener")
 	}
-	if !options.managed.Enabled {
-		return errors.New("embedded restart fake requires managed mode")
-	}
 	if out == nil {
 		return errors.New("embedded restart fake manager options missing")
 	}

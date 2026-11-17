@@ -11,20 +11,6 @@ AUDIT_SUPERVISOR_TARGET="${MECHA_ROUTER_AUDIT_SUPERVISOR_TARGET:-supervisor}"
 AUDIT_TMUX_SESSION="${MECHA_ROUTER_AUDIT_TMUX_SESSION:-mecha}"
 POLICY_TIMEOUT="${MECHA_ROUTER_POLICY_TIMEOUT:-5s}"
 MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH="${MECHA_ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH:-false}"
-# Router-managed Pi is on by default. Only the explicit string "false" opts
-# out; reject other values so a typo cannot silently change the router mode.
-case "${MECHA_ROUTER_MANAGED:-true}" in
-  true)
-    MANAGED=true
-    ;;
-  false)
-    MANAGED=false
-    ;;
-  *)
-    printf '%s\n' "run_router.sh: MECHA_ROUTER_MANAGED must be true or false" >&2
-    exit 2
-    ;;
-esac
 MANAGED_PI="${MECHA_ROUTER_MANAGED_PI:-$(command -v pi || true)}"
 MANAGED_HOME="${MECHA_ROUTER_MANAGED_HOME:-${HOME}/.mecha-developer/managed-pi}"
 MANAGED_PI_AGENT_DIR="${MECHA_ROUTER_MANAGED_PI_AGENT_DIR:-${HOME}/.pi/agent}"
@@ -89,7 +75,7 @@ sync_repo() {
 }
 
 usage() {
-  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Running tools/run_router.sh is mandatory for automatic restarts." "Router-managed Pi is enabled by default; set MECHA_ROUTER_MANAGED=false for legacy-only routing." ""
+  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Running tools/run_router.sh is mandatory for automatic restarts." ""
 }
 
 case "${1:-}" in
@@ -97,16 +83,14 @@ case "${1:-}" in
     usage
     ;;
   "")
-    if [[ "$MANAGED" == "true" ]]; then
-      mkdir -p "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
-      chmod 700 "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
-      if [[ ! -f "$ROOT_DIR/auth-helper/node_modules/@earendil-works/pi-coding-agent/package.json" ]]; then
-        printf '%s\n' "run_router.sh: installing auth-helper dependencies..." >&2
-        npm --prefix "$ROOT_DIR/auth-helper" ci
-      fi
-      if [[ -z "$MANAGED_CURSOR_EXTENSION" && -f "$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js" ]]; then
-        MANAGED_CURSOR_EXTENSION="$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js"
-      fi
+    mkdir -p "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
+    chmod 700 "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
+    if [[ ! -f "$ROOT_DIR/auth-helper/node_modules/@earendil-works/pi-coding-agent/package.json" ]]; then
+      printf '%s\n' "run_router.sh: installing auth-helper dependencies..." >&2
+      npm --prefix "$ROOT_DIR/auth-helper" ci
+    fi
+    if [[ -z "$MANAGED_CURSOR_EXTENSION" && -f "$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js" ]]; then
+      MANAGED_CURSOR_EXTENSION="$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js"
     fi
     EXIT_FILE="$(mktemp -t router_exit.XXXXXX)"
     export ROUTER_EXIT_FILE="$EXIT_FILE"
@@ -124,7 +108,6 @@ case "${1:-}" in
         "ROUTER_AUDIT_SUPERVISOR_TARGET=$AUDIT_SUPERVISOR_TARGET" \
         "ROUTER_AUDIT_TMUX_SESSION=$AUDIT_TMUX_SESSION" \
         "ROUTER_POLICY_TIMEOUT=$POLICY_TIMEOUT" \
-        "ROUTER_MANAGED=$MANAGED" \
         "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=$MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH" \
         "ROUTER_MANAGED_PI=$MANAGED_PI" \
         "ROUTER_MANAGED_HOME=$MANAGED_HOME" \
