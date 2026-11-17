@@ -67,14 +67,34 @@ c.commit()
     expect(pages[0].next).not.toBeNull();
     const timeline = await (await fetch(`${url}/v1/conversation?agent_id=page-alpha&limit=50`)).text();
     expect(timeline).not.toContain('Managed only item');
+    let releaseAlpha!: () => void;
+    const gateAlpha = new Promise<void>(resolve => { releaseAlpha = resolve; });
+    let seenAlpha!: () => void;
+    const requestedAlpha = new Promise<void>(resolve => { seenAlpha = resolve; });
+    const routeHandler = async (route: import('@playwright/test').Route) => {
+      const u = new URL(route.request().url());
+      if (u.searchParams.get('agent_id') === 'page-alpha' && u.searchParams.has('before')) {
+        seenAlpha();
+        await gateAlpha;
+        await route.continue();
+      } else {
+        await route.continue();
+      }
+    };
+    await page.route('**/v1/history?**', routeHandler);
     const anchor = page.getByText('Managed only item 030', { exact: true });
-    await anchor.scrollIntoViewIfNeeded();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 50;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await requestedAlpha;
     const before = await anchor.boundingBox();
-    await page.getByRole('button', { name: /load older history/i }).click();
+    releaseAlpha();
     await expect(page.getByText('Managed only item 001', { exact: true })).toHaveCount(1);
     await expect.poll(() => pages.some(p => p.before !== null)).toBe(true);
     const after = await anchor.boundingBox();
     expect(Math.abs(after!.y - before!.y)).toBeLessThanOrEqual(3);
+    await page.unroute('**/v1/history?**', routeHandler);
     for (let i = 1; i <= 65; i++) await expect(page.getByText(`Managed only item ${String(i).padStart(3, '0')}`, { exact: true })).toHaveCount(1);
     const betaInitial = page.waitForResponse(response => {
       const u = new URL(response.url());
@@ -86,7 +106,15 @@ c.commit()
     expect(betaPage.next_before).toBeTruthy();
     await expect(page.getByText(/Hidden beta item/)).toHaveCount(0);
     await expect(page.getByText('Older visible beta item', { exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: /load older history/i }).click();
+    const betaOlder = page.waitForResponse(response => {
+      const u = new URL(response.url());
+      return u.origin === url && u.pathname === '/v1/history' && u.searchParams.get('agent_id') === 'page-beta' && u.searchParams.get('view') === 'complete' && u.searchParams.has('before') && response.ok();
+    }, { timeout: 10_000 });
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await betaOlder;
     await expect(page.getByText('Older visible beta item', { exact: true })).toBeVisible();
     expect(unexpected).toEqual([]);
   } finally {

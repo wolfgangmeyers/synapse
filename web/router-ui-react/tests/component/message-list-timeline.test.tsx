@@ -28,7 +28,7 @@ describe("MessageList", () => {
     const pending: HistoryMessage = { id: "pending", body: "pending text", direction: "outgoing", pending: true };
     const load = vi.fn(async () => {});
     const props = { peerId: "agent-1", timelineEvents: timeline, activityEntries: activity, messages: [pending], liveTimelineIds: new Set(["msg:agent-1:t0"]), liveActivityIds: new Set(["a0"]), onLoadOlder: load, hasOlder: true };
-    const { rerender } = render(<MessageList {...props} historyWindowReady={false} />);
+    const { container, rerender } = render(<MessageList {...props} historyWindowReady={false} />);
     expect(screen.getByText("timeline-0")).toBeInTheDocument();
     expect(screen.getByText("activity-0")).toBeInTheDocument();
     expect(screen.getByText("pending text")).toBeInTheDocument();
@@ -38,10 +38,23 @@ describe("MessageList", () => {
     expect(screen.getByText("timeline-39")).toBeInTheDocument();
     expect(screen.getByText("activity-39")).toBeInTheDocument();
     expect(document.querySelectorAll("[data-scroll-anchor]")).toHaveLength(53);
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Messages container not found");
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+
+    await act(async () => {
+      list.scrollTop = 50;
+      fireEvent.scroll(list);
+    });
     expect(screen.getByText("timeline-1")).toBeInTheDocument();
     expect(load).not.toHaveBeenCalled();
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+
+    await act(async () => {
+      list.scrollTop = 40;
+      fireEvent.scroll(list);
+    });
     expect(load).toHaveBeenCalledTimes(1);
     rerender(<MessageList {...props} peerId="other" historyWindowReady />);
     rerender(<MessageList {...props} historyWindowReady />);
@@ -58,16 +71,30 @@ describe("MessageList", () => {
     const timeline: ConversationTimelineEvent[] = Array.from({ length: 60 }, (_, i) => ({ id: `item-${i}`, agent_id: "agent-1", kind: "message", role: "assistant", seq: i + 1, created_at: i + 1, content: `item ${i}` }));
     const discard = vi.fn();
     const load = vi.fn(async () => {});
-    render(<MessageList peerId="agent-1" timelineEvents={timeline} historyWindowReady onDiscardHistoryBefore={discard} onLoadOlder={load} hasOlder />);
+    const { container } = render(<MessageList peerId="agent-1" timelineEvents={timeline} historyWindowReady onDiscardHistoryBefore={discard} onLoadOlder={load} hasOlder />);
     expect(screen.queryByText("item 0")).not.toBeInTheDocument();
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Messages container not found");
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+    await act(async () => {
+      list.scrollTop = 50;
+      fireEvent.scroll(list);
+    });
     expect(load).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("item 0")).not.toBeInTheDocument();
   });
-  it("allows paging when all current entries are hidden", () => {
+  it("allows paging when all current entries are hidden", async () => {
     const load = vi.fn();
-    render(<MessageList peerId="agent-1" timelineEvents={[]} activityEntries={[]} hasOlder onLoadOlder={load} />);
-    fireEvent.click(screen.getByRole("button", { name: /load older history/i }));
+    const { container } = render(<MessageList peerId="agent-1" timelineEvents={[]} activityEntries={[]} hasOlder onLoadOlder={load} />);
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Messages container not found");
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+    await act(async () => {
+      list.scrollTop = 50;
+      fireEvent.scroll(list);
+    });
     expect(load).toHaveBeenCalled();
   });
   it("renders a message list with correct roles", () => {
@@ -350,7 +377,7 @@ describe("MessageList", () => {
     expect(screen.getByText("Timeline message body 50")).toBeInTheDocument();
   });
 
-  it("handles pagination via load older button and scroll up", async () => {
+  it("handles pagination via scroll up", async () => {
     let finishLoad: () => void = () => { throw new Error("Pagination has not started"); };
     const onLoadOlder = vi.fn(() => new Promise<void>((resolve) => { finishLoad = resolve; }));
     const events: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
@@ -372,18 +399,18 @@ describe("MessageList", () => {
       />
     );
 
-    // 1. Verify load older button exists and triggers callback when clicked
-    const loadOlderBtn = screen.getByRole("button", { name: /Load older history/i });
-    expect(loadOlderBtn).toBeInTheDocument();
-    fireEvent.click(loadOlderBtn);
-    expect(onLoadOlder).toHaveBeenCalledTimes(1);
-
-    // Scrolling upward while the button request is pending must not overlap it.
     const list = container.querySelector<HTMLDivElement>(".messages");
     if (!list) throw new Error("Messages container not found");
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+
+    // Scrolling near top triggers pagination callback
     list.scrollTop = 50;
+    fireEvent.scroll(list);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+
+    // Scrolling upward while the request is pending must not overlap it.
+    list.scrollTop = 45;
     fireEvent.scroll(list);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
 
@@ -707,6 +734,68 @@ describe("MessageList", () => {
       expect(screen.getByText("Message 1")).toBeInTheDocument();
       expect(screen.getByText("Message 51")).toBeInTheDocument();
       expect(screen.getByText("Message 200")).toBeInTheDocument();
+    });
+
+    it("automatically fetches older history on layout/mount when visible items do not fill container and hasOlder is true", async () => {
+      const onLoadOlder = vi.fn(async () => {});
+      const events: ConversationTimelineEvent[] = [
+        {
+          id: "evt-1",
+          agent_id: "agent-1",
+          seq: 10,
+          kind: "message",
+          role: "assistant",
+          content: "Single message not filling container",
+          created_at: 1700000000000,
+        },
+      ];
+
+      // scrollHeight <= clientHeight + 20 in jsdom by default (typically 0 <= 0 + 20)
+      render(
+        <MessageList
+          peerId="agent-1"
+          events={events}
+          hasOlder={true}
+          onLoadOlder={onLoadOlder}
+        />
+      );
+
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    });
+
+    it("invokes handleInternalLoadOlder when retry button clicked in error banner and onRetryHistory is undefined", async () => {
+      const onLoadOlder = vi.fn(async () => {});
+      const events: ConversationTimelineEvent[] = [
+        {
+          id: "evt-1",
+          agent_id: "agent-1",
+          seq: 10,
+          kind: "message",
+          role: "assistant",
+          content: "Visible message with error banner",
+          created_at: 1700000000000,
+        },
+      ];
+
+      render(
+        <MessageList
+          peerId="agent-1"
+          events={events}
+          hasOlder={true}
+          error="Failed to fetch older history"
+          onLoadOlder={onLoadOlder}
+        />
+      );
+
+      // In error state, auto-fetch is blocked by error check.
+      expect(onLoadOlder).not.toHaveBeenCalled();
+
+      const retryBtn = screen.getByRole("button", { name: "Retry history" });
+      await act(async () => {
+        fireEvent.click(retryBtn);
+      });
+
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
     });
   });
 });

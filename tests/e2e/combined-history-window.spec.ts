@@ -71,7 +71,10 @@ c.commit()
       const url = new URL(request.url());
       if (url.pathname === '/v1/history' || url.pathname === '/v1/conversation') olderRequests.push(request.url());
     });
-    await page.getByRole('button', { name: /load older history/i }).click();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await expect(page.getByText('Timeline item 00', { exact: true })).toBeVisible();
     if (scenario !== 'zero-contribution') expect(olderRequests.some((url) => new URL(url).pathname === '/v1/history')).toBe(true);
     expect(olderRequests.some((url) => new URL(url).pathname === '/v1/conversation')).toBe(true);
@@ -81,7 +84,6 @@ c.commit()
       await expect(page.getByText(`Activity item ${number}`, { exact: true })).toHaveCount(1);
     }
     await expect(page.locator('[data-scroll-anchor]')).toHaveCount(80);
-    await expect(page.getByRole('button', { name: /load older history/i })).toHaveCount(0);
   } catch (error) {
     // Preserve the page and completed REST bodies before shutting down the servers.
     await Promise.race([Promise.allSettled(responseReads), new Promise(resolve => setTimeout(resolve, 2000))]);

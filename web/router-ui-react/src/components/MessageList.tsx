@@ -810,9 +810,8 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     if (!switched && anchor && !isNearBottomRef.current && element.contains(anchor.element)) {
       element.scrollTop += anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset;
     }
-    if (request) {
-      delete request.anchor;
-      if (request.settled) paginationRef.current = null;
+    if (request && request.settled) {
+      paginationRef.current = null;
     }
     if (isNearBottomRef.current) element.scrollTop = element.scrollHeight;
     lastScrollTopRef.current = element.scrollTop;
@@ -884,11 +883,25 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     if (anchor && element.contains(anchor.element)) {
       anchor.offset = anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top;
     }
-    const isScrollable = scrollHeight > clientHeight + 20;
-    if (isScrollable && scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder && !error) {
+    if (scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder && !error) {
       void handleInternalLoadOlder();
     }
   };
+
+  // If the conversation is not scrollable (e.g. empty or too few items to fill viewport)
+  // but older history is available, automatically load older history so the user sees history.
+  // Note: Only trigger if historyWindowReady is not false, and not when visible items are deferred
+  // within a ready bounded window (deferred items are revealed by scrolling).
+  useEffect(() => {
+    if (!effectiveHasOlder || effectiveLoadingOlder || error) return;
+    if (historyWindowReady === false || visibleItems.deferred) return;
+    const element = ref.current;
+    if (!element) return;
+    const isScrollable = element.scrollHeight > element.clientHeight + 20;
+    if (!isScrollable) {
+      void handleInternalLoadOlder();
+    }
+  }, [effectiveHasOlder, effectiveLoadingOlder, error, historyWindowReady, visibleItems.deferred, renderedItems.length, handleInternalLoadOlder]);
   const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined || (effectiveEvents !== undefined && effectiveEvents.some((e) => e.kind !== "message"));
   const effectiveLoading = loading || internalLoading;
@@ -901,13 +914,6 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       ) : hasItems || effectiveHasOlder ? (
         <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>
           <div className="timeline-rail" aria-hidden="true" />
-          {effectiveHasOlder && (
-            <li key="pagination:load-older" className="timeline-load-older-item" style={{ position: "sticky", top: 0, zIndex: 2 }}>
-              <button type="button" className="load-older-button" onClick={handleInternalLoadOlder} disabled={effectiveLoadingOlder}>
-                {effectiveLoadingOlder ? "Loading older history…" : error ? "Retry older history" : "Load older history"}
-              </button>
-            </li>
-          )}
           {renderedItems.map(({ item, suppressThinking, epoch }) => {
             const itemKey = `${item.type}:${item.id}`;
             const currentDate = dateLabel(item.timestamp);
@@ -981,7 +987,14 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
           {...(agent !== undefined ? { agent } : {})}
         />
       )}
-      {(hasItems || effectiveHasOlder) && error ? <div className="error" role="alert">{error} {onRetryHistory && <button type="button" onClick={onRetryHistory}>Retry history</button>}</div> : null}
+      {(hasItems || effectiveHasOlder) && error ? (
+        <div className="error" role="alert">
+          {error}{" "}
+          <button type="button" onClick={() => { if (onRetryHistory) onRetryHistory(); else void handleInternalLoadOlder(); }}>
+            Retry history
+          </button>
+        </div>
+      ) : null}
       <p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p>
     </div>
   );

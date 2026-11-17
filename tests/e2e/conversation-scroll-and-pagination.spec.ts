@@ -384,7 +384,7 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
 
     // -------------------------------------------------------------------------
     // Scenario 5: SCN-UNLOAD-001 Natural unloading when exceeding 150 messages
-    // and SCN-UNLOAD-002 Re-fetching unloaded chunks via "Load older history"
+    // and SCN-UNLOAD-002 Re-fetching unloaded chunks via scroll to top
     // -------------------------------------------------------------------------
     // Switch back to agent 1
     const agent1SidebarItem = page.locator(`.agent-row, .agent-row-select, [aria-label*="agent-scroll-worker-1"]`).filter({
@@ -472,10 +472,12 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
     });
     expect(await trimmedMessageLocator.count()).toBe(0);
 
-    // SCN-UNLOAD-002: hasOlder indicator / "Load older history" button remains available
-    const loadOlderBtn = page.locator('.load-older-button, button:has-text("Load older history")');
-    await expect(loadOlderBtn.first()).toBeVisible({ timeout: 5000 });
-    await loadOlderBtn.first().click();
+    // SCN-UNLOAD-002: scrolling to top loads older unloaded chunks
+    await expect(page.locator('.load-older-button')).toHaveCount(0);
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await expect(trimmedMessageLocator.first()).toBeVisible({ timeout: 10000 });
 
     // Close agent WebSockets

@@ -85,10 +85,10 @@ This specification defines the behavior for eliminating the manual scroll lock t
 - **And**: The active `hasOlder` indicator remains `true` when items were trimmed, even if the previous persisted cursor was exhausted.
 - **And**: Trimmed history is not restored from secondary stores; it must be fetched again. Switching away also discards completed history under draft `SPEC-CONV-006`.
 
-#### Scenario: [SCN-UNLOAD-002] Re-fetching unloaded chunks via "Load older history" or scrollback
+#### Scenario: [SCN-UNLOAD-002] Re-fetching unloaded chunks via scrollback
 - **Given**: Wolfgang is viewing a conversation where older items were trimmed due to natural unloading.
 - **And**: `hasOlder` is `true` because items were trimmed.
-- **When**: Wolfgang clicks "Load older history" or scrolls to the top of the viewport.
+- **When**: Wolfgang scrolls to the top of the viewport (`scrollTop < 100`). The manual button is removed in favor of automatic scrollback pagination.
 - **Then**: The system recovers the boundary using the scoped persisted event boundary and server-provided timeline cursors, not message sequence numbers; see draft `SCN-SWITCH-010`.
 - **And**: If the persisted boundary cannot be found or a request fails, the visible window is retained and recovery remains available for retry.
 - **And**: The fetched older chunk is prepended to the top of the conversation.
@@ -170,7 +170,7 @@ This specification defines the behavior for eliminating the manual scroll lock t
 | `SCN-SCROLL-004` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify switching agents scrolls to bottom regardless of prior scroll state |
 | `SCN-SCROLL-006` | `web/router-ui-react/tests/component/subagent-viewer-dialog.test.tsx` | Verify subagent viewer dialog follows proximity auto-scrolling when near bottom and locks when scrolled up |
 | `SCN-UNLOAD-001` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Natural unloading when exceeding 150 messages during streaming updates |
-| `SCN-UNLOAD-002` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Re-fetching unloaded chunks via "Load older history" or scrollback |
+| `SCN-UNLOAD-002` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Re-fetching unloaded chunks via scrollback |
 | `SCN-SCROLL-007` | `tests/e2e/conversation-scroll-regressions.spec.ts` | pagination failure/empty/duplicate releases follow after returning near bottom |
 | `SCN-SCROLL-008` | `tests/e2e/conversation-scroll-regressions.spec.ts` | pending pagination failure/empty/duplicate switch isolation |
 | `SCN-SCROLL-009` | `tests/e2e/conversation-scroll-regressions.spec.ts` | delayed same-ID image growth following/reading/resumed |

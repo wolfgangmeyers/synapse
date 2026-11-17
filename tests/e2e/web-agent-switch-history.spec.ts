@@ -92,7 +92,10 @@ test.describe('Conversation switch history isolation', () => {
     const bubble = (text: string) => page.locator('.bubble-wrap').filter({ hasText: text });
     await expect(bubble('Cache history item 065')).toBeVisible();
     await expect(bubble('Cache history item 001')).toHaveCount(0);
-    await page.getByRole('button', { name: /load older history/i }).click();
+    await page.locator('.messages').evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
     await expect(bubble('Cache history item 001')).toBeVisible();
 
     await page.locator('.agent-row, .agent-row-select').filter({ hasText: 'Agent Cache Beta' }).first().click();
