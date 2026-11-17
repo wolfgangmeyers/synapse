@@ -5,7 +5,7 @@ test("IR-012/015: revoking return before a transition rejects without lifecycle 
   test.setTimeout(120_000);
   const f = await workflowHarness();
   try {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Ready" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Ready" });
     const { agent, a, b } = await createRunningWorkflow(f, page, 600000, false);
     const wait = async (text: string) => {
       await expect(page.getByText(text, { exact: true }).first()).toBeVisible();
@@ -17,7 +17,7 @@ test("IR-012/015: revoking return before a transition rejects without lifecycle 
       monitors: [{ name: "B monitor", question_instructions: "Check B", nudge_template: "B nudge", interval_seconds: 3600 }] };
     await f.api(`/v1/workflow-states/${b.id}`, { ...definition, allow_implicit_return: true }, "PUT");
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id } },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "At B" });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "At B" });
     await userTurn(page, "Advance to B"); await wait("At B");
     await expect.poll(() => f.rows("SELECT last_evaluated_at FROM managed_agent_monitors WHERE agent_id=?", agent)[0]?.last_evaluated_at).toBeTruthy();
     const forward = f.rows("SELECT sequence FROM managed_complete_history WHERE agent_id=? AND message='Workflow state transitioned' ORDER BY sequence DESC LIMIT 1", agent)[0];

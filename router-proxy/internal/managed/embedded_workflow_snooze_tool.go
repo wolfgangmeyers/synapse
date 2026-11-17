@@ -20,6 +20,7 @@ import (
 func embeddedWorkflowSnoozeSchema() *ai.Schema {
 	closed := false
 	s := ai.Object(
+		ai.Prop("justification", ai.String("Substantive explanation of the external asynchronous process being awaited (e.g. CI build, test run, or remote deployment). Snooze is ONLY for active external processes.")),
 		ai.Opt("duration_minutes", ai.Integer()),
 		ai.Opt("duration_ms", ai.Integer()),
 		ai.Opt("reason", ai.String()),
@@ -49,10 +50,12 @@ func embeddedWorkflowSnoozeArguments(args map[string]any, defaultMs int64) ([]by
 // embeddedWorkflowSnoozeTool returns an agent tool allowing workers running an active workflow
 // to snooze workflow continuation turns. It sets a delay preference on the agent's goal policy,
 // defaulting to the workflow's configured snooze_duration_ms (or 10 minutes) when no duration is specified.
+// Snooze is ONLY for awaiting active external asynchronous operations (e.g. CI test runs or remote deployments).
+// If progress is stalled due to ambiguity, missing credentials, or environmental issues, agents must call mecha_blocked instead.
 func (m *Manager) embeddedWorkflowSnoozeTool(owner embeddedOwner, turn func() store.EmbeddedGoalSnoozeTurn, admitted func(string) *store.EmbeddedGoalInvocation, completed func(string, *store.EmbeddedGoalInvocation, ai.ToolResultMessage)) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "workflow_snooze",
-		Description: "Set a delay preference for active workflow continuation up to the active workflow's configured maximum (at most 24 hours). Defaults to that maximum.",
+		Description: "Set a delay preference for active workflow continuation while awaiting active external asynchronous processes (such as CI test runs or remote deployments). Repetitive snoozing without an active external process violates execution discipline; if stalled, call mecha_blocked.",
 		Parameters:  embeddedWorkflowSnoozeSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if m.embeddedAfterIntent != nil {

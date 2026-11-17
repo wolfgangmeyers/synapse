@@ -22,7 +22,7 @@ test("IR-009: implicit return installs normal entry effects and matches an expli
       transitions: [{ target_state_id: b.id, description: "Advance" }] });
     await f.api(`/v1/workflows/${workflow.id}`, { name: workflow.name, entry_state_id: a.id, snooze_duration_ms: 600000,
       variables: [{ name: "REPO", label: "Repo", type: "text", required: true }] }, "PUT");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
     const run = await f.api(`/v1/workflows/${workflow.id}/run`, { cwd: join(f.router.root, "work"), variables: { REPO: "sample-repo" } });
     const agent = run.agent_id;
@@ -38,7 +38,7 @@ test("IR-009: implicit return installs normal entry effects and matches an expli
     async function turn(text: string, args: object, answer: string, snooze = true) {
       const owner = owns(text);
       f.replies.push({ tool: "mecha_workflow_transition", args, ownsRequest: owner });
-      if (snooze) f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner });
+      if (snooze) f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner });
       f.replies.push({ answer, ownsRequest: owner });
       await userTurn(page, text); await wait(answer);
       const request = f.requests.at(-1)!;

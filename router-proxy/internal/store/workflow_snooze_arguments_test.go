@@ -33,16 +33,41 @@ func TestNormalizeEmbeddedWorkflowSnoozeArgumentsRejectsRawJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmbeddedWorkflowSnoozeArgumentsJustificationValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+	}{
+		{"missing justification", `{}`},
+		{"missing justification with duration", `{"duration_minutes":5}`},
+		{"null justification", `{"justification":null}`},
+		{"integer justification", `{"justification":12345678}`},
+		{"boolean justification", `{"justification":true}`},
+		{"empty string justification", `{"justification":""}`},
+		{"whitespace only justification", `{"justification":"       "}`},
+		{"too short justification (7 chars)", `{"justification":"1234567"}`},
+		{"whitespace padded too short (6 trimmed chars)", `{"justification":"   123456   "}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, duration, err := NormalizeEmbeddedWorkflowSnoozeArguments([]byte(tt.raw), 120000)
+			require.Error(t, err)
+			require.Equal(t, "justification is required for workflow_snooze and must describe the external asynchronous process being awaited (at least 8 characters)", err.Error())
+			require.Nil(t, normalized)
+			require.Zero(t, duration)
+		})
+	}
+}
+
 func TestNormalizeEmbeddedWorkflowSnoozeArgumentsValidRawJSONControls(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		raw      string
 		duration int64
 	}{
-		{"empty object uses workflow default", `{}`, 120000},
-		{"positive milliseconds with nonpositive minutes", `{"duration_minutes":0,"duration_ms":2000}`, 2000},
-		{"configured maximum", `{"duration_ms":900000}`, 120000},
-		{"optional reason and trailing whitespace", " {\"reason\":\"later\",\"duration_minutes\":1} \n\t", 60000},
+		{"justification only uses workflow default", `{"justification":"Awaiting CI build #1042"}`, 120000},
+		{"positive milliseconds with nonpositive minutes", `{"justification":"Awaiting CI build #1042","duration_minutes":0,"duration_ms":2000}`, 2000},
+		{"configured maximum", `{"justification":"Awaiting CI build #1042","duration_ms":900000}`, 120000},
+		{"optional reason and trailing whitespace", " {\"justification\":\"Awaiting CI build #1042\",\"reason\":\"later\",\"duration_minutes\":1} \n\t", 60000},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			normalized, duration, err := NormalizeEmbeddedWorkflowSnoozeArguments([]byte(tt.raw), 120000)

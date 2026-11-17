@@ -502,7 +502,7 @@ test.describe("Agent urgency native contract", () => {
       // Activation admits a real turn; explicitly snooze its implicit goal so
       // subsequent urgency turns do not race an unqueued workflow continuation.
       const activationStart = f.requests.length;
-      f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 30 } }, { answer: "Workflow activation settled" });
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 30 } }, { answer: "Workflow activation settled" });
       await f.api(`/v1/managed-agents/${caller}/workflow-state`, { action: "activate", workflow_state_id: state.id }, "PUT");
       await expect.poll(() => f.requests.length).toBe(activationStart + 2);
       await expect.poll(() => query(f, "SELECT count(*) AS n FROM embedded_entries WHERE agent_id=? AND kind='assistant' AND CAST(body AS TEXT) LIKE '%Workflow activation settled%'", caller)[0]?.n).toBe(1);

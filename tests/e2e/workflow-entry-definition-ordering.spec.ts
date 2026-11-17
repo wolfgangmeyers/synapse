@@ -8,7 +8,7 @@ for (const ordering of ["before transaction", "after commit"] as const) {
     const owns = (text: string) => (r: Record<string, unknown>) => Array.isArray(r.input) &&
       JSON.stringify(r.input.filter(item => item?.role === "user").at(-1)).includes(text);
     try {
-      f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
         { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
       const { agent, b } = await createRunningWorkflow(f, page, 600000, false);
       const wait = async (answer: string) => {
@@ -60,7 +60,7 @@ for (const ordering of ["before transaction", "after commit"] as const) {
       }
       const owner = owns("Enter B for ordering");
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id }, ownsRequest: owner },
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner }, { answer: "Entered B", ownsRequest: owner });
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner }, { answer: "Entered B", ownsRequest: owner });
       await userTurn(page, "Enter B for ordering");
       await wait("Entered B");
       expect(JSON.stringify(f.requests.at(-1)?.input)).toContain("Successfully transitioned to workflow state: B");

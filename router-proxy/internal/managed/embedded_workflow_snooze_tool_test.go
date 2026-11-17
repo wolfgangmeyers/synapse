@@ -15,75 +15,88 @@ import (
 )
 
 func TestEmbeddedWorkflowSnoozeArguments(t *testing.T) {
+	const validJustification = "Waiting for CI test pipeline to finish"
+
 	// 1. duration_minutes converts to ms
-	raw, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": 5}, 600000)
+	raw, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": 5}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(300000), ms)
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(raw, &parsed))
 	require.Equal(t, float64(5), parsed["duration_minutes"])
+	require.Equal(t, validJustification, parsed["justification"])
 
 	// 2. duration_ms used when duration_minutes absent
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_ms": 120000}, 600000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_ms": 120000}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(120000), ms)
 
-	// 3. Fallback to defaultMs
-	_, ms, err = embeddedWorkflowSnoozeArguments(nil, 300000)
+	// 3. Rejects missing justification
+	_, _, err = embeddedWorkflowSnoozeArguments(nil, 300000)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "justification is required")
+
+	_, _, err = embeddedWorkflowSnoozeArguments(map[string]any{}, 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "justification is required")
+
+	// 4. Fallback to defaultMs when duration omitted or non-positive
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification}, 300000)
 	require.NoError(t, err)
 	require.Equal(t, int64(300000), ms)
 
-	// 4. Fallback to 10 minutes when defaultMs <= 0
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{}, 0)
+	// Fallback to 10 minutes when defaultMs <= 0
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification}, 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(600000), ms)
 
 	// 5. Negative duration or 0 falls back to defaultMs
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_ms": -5000}, 300000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_ms": -5000}, 300000)
 	require.NoError(t, err)
 	require.Equal(t, int64(300000), ms)
 
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": 0}, 450000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": 0}, 450000)
 	require.NoError(t, err)
 	require.Equal(t, int64(450000), ms)
 
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": -10, "duration_ms": 0}, 350000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": -10, "duration_ms": 0}, 350000)
 	require.NoError(t, err)
 	require.Equal(t, int64(350000), ms)
 
 	// 6. Value below minimum (e.g. 500ms) clamps to 1,000ms
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_ms": 500}, 600000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_ms": 500}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(1000), ms)
 
 	// 7. Value above the configured maximum clamps to it.
 	const fortyEightHoursMs = int64(48 * 60 * 60 * 1000)
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_ms": fortyEightHoursMs}, 600000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_ms": fortyEightHoursMs}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(600000), ms)
 
 	const fortyEightHoursMinutes = 48 * 60
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": fortyEightHoursMinutes}, 600000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": fortyEightHoursMinutes}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(600000), ms)
 
 	// 8. duration_minutes takes precedence over duration_ms
-	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": 10, "duration_ms": 50000}, 600000)
+	_, ms, err = embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": 10, "duration_ms": 50000}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(600000), ms)
 
 	// 9. reason field is preserved in json arguments
-	rawWithReason, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": 2, "reason": "waiting for build"}, 600000)
+	rawWithReason, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"justification": validJustification, "duration_minutes": 2, "reason": "waiting for build"}, 600000)
 	require.NoError(t, err)
 	require.Equal(t, int64(120000), ms)
 	var parsedReason map[string]any
 	require.NoError(t, json.Unmarshal(rawWithReason, &parsedReason))
 	require.Equal(t, "waiting for build", parsedReason["reason"])
 	require.Equal(t, float64(2), parsedReason["duration_minutes"])
+	require.Equal(t, validJustification, parsedReason["justification"])
 }
 
 func TestEmbeddedWorkflowSnoozeExecutionAndBypass(t *testing.T) {
-	for _, args := range []map[string]any{{"duration_minutes": 2}, {}} {
+	for _, args := range []map[string]any{{"justification": "Waiting for CI build #1042", "duration_minutes": 2}, {"justification": "Waiting for remote deployment"}} {
 		t.Run(fmt.Sprint(args), func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
@@ -176,7 +189,7 @@ func TestEmbeddedWorkflowSnoozeExecutionAndBypass(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(textVal.Text), &resp))
 			require.Equal(t, true, resp["ok"])
 			duration := int64(120000)
-			if len(args) == 0 {
+			if args["duration_minutes"] == nil {
 				duration = 180000
 			}
 			require.Equal(t, float64(duration), resp["duration_ms"])
@@ -204,7 +217,16 @@ func TestEmbeddedWorkflowSnoozeExecutionAndBypass(t *testing.T) {
 
 func TestWorkflowSnoozeNativeOptionalSchema(t *testing.T) {
 	tool := ai.Tool{Name: "workflow_snooze", Parameters: embeddedWorkflowSnoozeSchema()}
-	for _, args := range []map[string]any{{}, {"duration_minutes": float64(2)}, {"duration_ms": float64(2000)}, {"reason": "waiting"}} {
+	// Missing justification must fail validation against schema
+	_, err := ai.ValidateToolArguments(tool, ai.ToolCall{Name: tool.Name, Arguments: map[string]any{}})
+	require.Error(t, err)
+
+	for _, args := range []map[string]any{
+		{"justification": "Waiting for CI pipeline"},
+		{"justification": "Waiting for CI pipeline", "duration_minutes": float64(2)},
+		{"justification": "Waiting for CI pipeline", "duration_ms": float64(2000)},
+		{"justification": "Waiting for CI pipeline", "reason": "waiting"},
+	} {
 		_, err := ai.ValidateToolArguments(tool, ai.ToolCall{Name: tool.Name, Arguments: args})
 		require.NoError(t, err)
 	}
@@ -217,11 +239,17 @@ func TestWorkflowSnoozeStrictNumbers(t *testing.T) {
 		{"duration_minutes": float64(9223372036854775808.0)}, {"duration_ms": json.Number("9223372036854775808")},
 		{"duration_minutes": 1, "duration_ms": false},
 	} {
-		_, _, err := embeddedWorkflowSnoozeArguments(args, 600000)
+		// Even with justification, strict number checks fail
+		argsWithJustification := make(map[string]any)
+		for k, v := range args {
+			argsWithJustification[k] = v
+		}
+		argsWithJustification["justification"] = "Waiting for CI pipeline"
+		_, _, err := embeddedWorkflowSnoozeArguments(argsWithJustification, 600000)
 		require.Error(t, err, "args=%v", args)
 	}
 	for _, value := range []any{int64(math.MaxInt64), json.Number("9223372036854775807"), float64(1e15)} {
-		_, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"duration_minutes": value}, 600000)
+		_, ms, err := embeddedWorkflowSnoozeArguments(map[string]any{"justification": "Waiting for CI pipeline", "duration_minutes": value}, 600000)
 		require.NoError(t, err)
 		require.Equal(t, int64(600000), ms)
 	}
@@ -269,7 +297,7 @@ func TestWorkflowSnoozeWithoutActiveWorkflowPreservesPolicy(t *testing.T) {
 			require.NoError(t, db.EnterEmbeddedNonMailProviderTurn(ctx, binding, user.Sequence, user.Digest))
 			generation, err := db.MintEmbeddedProcessGeneration(ctx, "workflow-denial")
 			require.NoError(t, err)
-			intent := []byte(`{"id":"current-call","name":"workflow_snooze","arguments":{"duration_ms":1000}}`)
+			intent := []byte(`{"id":"current-call","name":"workflow_snooze","arguments":{"justification":"Waiting for CI build pipeline","duration_ms":1000}}`)
 			invocation, err := db.RecordEmbeddedGoalInvocation(ctx, binding, generation, user.Sequence, user.Digest, "", "current-call", intent)
 			require.NoError(t, err)
 			mgr := &Manager{store: db}
@@ -288,7 +316,7 @@ func TestWorkflowSnoozeWithoutActiveWorkflowPreservesPolicy(t *testing.T) {
 				}
 				return store.EmbeddedGoalSnoozeTurn{UserSeq: user.Sequence, UserDigest: user.Digest}
 			}, func(string) *store.EmbeddedGoalInvocation { return invocation }, func(string, *store.EmbeddedGoalInvocation, ai.ToolResultMessage) { completed = true })
-			result, err := tool.Execute(ctx, "current-call", map[string]any{"duration_ms": 1000}, nil)
+			result, err := tool.Execute(ctx, "current-call", map[string]any{"justification": "Waiting for CI build pipeline", "duration_ms": 1000}, nil)
 			require.ErrorIs(t, err, sql.ErrNoRows, "active workflow lookup, not an earlier admission fence, must deny")
 			require.Empty(t, result.Content)
 			require.True(t, reachedDomain)
@@ -311,3 +339,60 @@ func TestWorkflowSnoozeWithoutActiveWorkflowPreservesPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestEmbeddedWorkflowSnoozeCountAndEscalatingWarnings(t *testing.T) {
+	tests := []struct {
+		count            int64
+		expectedWarning  string
+		hasWarning       bool
+		expectedGuidance string
+	}{
+		{
+			count:            1,
+			hasWarning:       false,
+			expectedGuidance: "Workflow snooze count for this run: 1. Snooze is ONLY for waiting on active external asynchronous processes (such as CI test runs or remote deployments). If progress is stalled due to ambiguity, missing credentials, test failures, or lack of external input, you must call mecha_blocked instead of repeatedly snoozing.",
+		},
+		{
+			count:            2,
+			hasWarning:       true,
+			expectedWarning:  "⚠️ Advisory: Workflow snooze count for this run: 2. Repeated snoozing without waiting on an active external process violates workflow execution discipline. If you are stuck or waiting on user/environment input, call mecha_blocked.",
+			expectedGuidance: "⚠️ Advisory: Workflow snooze count for this run: 2. Repeated snoozing without waiting on an active external process violates workflow execution discipline. If you are stuck or waiting on user/environment input, call mecha_blocked.",
+		},
+		{
+			count:            4,
+			hasWarning:       true,
+			expectedWarning:  "🚨 Warning: Workflow snooze count for this run: 4. You have snoozed 4 times in this workflow run. Snooze is strictly prohibited as a stalling tactic. If an external build or CI process is not actively running, you MUST call mecha_blocked immediately or make active progress.",
+			expectedGuidance: "🚨 Warning: Workflow snooze count for this run: 4. You have snoozed 4 times in this workflow run. Snooze is strictly prohibited as a stalling tactic. If an external build or CI process is not actively running, you MUST call mecha_blocked immediately or make active progress.",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("count=%d", tc.count), func(t *testing.T) {
+			pref := store.EmbeddedGoalSnoozePreference{
+				Workflow:    "Test Pipeline",
+				DurationMS:  300000,
+				DueAt:       "2026-03-31T12:00:00.000Z",
+				SnoozeCount: tc.count,
+			}
+			out, err := pref.WorkflowResultJSON()
+			require.NoError(t, err)
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal(out, &parsed))
+			require.Equal(t, true, parsed["ok"])
+			require.Equal(t, float64(tc.count), parsed["snooze_count"])
+			require.Equal(t, "Test Pipeline", parsed["workflow"])
+			require.Equal(t, float64(300000), parsed["duration_ms"])
+			require.Equal(t, float64(5), parsed["duration_minutes"])
+			require.Equal(t, "2026-03-31T12:00:00.000Z", parsed["snoozed_until"])
+			require.Equal(t, tc.expectedGuidance, parsed["guidance"])
+
+			if tc.hasWarning {
+				require.Equal(t, tc.expectedWarning, parsed["warning"])
+			} else {
+				require.Nil(t, parsed["warning"])
+			}
+		})
+	}
+}
+

@@ -10,12 +10,12 @@ test("IR-012/014: enabling return during a held turn permits the next transition
     JSON.stringify(r.input.filter(item => item?.role === "user").at(-1)).includes(text);
   try {
     const activation = owns("[Workflow Activated: A]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
     const { agent, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await expect(page.getByText("Ready", { exact: true }).first()).toBeVisible();
     const advance = owns("Advance to B");
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id }, ownsRequest: advance },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: advance }, { answer: "Reached B", ownsRequest: advance });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: advance }, { answer: "Reached B", ownsRequest: advance });
     await userTurn(page, "Advance to B");
     await expect(page.getByText("Reached B", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => (await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_state_id).toBe(b.id);
@@ -52,7 +52,7 @@ test("IR-012/014: enabling return during a held turn permits the next transition
     });
     const prior = effects();
     const returnTurn = owns("Try the return");
-    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: returnTurn }, { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: returnTurn }, { answer: "Return accepted", ownsRequest: returnTurn });
+    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: returnTurn }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: returnTurn }, { answer: "Return accepted", ownsRequest: returnTurn });
     await userTurn(page, "Try the return");
     await expect(page.getByText("Return accepted", { exact: true }).first()).toBeVisible();
     const guidance = String(f.requests[heldCount]?.instructions);

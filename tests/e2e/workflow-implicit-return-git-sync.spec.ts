@@ -42,12 +42,12 @@ test("IR-011: git sync retains definition flags, not runtime predecessor or retu
     if (!address || typeof address === "string") throw Error("missing git server address");
     f = await workflowHarness();
     await writeFile(join(f.router.root, "managed-home", ".gitconfig"), '[user]\n name = E2E Test\n email = e2e@example.invalid\n');
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Ready" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Ready" });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await expect(page.getByText("Ready", { exact: true }).first()).toBeVisible();
     await f.api(`/v1/workflow-states/${b.id}`, { name: "B", allow_exit: true, allow_implicit_return: true }, "PUT");
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id } },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "At B" });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "At B" });
     await userTurn(page, "Move to B");
     await expect(page.getByText("At B", { exact: true }).first()).toBeVisible();
     expect(f.rows("SELECT active_workflow_state_id, workflow_predecessor_state_id FROM managed_agents WHERE agent_id=?", agent)[0]).toMatchObject({ active_workflow_state_id: b.id, workflow_predecessor_state_id: a.id });

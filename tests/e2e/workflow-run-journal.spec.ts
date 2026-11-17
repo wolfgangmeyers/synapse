@@ -44,13 +44,13 @@ test.describe("Workflow run journal", () => {
   }
 
   test("WJ-01/02: transition and exit prompt for a separate human-facing entry", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Journal fixture ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, b } = await createRunningWorkflow(f, page, 600000, false);
     await settled(agent, "Journal fixture ready");
     f.replies.push(
       { tool: "mecha_workflow_transition", args: { action: "transition", target_state: "B", reason: "Decision rationale" }, ownsRequest: owns("Advance journal") },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("Advance journal") },
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("Advance journal") },
       { answer: "Advanced journal", ownsRequest: owns("Advance journal") },
     );
     await userTurn(page, "Advance journal");
@@ -71,7 +71,7 @@ test.describe("Workflow run journal", () => {
   });
 
   test("WJ-04/07: active run survives restart and rejects deletion", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Journal restart ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, workflow } = await createRunningWorkflow(f, page, 600000, false);
     await settled(agent, "Journal restart ready");
@@ -100,7 +100,7 @@ test.describe("Workflow run journal", () => {
   });
 
   test("WJ-03: chart covers retained visits beyond the first timeline page", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Pagination fixture ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent } = await createRunningWorkflow(f, page, 600000, false);
     await settled(agent, "Pagination fixture ready");
@@ -128,7 +128,7 @@ test.describe("Workflow run journal", () => {
   });
 
   test("WJ-03: journal remains accessible after reload", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Journal UI ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, workflow } = await createRunningWorkflow(f, page, 600000, false);
     await settled(agent, "Journal UI ready");
@@ -157,7 +157,7 @@ test.describe("Workflow journal lifecycle boundaries", () => {
   const runs = (agent: string) => f.rows("SELECT * FROM workflow_journal_runs WHERE agent_id=? ORDER BY started_at,id", agent);
   const events = (run: string) => f.rows("SELECT * FROM workflow_journal_events WHERE run_id=? ORDER BY sequence", run);
   async function ready(page: import("@playwright/test").Page) {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Fixture ready", ownsRequest: owns("[Workflow Activated: A]") });
     const fixture = await createRunningWorkflow(f, page, 600000, false);
     await done(fixture.agent, "Fixture ready");
@@ -239,7 +239,7 @@ test.describe("Workflow journal lifecycle boundaries", () => {
     const send = (key: string, body: object) => fetch(url, { method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": key, "X-Request-ID": crypto.randomUUID() }, body: JSON.stringify(body) });
     const body = { action: "activate", workflow_state_id: a.id };
     const ownsReactivation = (request: Record<string, unknown>) => owns("[Workflow Activated: A]")(request) || owns("is currently active in state A")(request);
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: ownsReactivation },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: ownsReactivation },
       { answer: "Reactivation settled", ownsRequest: ownsReactivation });
     const [one, two] = await Promise.all([send("journal-concurrent-activation", body), send("journal-concurrent-activation", body)]);
     expect([one.status, two.status]).toEqual([200, 200]);
@@ -343,7 +343,7 @@ test("scheduled launch journal survives router restart", async ({ page }) => {
   try {
     const owns = (request: Record<string, unknown>) => Array.isArray(request.input) &&
       JSON.stringify(request.input.filter((item: any) => item?.role === "user").at(-1)).includes("[Workflow Activated: Scheduled]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns },
       { answer: "Scheduled journal ready", ownsRequest: owns });
     await f.open(page);
     const workflow = await f.api("/v1/workflows", { name: "Scheduled journal", snooze_duration_ms: 600000 });

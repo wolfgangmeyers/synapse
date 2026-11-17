@@ -173,19 +173,19 @@ func TestRecoveryWorkflowIntentAndResultFences(t *testing.T) {
 			require.NoError(t, s.EnterEmbeddedNonMailProviderTurn(ctx, b, turn.UserSeq, turn.UserDigest))
 			gen, err := s.MintEmbeddedProcessGeneration(ctx, "process")
 			require.NoError(t, err)
-			intent := []byte(`{"id":"workflow-call","name":"workflow_snooze","arguments":{"duration_minutes":1}}`)
+			intent := []byte(`{"id":"workflow-call","name":"workflow_snooze","arguments":{"justification":"Waiting for CI build pipeline","duration_minutes":1}}`)
 			if mode == "custom default" {
-				intent = []byte(`{"id":"workflow-call","name":"workflow_snooze","arguments":{}}`)
+				intent = []byte(`{"id":"workflow-call","name":"workflow_snooze","arguments":{"justification":"Waiting for CI build pipeline"}}`)
 			}
 			w, err := s.RecordEmbeddedGoalInvocation(ctx, b, gen, turn.UserSeq, turn.UserDigest, "", "workflow-call", intent)
 			require.NoError(t, err)
 			require.NoError(t, s.CheckEmbeddedGoalInvocation(ctx, w))
-			raw := []byte(`{"duration_minutes":1}`)
+			raw := []byte(`{"justification":"Waiting for CI build pipeline","duration_minutes":1}`)
 			if mode == "custom default" {
-				raw = []byte(`{}`)
+				raw = []byte(`{"justification":"Waiting for CI build pipeline"}`)
 			}
 			if mode == "changed args" {
-				raw = []byte(`{"duration_ms":60000}`)
+				raw = []byte(`{"justification":"Waiting for CI build pipeline","duration_ms":60000}`)
 			}
 			if mode == "stale process" {
 				_, err = s.MintEmbeddedProcessGeneration(ctx, "replacement")
