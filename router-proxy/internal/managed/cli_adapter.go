@@ -118,7 +118,7 @@ func (a *ClaudeCodeAdapter) Preflight(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("install Claude CLI and sign in on the host: %w", err)
 	}
-	pCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	pCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(pCtx, bin, "auth", "status", "--json")

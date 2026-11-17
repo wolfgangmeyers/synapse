@@ -207,9 +207,9 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		grant, err = newGrant()
 		if err != nil {
 			if ctx.Err() == nil {
-				return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartGrantFailed, err))
+				return nil, claudeDefiniteStart(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneMCPGrantSetup, claudeStartCategorize(claudeStartGrantFailed, err)))
 			}
-			return nil, err
+			return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneMCPGrantSetup, err)
 		}
 		cfg.MCPConfigFile = grant.MCPConfigFile
 		cfg.SystemPromptFile = grant.SystemPromptFile
@@ -725,9 +725,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 			if !fallback {
 				var cleanupFailure *claudeStartCleanupError
 				if proc.Err() != nil && ctx.Err() == nil && !errors.As(cleanupErr, &cleanupFailure) {
-					return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartProbeDied, cleanupErr))
+					return nil, claudeDefiniteStart(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneControlProbe, claudeStartCategorize(claudeStartProbeDied, cleanupErr)))
 				}
-				return nil, cleanupErr
+				return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneControlProbe, cleanupErr)
 			}
 			r.config.Resume = false
 			proc, err = r.acquire(ctx)
@@ -738,9 +738,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 				_, cleanupErr := r.failedInitialProbe(proc, false, err)
 				var cleanupFailure *claudeStartCleanupError
 				if proc.Err() != nil && ctx.Err() == nil && !errors.As(cleanupErr, &cleanupFailure) {
-					return nil, claudeDefiniteStart(claudeStartCategorize(claudeStartProbeDied, cleanupErr))
+					return nil, claudeDefiniteStart(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneControlProbe, claudeStartCategorize(claudeStartProbeDied, cleanupErr)))
 				}
-				return nil, cleanupErr
+				return nil, fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneControlProbe, cleanupErr)
 			}
 			fresh = true
 		}
@@ -830,6 +830,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		if err := r.submitInput(ctx, id, rendered[i], r.p.mail); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil, err
+			}
+			if fresh {
+				return r.stop(fmt.Errorf("startup failed at step '%s': %w", ClaudeMilestoneInitialPromptSubmit, err))
 			}
 			return r.stop(err)
 		}

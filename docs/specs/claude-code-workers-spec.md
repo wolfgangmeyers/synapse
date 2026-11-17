@@ -55,7 +55,7 @@ Out of scope: tmux and the legacy mailbox integration (disk mailboxes, `mailbox-
 
 Claude is installed and logged in on the router host. Login/logout and credentials are managed externally with `claude`; inherit normal CLI user/project configuration. No Claude provider settings row, connect/login/logout route, provider-auth response/event, periodic polling, credential persistence or fixed-provider-count changes.
 
-Keep `claude-code/<alias>` only as an internal engine/model selection key in the existing launch/model pickers. Offer the known aliases without promising current sign-in availability. On launch and each process acquisition (before each execution), resolve `MECHA_CLAUDE_BIN`/PATH/local installation and run a bounded local auth-status check (5 s, no prompt). Missing executable, signed-out, malformed or timed-out status produces a helpful launch/turn error directing the user to install/sign in on the host. Do not create a worker on failed launch preflight. No new polling/cache subsystem; no account identity retained. Engine-specific model choices never become the root/default Pi model or cross-engine switches. Automated tests use a fake executable/auth response only.
+Keep `claude-code/<alias>` only as an internal engine/model selection key in the existing launch/model pickers. Offer the known aliases without promising current sign-in availability. On launch and each process acquisition (before each execution), resolve `MECHA_CLAUDE_BIN`/PATH/local installation and run a bounded local auth-status check (15 s, no prompt). Missing executable, signed-out, malformed or timed-out status produces a helpful launch/turn error directing the user to install/sign in on the host. Do not create a worker on failed launch preflight. No new polling/cache subsystem; no account identity retained. Engine-specific model choices never become the root/default Pi model or cross-engine switches. Automated tests use a fake executable/auth response only.
 
 **Fenced post-start cleanup.** If a worker is fenced while a Claude process is starting and cleanup also fails, the turn remains blocked. User-visible errors describe the fence and safe cleanup category without exposing private paths or arbitrary cleanup text; the underlying causes remain available for internal error classification. Other workers remain eligible.
 
@@ -275,7 +275,7 @@ router message store ──▶ agent lane ──▶ embedded turn (shared: owner
    - authenticates the per-process token and maps it to the worker's current process and session;
    - runs router tools through the existing shared admission/Execute/completion/result path described in detailed plan §6;
    - de-duplicates using Claude's tool-use ID.
-5. **Local preflight and model table.** Engine/model aliases are selectable without a settings provider. On launch/process acquisition only, validate the local executable/auth status with a 5 s bound. No provider-auth/polling subsystem or credential store. Login stays external.
+5. **Local preflight and model table.** Engine/model aliases are selectable without a settings provider. On launch/process acquisition only, validate the local executable/auth status with a 15 s bound. No provider-auth/polling subsystem or credential store. Login stays external.
 
 6. **Goal integration.** The Claude engine records the "goal applied" evidence at the same logical points the pi engine does. No evaluator model runs on settle.
 7. **Context integration.** Exact token counts from Claude's usage reports feed the threshold checks and the context bar. Reset seeding uses the engine's seeding path (component 3).
@@ -388,7 +388,7 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the ne
 - **User Goal**: Get a helpful local launch failure.
 - **Given**: A missing executable, signed-out, malformed or hung fake auth-status response (parameterized).
 - **When**: Launch is attempted, then local status is corrected and launch retried.
-- **Then**: The first launch fails within the 5 s local check bound with external install/login guidance and no worker; the retry succeeds on a fresh on-demand check. No background polling or retained account identity.
+- **Then**: The first launch fails within the 15 s local check bound with external install/login guidance and no worker; the retry succeeds on a fresh on-demand check. No background polling or retained account identity.
 
 ### Scenario: [CC-003] Converse with images and tools
 - **User Goal**: Converse with images and tools.
