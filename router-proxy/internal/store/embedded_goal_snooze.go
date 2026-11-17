@@ -78,6 +78,7 @@ type EmbeddedGoalSnoozePreference struct {
 	SnoozeUntil                          string
 	DurationMS                           int64
 	Active                               bool
+	SnoozeCount                          int64 `json:"snooze_count,omitempty"`
 }
 
 // CurrentEmbeddedGoalSnoozePreference returns the currently active snooze preference for an agent if any.
@@ -315,7 +316,14 @@ func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b Embedded
 
 		version++
 		due := s.clock.Now().UTC().Add(time.Duration(args.DurationMS) * time.Millisecond)
-		preference = EmbeddedGoalSnoozePreference{EmbeddedGoalSnoozeTurn: turn, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, Role: role, PolicyVersion: version, CallID: callID, DueAt: formatTimestamp(due), DurationMS: args.DurationMS, Active: true, Workflow: workflowName}
+		var snoozeCount int64
+		if workflow {
+			err = s.db.QueryRowContext(ctx, `UPDATE workflow_journal_runs SET snooze_count = snooze_count + 1 WHERE agent_id = ? AND status = 'active' RETURNING snooze_count`, b.AgentID).Scan(&snoozeCount)
+			if err != nil || snoozeCount <= 0 {
+				snoozeCount = 1
+			}
+		}
+		preference = EmbeddedGoalSnoozePreference{EmbeddedGoalSnoozeTurn: turn, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, Role: role, PolicyVersion: version, CallID: callID, DueAt: formatTimestamp(due), DurationMS: args.DurationMS, Active: true, Workflow: workflowName, SnoozeCount: snoozeCount}
 		result, err := json.Marshal(preference)
 		if err != nil {
 			return err

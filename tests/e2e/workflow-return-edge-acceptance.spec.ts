@@ -21,7 +21,7 @@ test.describe("Workflow return edge acceptance", () => {
     const text = `Request ${label}`;
     const owner = owns(text);
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: target }, ownsRequest: owner },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner }, { answer: label, ownsRequest: owner });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner }, { answer: label, ownsRequest: owner });
     await userTurn(page, text);
     await wait(page, agent, label);
     const input = f.requests.at(-1)?.input;
@@ -45,7 +45,7 @@ test.describe("Workflow return edge acceptance", () => {
   }
   async function start(page: Page) {
     const owner = owns("[Workflow Activated: A]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner }, { answer: "Ready", ownsRequest: owner });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner }, { answer: "Ready", ownsRequest: owner });
     const run = await createRunningWorkflow(f, page, 600000, false);
     await wait(page, run.agent, "Ready");
     return run;

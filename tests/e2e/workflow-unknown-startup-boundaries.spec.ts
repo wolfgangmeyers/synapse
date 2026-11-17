@@ -18,7 +18,7 @@ for (const mode of ["superseded", "detached-workflow"] as const) {
           WHEN OLD.state='UNKNOWN' AND NEW.state='NOT_DONE' BEGIN SELECT RAISE(ABORT, 'test interruption'); END`); }
         finally { db.close(); }
       });
-      f.replies.push({ tool: "workflow_snooze", args: { duration_ms: 300000 } }, { answer: "Unknown startup final" });
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: 300000 } }, { answer: "Unknown startup final" });
       const current = await createRunningWorkflow(f, page, 600000, false);
       await expect(page.getByText("Unknown startup final", { exact: true }).first()).toBeVisible({ timeout: 30000 });
       await expect.poll(() => f!.rows("SELECT state FROM embedded_goal_evaluations WHERE agent_id=?", current.agent)).toEqual([{ state: "UNKNOWN" }]);

@@ -7,7 +7,7 @@ test("IR-004: late REST enable preserves rejected effects and installs return ef
   const owns = (text: string) => (request: Record<string, unknown>) => Array.isArray(request.input) &&
     JSON.stringify(request.input.filter(item => item?.role === "user").at(-1)).includes(text);
   try {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, a, b } = await createRunningWorkflow(f, page, 600000, false);
     async function wait(answer: string) {
@@ -19,7 +19,7 @@ test("IR-004: late REST enable preserves rejected effects and installs return ef
     async function move(text: string, target: string, answer: string) {
       const owner = owns(text);
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: target }, ownsRequest: owner },
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner }, { answer, ownsRequest: owner });
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner }, { answer, ownsRequest: owner });
       await userTurn(page, text); await wait(answer);
       const input = f.requests.at(-1)?.input;
       expect(Array.isArray(input)).toBe(true);

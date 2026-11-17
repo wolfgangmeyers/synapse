@@ -5,13 +5,13 @@ test("next user turns use edited guidance and the current implicit return option
   test.setTimeout(60_000);
   const f: WorkflowHarness = await workflowHarness();
   try {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Ready" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Ready" });
     const { agent, b } = await createRunningWorkflow(f, page, 600000, false);
     await expect(page.getByText("Ready", { exact: true }).first()).toBeVisible();
     // Transitioning clears A's snooze. Snooze B within the same turn so an
     // autonomous continuation cannot consume the next user turn's reply.
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id } },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "At B" });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "At B" });
     await userTurn(page, "Go to B");
     await expect(page.getByText("At B", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => (await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_state_id).toBe(b.id);

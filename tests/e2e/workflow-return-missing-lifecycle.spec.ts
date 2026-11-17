@@ -32,7 +32,7 @@ test("IR-005/007/010: explicit reverse is listed once; exit and fresh activation
   async function turn(agent: string, text: string, args: object, answer: string, snooze = true) {
     const owner = owns(text);
     f.replies.push({ tool: "mecha_workflow_transition", args, ownsRequest: owner });
-    if (snooze) f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner });
+    if (snooze) f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner });
     f.replies.push({ answer, ownsRequest: owner });
     await userTurn(page, text);
     await wait(agent, answer);
@@ -44,7 +44,7 @@ test("IR-005/007/010: explicit reverse is listed once; exit and fresh activation
   }
   try {
     const activation = owns("[Workflow Activated: A]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await wait(agent, "Ready");
     await f.api(`/v1/workflow-states/${b.id}`, { name: "B", allow_exit: true, allow_implicit_return: true,
@@ -67,7 +67,7 @@ test("IR-005/007/010: explicit reverse is listed once; exit and fresh activation
     // so a subsequent attempt tests implicit authority, not graph authority.
     await f.api(`/v1/workflow-states/${b.id}`, { name: "B", allow_exit: true, allow_implicit_return: true, transitions: [] }, "PUT");
     const fresh = owns("[Workflow Activated: B]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: fresh }, { answer: "Fresh B", ownsRequest: fresh });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: fresh }, { answer: "Fresh B", ownsRequest: fresh });
     await f.api(`/v1/managed-agents/${agent}/workflow-state`, { action: "activate", workflow_id: workflow.id, workflow_state_id: b.id }, "PUT");
     await wait(agent, "Fresh B");
     binding = f.rows("SELECT active_workflow_state_id, workflow_predecessor_state_id FROM managed_agents WHERE agent_id=?", agent)[0];

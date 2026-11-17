@@ -215,7 +215,6 @@ test.describe("Workflow Implicit Goals & State Modal E2E", () => {
     const goalData = await goalRes.json();
     expect(goalData.goal_state.enabled).toBe(true);
     expect(goalData.goal_state.goal).toBe(`Complete active workflow: ${workflowName}`);
-    expect(goalData.goal_state.goal_lock_enabled).toBe(true);
     // Snooze duration inherited from workflow (15 min = 900,000 ms)
     expect(goalData.goal_state.snooze_duration_ms).toBe(900000);
 
@@ -256,7 +255,6 @@ test.describe("Workflow Implicit Goals & State Modal E2E", () => {
     const goalAfterData = await goalAfterTransition.json();
     expect(goalAfterData.goal_state.enabled).toBe(true);
     expect(goalAfterData.goal_state.goal).toBe(`Complete active workflow: ${workflowName}`);
-    expect(goalAfterData.goal_state.goal_lock_enabled).toBe(true);
 
     // Deactivate / exit workflow -> goal is cleared
     const exitRes = await fetch(`${targetRouterUrl}/v1/managed-agents/${agentId}/workflow-state`, {
@@ -276,7 +274,6 @@ test.describe("Workflow Implicit Goals & State Modal E2E", () => {
     const goalAfterExitData = await goalAfterExit.json();
     expect(goalAfterExitData.goal_state.enabled).toBe(false);
     expect(goalAfterExitData.goal_state.goal).toBe("");
-    expect(goalAfterExitData.goal_state.goal_lock_enabled).toBe(false);
   });
 
 });
@@ -298,7 +295,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
   });
 
   for (const snoozeTool of ["workflow_snooze", "goal_snooze"]) test(`SCN-WFIG-004/008/009: ${snoozeTool} survives intermediate turns and admits one exact continuation`, async ({ page }) => {
-    f.replies.push({ tool: snoozeTool, args: snoozeTool === "goal_snooze" ? { duration_ms: 300000 } : { duration_minutes: 5 } }, { answer: "Initial snooze saved" });
+    f.replies.push({ tool: snoozeTool, args: snoozeTool === "goal_snooze" ? { duration_ms: 300000 } : { justification: "Waiting for external build", duration_minutes: 5 } }, { answer: "Initial snooze saved" });
     const { agent, workflow } = await createRunningWorkflow(f, page);
     await expect.poll(() => settled(f, agent).length).toBe(1);
     await expect(page.getByText("Initial snooze saved", { exact: true }).first()).toBeVisible();
@@ -308,7 +305,6 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     const deadline = String(initial.due_at);
     const goal = (await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state;
     expect(goal.enabled).toBe(true);
-    expect(goal.goal_lock_enabled).toBe(true);
     const preferences = () => f.rows("SELECT * FROM embedded_goal_snooze_preferences WHERE agent_id=?", agent);
     expect(preferences()).toHaveLength(1);
     const policy = () => f.rows("SELECT desired_revision, snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent)[0];
@@ -391,15 +387,15 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
   });
 
   const durationCases = [
-    { label: "omitted", tool: "workflow_snooze", args: {}, expected: 600000 },
-    { label: "custom omitted", tool: "workflow_snooze", args: {}, expected: 900000, configured: 900000 },
-    { label: "milliseconds", tool: "workflow_snooze", args: { duration_ms: 300000 }, expected: 300000 },
-    { label: "minutes precedence", tool: "workflow_snooze", args: { duration_minutes: 2, duration_ms: 900000 }, expected: 120000 },
-    { label: "nonpositive defaults", tool: "workflow_snooze", args: { duration_minutes: 0, duration_ms: -1 }, expected: 600000 },
-    { label: "minimum", tool: "workflow_snooze", args: { duration_ms: 1 }, expected: 1000 },
-    { label: "configured maximum", tool: "workflow_snooze", args: { duration_ms: 86400001 }, expected: 600000 },
-    { label: "representable oversized minutes", tool: "workflow_snooze", args: { duration_minutes: 9007199254740991 }, expected: 600000 },
-    { label: "equal maximum", tool: "workflow_snooze", args: { duration_ms: 600000 }, expected: 600000 },
+    { label: "omitted", tool: "workflow_snooze", args: { justification: "Waiting for external build" }, expected: 600000 },
+    { label: "custom omitted", tool: "workflow_snooze", args: { justification: "Waiting for external build" }, expected: 900000, configured: 900000 },
+    { label: "milliseconds", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_ms: 300000 }, expected: 300000 },
+    { label: "minutes precedence", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 2, duration_ms: 900000 }, expected: 120000 },
+    { label: "nonpositive defaults", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 0, duration_ms: -1 }, expected: 600000 },
+    { label: "minimum", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_ms: 1 }, expected: 1000 },
+    { label: "configured maximum", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_ms: 86400001 }, expected: 600000 },
+    { label: "representable oversized minutes", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 9007199254740991 }, expected: 600000 },
+    { label: "equal maximum", tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_ms: 600000 }, expected: 600000 },
     { label: "alias shorter", tool: "goal_snooze", args: { duration_ms: 120000 }, expected: 120000 },
     { label: "alias default", tool: "goal_snooze", args: {}, expected: 600000 },
     { label: "alias configured cap", tool: "goal_snooze", args: { duration_ms: 86400000 }, expected: 600000 },
@@ -414,8 +410,8 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     expect(result.DurationMS).toBe(c.expected);
     expect(f.rows("SELECT snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent)[0].snoozed_until).toBe(result.DueAt);
     const nativeResult = JSON.parse(lastToolOutput(f));
-    expect(nativeResult.guidance).toMatch(/waiting on the user.*explicitly call mecha_blocked/i);
-    if (c.tool === "workflow_snooze") expect(nativeResult).toMatchObject({ ok: true, duration_ms: c.expected, workflow: workflow.name, snoozed_until: result.DueAt });
+    expect(nativeResult.guidance).toMatch(/waiting on (the user|active external)|explicitly call mecha_blocked|call mecha_blocked instead/i);
+    if (c.tool === "workflow_snooze") expect(nativeResult).toMatchObject({ ok: true, duration_ms: c.expected, workflow: workflow.name, snoozed_until: result.DueAt, snooze_count: 1 });
     else expect(nativeResult).toMatchObject({ DurationMS: c.expected, DueAt: result.DueAt });
     expect(result.DueAt).toBe(settled(f, agent)[0].due_at);
     const now = await f.advance(1);
@@ -424,11 +420,25 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     expect(f.requests).toHaveLength(2);
   });
 
-  for (const args of [{ duration_minutes: "5" }, { duration_ms: 1.5 }, { duration_ms: null }, { reason: 3 }, { unexpected: true }, { duration_minutes: 1e30 }]) {
+  for (const args of [
+    { duration_minutes: "5" },
+    { duration_ms: 1.5 },
+    { duration_ms: null },
+    { reason: 3 },
+    { unexpected: true },
+    { duration_minutes: 1e30 },
+    {},
+    { justification: "" },
+    { justification: "   " },
+    { justification: "wait" },
+    { justification: null },
+    { justification: 12345 },
+    { justification: true },
+  ]) {
     test(`SCN-WFIG-012: rejected native arguments preserve valid state ${JSON.stringify(args)}`, async ({ page }, info) => {
       let diagnosticAgent: string | undefined;
       try {
-      f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Valid wait saved" });
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 5 } }, { answer: "Valid wait saved" });
       const { agent } = await createRunningWorkflow(f, page);
       diagnosticAgent = agent;
       await expect.poll(() => settled(f, agent).length).toBe(1);
@@ -440,10 +450,10 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
       expect(f.rows("SELECT desired_revision, goal_text, goal_enabled, snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent)).toEqual(before);
       expect(f.rows("SELECT * FROM embedded_goal_snooze_preferences WHERE agent_id=?", agent)).toHaveLength(1);
       // The native result must carry denial, not merely a synthetic final answer.
-      expect(lastToolOutput(f)).toMatch(/invalid|denied|must|unknown|argument|integer|schema mismatch/i);
+      expect(lastToolOutput(f)).toMatch(/invalid|denied|must|unknown|argument|integer|schema mismatch|justification is required/i);
       expect(await f.api(`/v1/managed-agents/${agent}/workflow-state`)).toEqual(binding);
       await expect(page.getByText("Invalid call handled", { exact: true }).first()).toBeVisible();
-      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state.goal_lock_enabled).toBe(true);
+      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state.enabled).toBe(true);
       } catch (failure) {
         // Failure-only, before afterEach deletes the fixture. Never save auth,
         // system instructions, arbitrary text, HTML or logs. Unknown strings
@@ -516,7 +526,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
 
 
   for (const action of ["transition", "exit", "deactivate"]) test(`SCN-WFIG-003/005/010: workflow lifecycle changes retire snooze: ${action}`, async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Lifecycle wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 5 } }, { answer: "Lifecycle wait saved" });
     const { agent, b } = await createRunningWorkflow(f, page);
     await expect.poll(() => settled(f, agent).length).toBe(1);
     let old = settled(f, agent)[0];
@@ -526,13 +536,13 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
       await f.api(`/v1/managed-agents/${agent}/workflow-state`, { action: "deactivate" }, "PUT");
     } else {
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: "B" } });
-      if (action === "exit") f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } });
+      if (action === "exit") f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 5 } });
       f.replies.push({ answer: "Native B reached" });
       if (action === "transition") f.replies.push({ hold: true });
       await userTurn(page, "Advance natively to B");
       await expect.poll(async () => (await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_state_id).toBe(b.id);
       await expect(page.getByText("Native B reached", { exact: true }).first()).toBeVisible();
-      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true, goal: goal.goal, goal_lock_enabled: true });
+      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true, goal: goal.goal });
       expect(f.rows("SELECT desired_revision FROM managed_agent_policies WHERE agent_id=?", agent)[0].desired_revision).toBe(revision);
       expect(JSON.stringify(f.requests.at(-1)!.input)).toContain("B guidance");
       if (action === "exit") {
@@ -552,7 +562,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     const retired = settled(f, agent).find(t => t.turn_key === old.turn_key)!;
     expect(retired.continuation_state).toBe("invalidated");
     if (action !== "transition") {
-      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: false, goal: "", goal_lock_enabled: false });
+      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: false, goal: "" });
       const binding = await f.api(`/v1/managed-agents/${agent}/workflow-state`);
       expect(binding.active_workflow_id).toBeFalsy();
       expect(binding.active_workflow_state_id).toBeFalsy();
@@ -570,7 +580,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
   });
 
   test("SCN-WFIG-002/012: implicit workflow goal rejects REST and native controls", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Locked wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for external build", duration_minutes: 5 } }, { answer: "Locked wait saved" });
     const { agent } = await createRunningWorkflow(f, page);
     await expect.poll(() => settled(f, agent).length).toBe(1);
     const before = f.rows("SELECT desired_revision, goal_text, goal_enabled, snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent);
@@ -586,7 +596,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
       }, { type: "goal_control", frame_id: frameId, control_id: controlId,
         target_agent_id: agent, target_instance_id: targetInstance, action,
         goal: action === "set" ? "Forbidden WS replacement" : "",
-        settings: { goal_lock_enabled: state.goal_lock_enabled, snooze_enabled: state.snooze_enabled,
+        settings: { snooze_enabled: state.snooze_enabled,
           snooze_duration_ms: state.snooze_duration_ms, snooze_turn_limit: state.snooze_turn_limit,
           snooze_budget_cap_ms: state.snooze_budget_cap_ms, snooze_refill_yield_ms: state.snooze_refill_yield_ms,
           snooze_refill_elapsed_ms: state.snooze_refill_elapsed_ms } });
@@ -596,7 +606,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
       expect(f.wsFrames.map(text => JSON.parse(text)).filter(frame => frame.type === "goal_control_result" && frame.control_id === controlId)).toHaveLength(0);
       expect(f.rows("SELECT desired_revision, goal_text, goal_enabled, snoozed_until FROM managed_agent_policies WHERE agent_id=?", agent)).toEqual(before);
       expect(await f.api(`/v1/managed-agents/${agent}/workflow-state`)).toEqual(bindingBefore);
-      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true, goal: state.goal, goal_lock_enabled: true });
+      expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({ enabled: true, goal: state.goal });
     }
     for (const action of ["set", "off"]) {
       const res = await fetch(`${f.proxy.url}/v1/managed-agents/${agent}/goal`, {
@@ -626,6 +636,70 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     }
   });
 
+
+  test("SCN-SNOOZE-001/003/004: workflow_snooze tracks cumulative snooze count and escalates warnings", async ({ page }) => {
+    f.replies.push(
+      { tool: "workflow_snooze", args: { justification: "Waiting for GitHub Actions CI run #1042 to complete", duration_minutes: 5 } },
+      { answer: "Snooze 1 completed" },
+    );
+    const { agent, workflow } = await createRunningWorkflow(f, page);
+    await expect.poll(() => settled(f, agent).length).toBe(1);
+    await expect(page.getByText("Snooze 1 completed", { exact: true }).first()).toBeVisible();
+
+    // Snooze 1 output checks
+    let output = JSON.parse(lastToolOutput(f));
+    expect(output).toMatchObject({
+      ok: true,
+      workflow: workflow.name,
+      snooze_count: 1,
+    });
+    expect(output.guidance).toContain("Workflow snooze count for this run: 1");
+    expect(output.warning).toBeUndefined();
+
+    // Snooze 2: advisory warning
+    f.replies.push(
+      { tool: "workflow_snooze", args: { justification: "Still waiting for remote deployment to roll out", duration_minutes: 5 } },
+      { answer: "Snooze 2 completed" },
+    );
+    await userTurn(page, "Continue waiting on deployment");
+    await expect.poll(() => settled(f, agent).length).toBe(2);
+    await expect(page.getByText("Snooze 2 completed", { exact: true }).first()).toBeVisible();
+
+    output = JSON.parse(lastToolOutput(f));
+    expect(output).toMatchObject({
+      ok: true,
+      workflow: workflow.name,
+      snooze_count: 2,
+    });
+    expect(output.warning).toContain("Advisory: Workflow snooze count for this run: 2");
+
+    // Snooze 3: advisory warning
+    f.replies.push(
+      { tool: "workflow_snooze", args: { justification: "Awaiting database migration pipeline to complete", duration_minutes: 5 } },
+      { answer: "Snooze 3 completed" },
+    );
+    await userTurn(page, "Continue waiting on migration");
+    await expect.poll(() => settled(f, agent).length).toBe(3);
+    await expect(page.getByText("Snooze 3 completed", { exact: true }).first()).toBeVisible();
+
+    output = JSON.parse(lastToolOutput(f));
+    expect(output.snooze_count).toBe(3);
+    expect(output.warning).toContain("Advisory: Workflow snooze count for this run: 3");
+
+    // Snooze 4: strong warning
+    f.replies.push(
+      { tool: "workflow_snooze", args: { justification: "Awaiting staging environment health check readiness", duration_minutes: 5 } },
+      { answer: "Snooze 4 completed" },
+    );
+    await userTurn(page, "Continue waiting on health check");
+    await expect.poll(() => settled(f, agent).length).toBe(4);
+    await expect(page.getByText("Snooze 4 completed", { exact: true }).first()).toBeVisible();
+
+    output = JSON.parse(lastToolOutput(f));
+    expect(output.snooze_count).toBe(4);
+    expect(output.warning).toContain("Warning: Workflow snooze count for this run: 4");
+    expect(output.warning).toContain("Snooze is strictly prohibited as a stalling tactic");
+  });
 
   test("SCN-WFIG-011: completed goals discard snooze through real external evaluation", async ({ page }) => {
     await f.open(page);
@@ -669,7 +743,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
   });
 
   for (const tool of ["workflow_snooze", "goal_snooze"]) test(`SCN-WFIG-013: ${tool} accepted replacement deadlines persist without settlement restart`, async ({ page }) => {
-    f.replies.push({ tool, args: { duration_ms: 300000 } }, { answer: "Original D saved", advanceMS: 10000 });
+    f.replies.push({ tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: 300000 } : { duration_ms: 300000 } }, { answer: "Original D saved", advanceMS: 10000 });
     const { agent } = await createRunningWorkflow(f, page);
     await expect.poll(() => settled(f, agent).length).toBe(1);
     let previous = String(settled(f, agent)[0].due_at);
@@ -677,7 +751,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     // Public calls replace both policy and preference. This is replacement
     // coverage, not proof of unequal policy/preference maximum resolution.
     for (const minutes of [8, 2]) {
-      f.replies.push({ tool, args: { duration_ms: minutes * 60000 } }, { answer: `Replacement ${minutes}`, advanceMS: 1000 });
+      f.replies.push({ tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: minutes * 60000 } : { duration_ms: minutes * 60000 } }, { answer: `Replacement ${minutes}`, advanceMS: 1000 });
       await userTurn(page, `Replace wait with ${minutes} minutes`);
       await expect(page.getByText(`Replacement ${minutes}`, { exact: true }).first()).toBeVisible();
       await expect.poll(() => String(settled(f, agent).at(-1)!.due_at)).not.toBe(previous);
@@ -700,17 +774,17 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
 
   for (const tool of ["workflow_snooze", "goal_snooze"]) {
     for (const sameTurn of [false, true]) test(`SCN-WFIG-010/013: ${tool} shorter replacement admits at short D (${sameTurn ? "same SDK turn transition" : "new user turn and idle recovery"})`, async ({ page }) => {
-      f.replies.push({ tool, args: { duration_ms: 300000 } });
+      f.replies.push({ tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: 300000 } : { duration_ms: 300000 } });
       if (sameTurn) f.replies.push(
         { tool: "mecha_workflow_transition", args: { action: "transition", target_state: "B" } },
-        { tool, args: { duration_ms: 30000 } },
+        { tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: 30000 } : { duration_ms: 30000 } },
       );
       f.replies.push({ answer: sameTurn ? "B short wait saved" : "A long wait saved" });
       const { agent, b } = await createRunningWorkflow(f, page);
       await expect.poll(() => settled(f, agent).length).toBe(1);
       const originalRevision = f.rows("SELECT desired_revision FROM managed_agent_policies WHERE agent_id=?", agent)[0].desired_revision;
       if (!sameTurn) {
-        f.replies.push({ tool, args: { duration_ms: 30000 } }, { answer: "Short replacement saved" });
+        f.replies.push({ tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: 30000 } : { duration_ms: 30000 } }, { answer: "Short replacement saved" });
         await userTurn(page, "Replace the old long wait with thirty seconds");
         await expect.poll(() => settled(f, agent).length).toBe(2);
       }
@@ -752,7 +826,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
   }
 
   for (const tool of ["workflow_snooze", "goal_snooze"]) test(`SCN-WFIG-013: ${tool} saved call-clock deadline and expired-policy pacing`, async ({ page }) => {
-    f.replies.push({ tool, args: { duration_ms: 30000 } }, { answer: "Delayed final after expiry", advanceMS: 31000 }, { hold: true });
+    f.replies.push({ tool, args: tool === "workflow_snooze" ? { justification: "Waiting for external build", duration_ms: 30000 } : { duration_ms: 30000 } }, { answer: "Delayed final after expiry", advanceMS: 31000 }, { hold: true });
     const { agent } = await createRunningWorkflow(f, page);
     await expect.poll(() => settled(f, agent).length).toBe(1);
     const call = JSON.parse(String(f.rows("SELECT result_json FROM embedded_goal_snooze_calls WHERE agent_id=?", agent)[0].result_json));

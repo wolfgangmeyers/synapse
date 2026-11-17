@@ -177,7 +177,7 @@ test.describe("SCN-WFIG-014 pending expiry and active execution", () => {
   });
 
   test("reserved pending survives R-1 then expires at R; supported unblock cannot resurrect it", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: DAY } }, { answer: "Pending expiry wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } }, { answer: "Pending expiry wait saved" });
     const run = await createRunningWorkflow(f, page, 600000, false);
     await expect.poll(() => settled(f, run.agent).length).toBe(1);
     const original = reservation(f, run.agent);
@@ -211,7 +211,7 @@ test.describe("SCN-WFIG-014 pending expiry and active execution", () => {
     for (const row of transcript) expect(afterExpiry).toContainEqual(row);
     expect(f.rows("SELECT session_id,epoch,generation FROM embedded_sessions WHERE agent_id=?", run.agent)).toEqual(session);
     expect(f.rows("SELECT * FROM pragma_foreign_key_check WHERE ? IS NOT NULL", run.agent)).toEqual([]);
-    f.replies.push({ tool: "mecha_blocked", args: { action: "clear" } }, { tool: "workflow_snooze", args: { duration_ms: DAY } }, { answer: "Human decision received; fresh work saved" });
+    f.replies.push({ tool: "mecha_blocked", args: { action: "clear" } }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } }, { answer: "Human decision received; fresh work saved" });
     await userTurn(page, "Decision supplied. Clear blocked state and snooze the new work for one day.");
     await expect(page.getByText("Human decision received; fresh work saved", { exact: true }).first()).toBeVisible();
     await expect.poll(() => execution(f, run.agent)).toBeNull();
@@ -232,11 +232,11 @@ test.describe("SCN-WFIG-014 pending expiry and active execution", () => {
   });
 
   test("real held continuation preserves exact source/current past R, settles normally then prunes", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: DAY } }, { answer: "Execution expiry wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } }, { answer: "Execution expiry wait saved" });
     const run = await createRunningWorkflow(f, page, 600000, false);
     await expect.poll(() => settled(f, run.agent).length).toBe(1);
     const source = reservation(f, run.agent);
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: DAY } }, { hold: true });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } }, { hold: true });
     await f.advance(Date.parse(String(source.due_at)) - f.clock);
     await expect.poll(() => f.requests.length).toBe(4);
     await expect.poll(() => reservation(f, run.agent).state).toBe("started");
@@ -314,7 +314,7 @@ test.describe("SCN-WFIG-014 pending expiry and active execution", () => {
     // Normal fresh SDK settlement, with a real snooze preventing another idle
     // dispatch. Neither blocking nor termination stands in for completion.
     f.replies.push({ answer: "Fresh workflow dispatch snoozed normally" });
-    f.release({ tool: "workflow_snooze", args: { duration_ms: DAY } });
+    f.release({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } });
     await expect(page.getByText("Fresh workflow dispatch snoozed normally", { exact: true }).first()).toBeVisible();
     await expect.poll(() => execution(f, run.agent)).toBeNull();
     await expect.poll(() => reservation(f, run.agent)?.state).toBe("reserved");

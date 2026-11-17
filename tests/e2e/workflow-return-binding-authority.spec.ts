@@ -8,7 +8,7 @@ for (const replacement of ["same state", "other state", "deactivate and reactiva
     const owns = (text: string) => (request: Record<string, unknown>) => Array.isArray(request.input) &&
       JSON.stringify(request.input.filter(item => item?.role === "user").at(-1)).includes(text);
     try {
-      f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
         { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
       const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
       const wait = async (answer: string) => {
@@ -20,7 +20,7 @@ for (const replacement of ["same state", "other state", "deactivate and reactiva
       const c = (await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "C", allow_exit: true, allow_implicit_return: true })).workflow_state;
       const forward = owns("Advance to B");
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id }, ownsRequest: forward },
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: forward }, { answer: "At B", ownsRequest: forward });
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: forward }, { answer: "At B", ownsRequest: forward });
       await userTurn(page, "Advance to B"); await wait("At B");
       const binding = () => f.rows("SELECT active_workflow_id, active_workflow_state_id, workflow_predecessor_state_id, workflow_binding_generation FROM managed_agents WHERE agent_id=?", agent)[0];
       expect(binding()).toMatchObject({ active_workflow_state_id: b.id, workflow_predecessor_state_id: a.id });
@@ -38,10 +38,10 @@ for (const replacement of ["same state", "other state", "deactivate and reactiva
       // A replacement may schedule a goal continuation before activation delivery.
       const continuation = owns(`The workflow ${replacementWorkflow.name} is currently active in state ${target.name}.`);
       f.interleavedOwners.push(continuation);
-      f.interleavedReplies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: continuation },
+      f.interleavedReplies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: continuation },
         { answer: "Replacement continuation snoozed", ownsRequest: continuation });
       const activation = owns(`[Workflow Activated: ${target.name}]`);
-      f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: activation }, { answer: "Replacement ready", ownsRequest: activation });
+      f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: activation }, { answer: "Replacement ready", ownsRequest: activation });
       await f.api(`/v1/managed-agents/${agent}/workflow-state`, { action: "activate", workflow_id: replacementWorkflow.id, workflow_state_id: target.id }, "PUT");
       await wait("Replacement ready");
       const before = binding();
@@ -58,7 +58,7 @@ for (const replacement of ["same state", "other state", "deactivate and reactiva
       expect(beforeWorkflowHistory.some(row => row.message === "Workflow state transitioned")).toBe(true);
       const attempt = owns("Try old return");
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: attempt },
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: attempt }, { answer: "Return attempted", ownsRequest: attempt });
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: attempt }, { answer: "Return attempted", ownsRequest: attempt });
       await userTurn(page, "Try old return"); await wait("Return attempted");
       const request = f.requests.findLast(r => attempt(r) && Array.isArray(r.input) && r.input.some((i: Record<string, unknown>) => i.type === "function_call" && i.name === "workflow_snooze") && r.input.some((i: Record<string, unknown>) => i.type === "function_call_output"));
       const input = request?.input;

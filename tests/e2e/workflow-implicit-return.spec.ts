@@ -112,7 +112,7 @@ test.describe("Implicit workflow return", () => {
         { tool: "mecha_workflow_transition", args: { action: "transition", target_state: target, ...(reason ? { reason } : {}) }, ownsRequest },
         // A successful transition clears the prior snooze; avoid an autonomous
         // goal continuation consuming the next user turn's scripted response.
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest },
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest },
         { answer, ownsRequest },
       );
     };
@@ -124,7 +124,7 @@ test.describe("Implicit workflow return", () => {
       expect(result).toBeDefined();
       return String(result.output);
     };
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") }, { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") }, { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await waitForAnswer(page, agent, "Ready");
     await f.api(`/v1/workflow-states/${b.id}`, { name: "B", entry_text: "B guidance", allow_exit: true,
@@ -259,7 +259,7 @@ test.describe("Implicit workflow return", () => {
   });
 
   test("IR-004/005/008: only immediate predecessor and repeated returns", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Ready" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Ready" });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await waitForAnswer(page, agent, "Ready");
     const { workflow_state: c } = await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: "C", allow_implicit_return: true });
@@ -270,7 +270,7 @@ test.describe("Implicit workflow return", () => {
       // Successful transitions clear the snooze; re-snooze before the final so
       // the active goal cannot race the next scripted user turn.
       f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: target }, ownsRequest },
-        { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest }, { answer, ownsRequest });
+        { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest }, { answer, ownsRequest });
       const before = denied ? {
         binding: f.rows("SELECT active_workflow_state_id, workflow_predecessor_state_id, workflow_binding_generation FROM managed_agents WHERE agent_id=?", agent),
         reminders: f.rows("SELECT * FROM managed_agent_workflow_reminders WHERE agent_id=? ORDER BY reminder_id", agent),
@@ -331,11 +331,11 @@ test.describe("Implicit workflow return", () => {
           ? typeof part.text === "string" && part.text.split("\n").includes(text)
           : part.text === `[Direct message from user]: ${text}`));
     };
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") }, { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") }, { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await waitForAnswer(page, agent, "Ready");
     await f.api(`/v1/workflow-states/${b.id}`, { name: "B", entry_text: "B guidance", allow_exit: true, allow_implicit_return: true }, "PUT");
-    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id }, ownsRequest: owns("Go to B") }, { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("Go to B") }, { answer: "At B", ownsRequest: owns("Go to B") });
+    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id }, ownsRequest: owns("Go to B") }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("Go to B") }, { answer: "At B", ownsRequest: owns("Go to B") });
     await userTurn(page, "Go to B");
     await waitForAnswer(page, agent, "At B");
     await f.restart();
@@ -343,7 +343,7 @@ test.describe("Implicit workflow return", () => {
     await page.reload();
     await page.locator('button[role="tab"]:has-text("Background")').click();
     await page.locator(`[data-agent-id="${agent}"]`).click();
-    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: owns("Return after restart") }, { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("Return after restart") }, { answer: "Returned after restart", ownsRequest: owns("Return after restart") });
+    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: owns("Return after restart") }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("Return after restart") }, { answer: "Returned after restart", ownsRequest: owns("Return after restart") });
     await userTurn(page, "Return after restart");
     await waitForAnswer(page, agent, "Returned after restart");
     await expect.poll(async () => (await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_state_id).toBe(a.id);
@@ -375,7 +375,7 @@ test.describe("Implicit workflow return", () => {
       } catch { return false; }
     };
     const continuationReplies = [
-      { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: ownsContinuationStart },
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: ownsContinuationStart },
       { answer: "B continuation snoozed", ownsRequest: ownsContinuationResult },
     ];
     f.interleavedOwners.push(ownsBContinuation);
@@ -387,10 +387,10 @@ test.describe("Implicit workflow return", () => {
       expect(f.replies).toEqual([]);
       expect(f.violations).toEqual([]);
     };
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: B]") }, { answer: "Reactivation guidance received", ownsRequest: owns("[Workflow Activated: B]") });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: B]") }, { answer: "Reactivation guidance received", ownsRequest: owns("[Workflow Activated: B]") });
     await f.api(`/v1/managed-agents/${agent}/workflow-state`, { action: "activate", workflow_id: workflow.id, workflow_state_id: b.id }, "PUT");
     await waitForAnswer(page, agent, "Reactivation guidance received");
-    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: owns("Try return after replacement") }, { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("Try return after replacement") }, { answer: "Fresh return attempted", ownsRequest: owns("Try return after replacement") });
+    f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: a.id }, ownsRequest: owns("Try return after replacement") }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("Try return after replacement") }, { answer: "Fresh return attempted", ownsRequest: owns("Try return after replacement") });
     await userTurn(page, "Try return after replacement");
     await waitForAnswer(page, agent, "Fresh return attempted");
     const input = f.requests.at(-1)?.input;

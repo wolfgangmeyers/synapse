@@ -14,7 +14,7 @@ test("IR-007: explicit target name wins over implicit predecessor ID", async ({ 
     const owner = owns(text);
     f.replies.push(
       { tool: "mecha_workflow_transition", args: { action: "transition", target_state: target }, ownsRequest: owner },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owner },
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owner },
       { answer, ownsRequest: owner },
     );
     await userTurn(page, text);
@@ -22,7 +22,7 @@ test("IR-007: explicit target name wins over implicit predecessor ID", async ({ 
   }
   try {
     const activation = owns("[Workflow Activated: A]");
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: activation }, { answer: "Ready", ownsRequest: activation });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await wait(agent, "Ready");
     const { workflow_state: collision } = await f.api("/v1/workflow-states", { workflow_id: workflow.id, name: a.id });

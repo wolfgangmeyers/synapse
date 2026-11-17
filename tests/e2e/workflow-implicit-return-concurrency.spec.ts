@@ -7,11 +7,11 @@ test("IR-012/014: edits during a held turn do not queue guidance and the next tr
   let release!: () => void;
   const barrier = new Promise<void>(resolve => { release = resolve; });
   try {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Ready" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Ready" });
     const { agent, a, b } = await createRunningWorkflow(f, page, 600000, false);
     await expect(page.getByText("Ready", { exact: true }).first()).toBeVisible();
     f.replies.push({ tool: "mecha_workflow_transition", args: { action: "transition", target_state: b.id } },
-      { tool: "workflow_snooze", args: { duration_minutes: 5 } }, { answer: "Reached B" });
+      { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 } }, { answer: "Reached B" });
     await userTurn(page, "Advance to B");
     await expect(page.getByText("Reached B", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => (await f.api(`/v1/managed-agents/${agent}/workflow-state`)).active_workflow_state_id).toBe(b.id);

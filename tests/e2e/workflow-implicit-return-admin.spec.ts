@@ -7,7 +7,7 @@ test("managed state admin exposes the opt-in and updates live return authority",
   try {
     const owns = (text: string) => (request: Record<string, unknown>) =>
       Array.isArray(request.input) && JSON.stringify(request.input.filter(item => item?.role === "user").at(-1)).includes(text);
-    f.replies.push({ tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest: owns("[Workflow Activated: A]") },
       { answer: "Ready", ownsRequest: owns("[Workflow Activated: A]") });
     const { agent, workflow, a, b } = await createRunningWorkflow(f, page, 600000, false);
     const wait = async (answer: string) => {
@@ -18,7 +18,7 @@ test("managed state admin exposes the opt-in and updates live return authority",
     await f.api(`/v1/managed-agents/${agent}/tools`, { tool_name: "workflow_state_save", enabled: true }, "PUT");
     const turn = async (text: string, tool: string, args: object) => {
       const ownsRequest = owns(text);
-      f.replies.push({ tool, args, ownsRequest }, { tool: "workflow_snooze", args: { duration_minutes: 5 }, ownsRequest }, { answer: `Done ${text}`, ownsRequest });
+      f.replies.push({ tool, args, ownsRequest }, { tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_minutes: 5 }, ownsRequest }, { answer: `Done ${text}`, ownsRequest });
       await userTurn(page, text);
       await wait(`Done ${text}`);
       const input = f.requests.at(-1)?.input;

@@ -37,7 +37,7 @@ var NativeToolCatalog = []NativeToolDef{
 	// Workflow Management
 	{ToolName: "goal", Category: "Workflow Management", Description: "Set, inspect or turn off goal", DefaultEnabled: true},
 	{ToolName: "goal_snooze", Category: "Workflow Management", Description: "Set a delay preference for current goal", DefaultEnabled: true},
-	{ToolName: "workflow_snooze", Category: "Workflow Management", Description: "Set a delay preference for active workflow continuation", DefaultEnabled: true},
+	{ToolName: "workflow_snooze", Category: "Workflow Management", Description: "Set a delay preference for active workflow continuation while awaiting active external asynchronous processes", DefaultEnabled: true},
 	{ToolName: "scratchpad", Category: "Workflow Management", Description: "Persistent scratchpad memory for notes and milestones", DefaultEnabled: true},
 	{ToolName: "mecha_progress", Category: "Workflow Management", Description: "Track and report measurable task progress", DefaultEnabled: true},
 	{ToolName: "mecha_blocked", Category: "Execution Control", Description: "Set or clear blocked execution state when external assistance is required", DefaultEnabled: true},

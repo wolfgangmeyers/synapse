@@ -50,7 +50,7 @@ test.describe("SCN-WFIG-014: automatic workflow evidence retention", () => {
   });
 
   test("same-DB reopen preserves future D and browser reconnect without early or duplicate start", async ({ page }) => {
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: 300000 } }, { answer: "Reopen wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: 300000 } }, { answer: "Reopen wait saved" });
     const current = await createRunningWorkflow(f, page, 600000, false);
     await expect(page.getByText("Reopen wait saved", { exact: true }).first()).toBeVisible();
     await expect.poll(() => settled(f, current.agent).length).toBe(1);
@@ -122,7 +122,7 @@ test.describe("SCN-WFIG-014: automatic workflow evidence retention", () => {
   test("automatic inclusive 30-day sweep prunes retired evidence and preserves real current future-D work", async ({ page }) => {
     // Historical AND current evidence are produced by real tools/runtime here.
     // No SQL seeding, timestamp UPDATE, direct DELETE, or disabled SQL guards.
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: DAY } }, { answer: "Historical wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: DAY } }, { answer: "Historical wait saved" });
     const old = await createRunningWorkflow(f, page, 600000, false);
     const admittedAt = f.clock;
     await expect(page.getByText("Historical wait saved", { exact: true }).first()).toBeVisible();
@@ -138,7 +138,7 @@ test.describe("SCN-WFIG-014: automatic workflow evidence retention", () => {
     expect(evidence(f, old.agent)).toEqual(history);
     expect(f.requests).toHaveLength(2); // Retired D did not wake old work.
 
-    f.replies.push({ tool: "workflow_snooze", args: { duration_ms: 300000 } }, { answer: "Current wait saved" });
+    f.replies.push({ tool: "workflow_snooze", args: { justification: "Waiting for CI process", duration_ms: 300000 } }, { answer: "Current wait saved" });
     const boundaryNow = f.clock;
     const current = await createRunningWorkflow(f, page, 600000, false);
     // createRunningWorkflow reads an API timestamp; retain exact injected ms.

@@ -173,7 +173,11 @@ func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
 					policy, err := db.UpdateManagedGoalPolicy(ctx, fence, store.ManagedGoalConfig{Enabled: true, Goal: "current goal", Settings: store.DefaultManagedGoalSettings()})
 					require.NoError(t, err)
 					require.EqualValues(t, 1, policy.DesiredRevision)
-					args = map[string]any{"duration_ms": 1000}
+					if name == "workflow_snooze" {
+						args = map[string]any{"justification": "Waiting for CI build pipeline", "duration_ms": 1000}
+					} else {
+						args = map[string]any{"duration_ms": 1000}
+					}
 				}
 				if name == "workflow_snooze" {
 					wf, err := db.CreateWorkflow(ctx, store.WorkflowRequest{Name: "Completion"})
