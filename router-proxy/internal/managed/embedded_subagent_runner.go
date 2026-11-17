@@ -1147,6 +1147,9 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			toolName := call.ToolCall.Name
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
+				if p != nil {
+					p.currentThinking = ""
+				}
 				var companionText string
 				if p != nil && p.currentTurnAssistantText != "" {
 					companionText = p.currentTurnAssistantText

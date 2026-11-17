@@ -353,6 +353,14 @@ func (p *embeddedPersistence) projectMessage(ctx context.Context, message agent.
 			p.currentThinking += stepThinking
 		}
 	}
+	// Invariant 1: prevent thinking text leakage into tool presentation.
+	// Once a tool call is received in an assistant turn, thinking is isolated
+	// to the thinking block and must not bleed across into subsequent tool calls.
+	// We reset currentThinking to ensure that multi-turn model interactions or tool
+	// executions cannot mistakenly attach residual thinking stream content to the tool presentation.
+	if p.toolCallReceived {
+		p.currentThinking = ""
+	}
 	if assistantContent != nil {
 		hasToolCalls := false
 		for _, part := range assistantContent {
@@ -467,6 +475,24 @@ func (p *embeddedPersistence) projectMessage(ctx context.Context, message agent.
 			}
 			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
 			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput, contentPtr)
+			if err != nil {
+				// Fallback to minimal presentation without thinking/companion
+				summary := "Completed"
+				outcome := "success"
+				if isFailed {
+					summary = "The operation could not be completed."
+					outcome = "failed"
+				} else if pres != nil && pres.Outcome != "" {
+					outcome = pres.Outcome
+				}
+				fallbackPres := &store.ManagedHistoryPresentation{
+					Kind:     "tool",
+					ToolName: toolName,
+					Outcome:  outcome,
+					Summary:  summary,
+				}
+				entry, err = p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, fallbackPres, toolInput, contentPtr)
+			}
 			if err == nil && p.publishComplete != nil {
 				p.publishComplete(entry)
 			}
