@@ -281,14 +281,13 @@ export async function startIsolatedRouter(options: {
     "127.0.0.1",
     "--port",
     String(port),
-    `--managed=${isManaged}`,
   ];
 
   if (options.testClock !== false) {
     args.push("--test-clock");
   }
 
-  if (isManaged) {
+  {
     const home = join(root, "managed-home");
     const piAgentDir = join(home, ".pi", "agent");
     const sessionRoot = join(home, "sessions");
@@ -328,7 +327,6 @@ export async function startIsolatedRouter(options: {
   }
 
   if (options.embeddedRoot) {
-    if (!options.managed) throw new Error("Embedded root requires managed mode");
     args.push("--embedded-root-bootstrap", "--embedded-root-request-id", options.embeddedRoot.requestId,
       "--embedded-root-name", options.embeddedRoot.name, "--embedded-root-cwd", join(root, "work"),
       "--embedded-root-model-provider", options.embeddedRoot.model.provider, "--embedded-root-model-id", options.embeddedRoot.model.id,
@@ -462,6 +460,12 @@ export async function startIsolatedRouter(options: {
         // stack locals or credentials through readiness artifacts.
         if (stderr.includes("managed provider status is unavailable")) {
           readinessStderr = "managed provider status is unavailable";
+        } else if (stderr.includes("credential destination must be owner-only")) {
+          readinessStderr = "credential destination must be owner-only";
+        } else if (stderr.includes("credential file")) {
+          readinessStderr = "credential file";
+        } else if (stderr.includes("credential")) {
+          readinessStderr = "credential";
         }
       });
 

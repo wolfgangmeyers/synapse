@@ -72,7 +72,7 @@ async function environment(signedIn: boolean) {
   const port = await allocatePort();
   const child = spawn(binary, [
     "--database", join(root, "router.sqlite"), "--host", "127.0.0.1", "--port", String(port),
-    "--managed=true", "--managed-quiet-recipient", "supervisor", "--managed-pi", pi, "--managed-home", paths.home,
+    "--managed-quiet-recipient", "supervisor", "--managed-pi", pi, "--managed-home", paths.home,
     "--managed-pi-agent-dir", paths.agent, "--managed-session-root", paths.sessions,
     "--managed-cwd-roots", paths.project, "--managed-runtime-root", repo,
     "--managed-manifest", join(repo, "router/contract/managed-tools-v1.json"),

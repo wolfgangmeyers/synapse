@@ -78,16 +78,26 @@ func TestParseConfigPreservesExplicitTmuxAuditPair(t *testing.T) {
 	require.Equal(t, "audit-session", parsed.auditTmuxSession)
 }
 
-func TestParseConfigAllowsExplicitManagedOptOutAndRejectsInvalidValue(t *testing.T) {
-	disabled, err := parseConfig([]string{"--database", "/tmp/router.db", "--managed=false"})
-	require.NoError(t, err)
-	require.False(t, disabled.managed.Enabled)
-
-	_, err = parseConfig([]string{"--database", "/tmp/router.db", "--managed=invalid"})
+func TestParseConfigRejectsManagedFlagAndEnforcesPermanentManagedMode(t *testing.T) {
+	_, err := parseConfig([]string{"--database", "/tmp/router.db", "--managed=false"})
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "flag provided but not defined: -managed")
+
+	_, err = parseConfig([]string{"--database", "/tmp/router.db", "--managed=true"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "flag provided but not defined: -managed")
+
+	_, err = parseConfig([]string{"--database", "/tmp/router.db", "--managed"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "flag provided but not defined: -managed")
+
+	cfg, err := parseConfig([]string{"--database", "/tmp/router.db"})
+	require.NoError(t, err)
+	require.True(t, cfg.managed.Enabled)
+	require.True(t, cfg.managed.RequireProviderRuntime)
 }
 
-func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T) {
+func TestLauncherDefaultsManagedModeOnAndConfiguresEnvironment(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
 	temporaryDirectory := t.TempDir()
@@ -97,51 +107,38 @@ func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T)
 	require.NoError(t, os.MkdirAll(fakeBin, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "make"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MECHA_TEST_CAPTURE\"\n"), 0o700))
 
-	environment := func(managed, allowLaunchRecipeMismatch string) []string {
+	environment := func(allowLaunchRecipeMismatch string) []string {
 		filtered := make([]string, 0, len(os.Environ())+5)
 		for _, value := range os.Environ() {
-			if !strings.HasPrefix(value, "MECHA_ROUTER_MANAGED") && !strings.HasPrefix(value, "PATH=") {
+			if !strings.HasPrefix(value, "MECHA_ROUTER_") && !strings.HasPrefix(value, "PATH=") {
 				filtered = append(filtered, value)
 			}
 		}
 		filtered = append(filtered, "PATH="+fakeBin+":"+os.Getenv("PATH"), "MECHA_TEST_CAPTURE="+capture, "MECHA_ROUTER_MANAGED_HOME="+managedHome, "MECHA_ROUTER_MANAGED_SESSION_ROOT="+filepath.Join(managedHome, "sessions"))
-		if managed != "" {
-			filtered = append(filtered, "MECHA_ROUTER_MANAGED="+managed)
-		}
 		if allowLaunchRecipeMismatch != "" {
 			filtered = append(filtered, "MECHA_ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH="+allowLaunchRecipeMismatch)
 		}
 		return filtered
 	}
-	run := func(managed, allowLaunchRecipeMismatch string) *exec.Cmd {
+	run := func(allowLaunchRecipeMismatch string) *exec.Cmd {
 		command := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
-		command.Env = environment(managed, allowLaunchRecipeMismatch)
+		command.Env = environment(allowLaunchRecipeMismatch)
 		return command
 	}
 
-	require.NoError(t, run("", "").Run())
+	require.NoError(t, run("").Run())
 	arguments, err := os.ReadFile(capture)
 	require.NoError(t, err)
-	require.Contains(t, string(arguments), "ROUTER_MANAGED=true")
+	require.NotContains(t, string(arguments), "ROUTER_MANAGED=")
 	require.Contains(t, string(arguments), "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=false")
 	home, homeErr := os.UserHomeDir()
 	require.NoError(t, homeErr)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED_CWD_ROOTS="+home)
 
-	require.NoError(t, run("false", "").Run())
-	arguments, err = os.ReadFile(capture)
-	require.NoError(t, err)
-	require.Contains(t, string(arguments), "ROUTER_MANAGED=false")
-
-	require.NoError(t, run("", "true").Run())
+	require.NoError(t, run("true").Run())
 	arguments, err = os.ReadFile(capture)
 	require.NoError(t, err)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=true")
-
-	invalid := run("invalid", "")
-	output, err := invalid.CombinedOutput()
-	require.Error(t, err)
-	require.Contains(t, string(output), "MECHA_ROUTER_MANAGED must be true or false")
 }
 
 func TestLauncherRestartBehavior(t *testing.T) {
@@ -165,7 +162,6 @@ func TestLauncherRestartBehavior(t *testing.T) {
 		}
 		env = append(env,
 			"PATH="+fakeBin+":"+os.Getenv("PATH"),
-			"MECHA_ROUTER_MANAGED=false",
 			"MECHA_ROUTER_MANAGED_HOME="+managedHome,
 			"MECHA_ROUTER_MANAGED_SESSION_ROOT="+filepath.Join(managedHome, "sessions"),
 		)
@@ -354,8 +350,12 @@ func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string)
 	}
 	pi := filepath.Join(root, "bin", "pi")
 	write(pi, "#!/bin/sh\nprintf '0.85.0\\n'\n", 0o700)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	manifestData, err := os.ReadFile(filepath.Join(repoRoot, "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
 	manifest := filepath.Join(root, "manifest.json")
-	write(manifest, `{"revision":1,"tools":[]}`, 0o600)
+	write(manifest, string(manifestData), 0o600)
 	mechaRoot := filepath.Join(root, "mecha-rpc")
 	mecha := filepath.Join(mechaRoot, "index.ts")
 	write(mecha, "import './protocol.js';\n", 0o600)
@@ -368,6 +368,8 @@ func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string)
 	piAgentDir := filepath.Join(root, "ordinary-pi", "agent")
 	sessionRoot := filepath.Join(home, "sessions")
 	workRoot := filepath.Join(root, "work")
+	authHelper := filepath.Join(root, "auth-helper.mjs")
+	write(authHelper, "export default {};\n", 0o600)
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
 	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(workRoot, 0o700))
@@ -376,7 +378,36 @@ func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string)
 		ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents,
 		AllowedWorkingDirectoryRoots: []string{workRoot}, CanonicalQuietRecipientID: "supervisor",
 	}
-	return config, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "home": home, "pi_agent_dir": piAgentDir, "session": sessionRoot, "work": workRoot}
+	return config, map[string]string{
+		"pi":           pi,
+		"manifest":     manifest,
+		"mecha":        mecha,
+		"subagents":    subagents,
+		"home":         home,
+		"pi_agent_dir": piAgentDir,
+		"session":      sessionRoot,
+		"work":         workRoot,
+		"auth_helper":  authHelper,
+		"runtime_root": root,
+	}
+}
+
+func validManagedLaunchArgs(t *testing.T) []string {
+	t.Helper()
+	_, paths := managedStartupTestFixture(t)
+	return []string{
+		"--managed-auth-helper", paths["auth_helper"],
+		"--managed-runtime-root", paths["runtime_root"],
+		"--managed-pi", paths["pi"],
+		"--managed-home", paths["home"],
+		"--managed-pi-agent-dir", paths["pi_agent_dir"],
+		"--managed-session-root", paths["session"],
+		"--managed-manifest", paths["manifest"],
+		"--managed-mecha-rpc", paths["mecha"],
+		"--managed-pi-subagents", paths["subagents"],
+		"--managed-cwd-roots", paths["work"],
+		"--managed-quiet-recipient", "supervisor",
+	}
 }
 
 func TestManagedStartupAcceptsChangedValidInputsAndRejectsMissingCorePaths(t *testing.T) {
@@ -406,7 +437,7 @@ func TestManagedConfigurationFailureDoesNotBindListener(t *testing.T) {
 	require.NoError(t, err)
 	port := listener.Addr().(*net.TCPAddr).Port
 	require.NoError(t, listener.Close())
-	command := exec.Command(binary, "--database", filepath.Join(directory, "router.db"), "--host", "127.0.0.1", "--port", formatPort(port), "--managed=true", "--managed-home", filepath.Join(directory, "missing-managed-home"))
+	command := exec.Command(binary, "--database", filepath.Join(directory, "router.db"), "--host", "127.0.0.1", "--port", formatPort(port), "--managed-home", filepath.Join(directory, "missing-managed-home"))
 	require.Error(t, command.Run())
 	bound, err := net.Listen("tcp", "127.0.0.1:"+formatPort(port))
 	require.NoError(t, err, "invalid managed configuration must fail before router.Listen")
@@ -414,6 +445,9 @@ func TestManagedConfigurationFailureDoesNotBindListener(t *testing.T) {
 }
 
 func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+
 	directory := t.TempDir()
 	database := filepath.Join(directory, "go-router.db")
 	logPath := filepath.Join(directory, "go-router.jsonl")
@@ -426,7 +460,8 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
 	build.Dir = filepath.Dir(filepath.Join(".", "main.go"))
 	require.NoError(t, build.Run())
-	command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port), "--managed=false")
+	command := exec.Command(binary, append([]string{"--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port)}, validManagedLaunchArgs(t)...)...)
+	command.Env = append(os.Environ(), "MECHA_SUPERVISOR_TOOLS="+filepath.Join(repoRoot, "tools"))
 	stdout, err := command.StdoutPipe()
 	require.NoError(t, err)
 	stderr, err := command.StderrPipe()
@@ -443,15 +478,17 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	go collectLines(stdout, lines)
 	go collectLines(stderr, lines)
 	var ready string
+	var collected []string
 	deadline := time.After(30 * time.Second)
 	for ready == "" {
 		select {
 		case line := <-lines:
+			collected = append(collected, line)
 			if strings.HasPrefix(line, "MECHA_V2_ROUTER_READY ") {
 				ready = line
 			}
 		case <-deadline:
-			t.Fatal("timed out waiting for isolated Go router readiness")
+			t.Fatalf("timed out waiting for isolated Go router readiness; lines: %v", collected)
 		}
 	}
 	require.Contains(t, ready, "database="+database)
@@ -460,10 +497,10 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, legacyHealth.StatusCode)
 	require.NoError(t, legacyHealth.Body.Close())
-	disabledManagedRoute, err := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/managed-agents")
+	managedRoute, err := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/managed-agents")
 	require.NoError(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, disabledManagedRoute.StatusCode)
-	require.NoError(t, disabledManagedRoute.Body.Close())
+	require.Equal(t, http.StatusOK, managedRoute.StatusCode)
+	require.NoError(t, managedRoute.Body.Close())
 	require.FileExists(t, database)
 	attachmentInfo, err := os.Stat(database + ".attachments")
 	require.NoError(t, err)
@@ -478,6 +515,9 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 }
 
 func TestSIGTERMRouterCloseReopenOrdering(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+
 	directory := t.TempDir()
 	database := filepath.Join(directory, "router.db")
 	logPath := filepath.Join(directory, "router.jsonl")
@@ -491,7 +531,8 @@ func TestSIGTERMRouterCloseReopenOrdering(t *testing.T) {
 		require.NoError(t, err)
 		port := listener.Addr().(*net.TCPAddr).Port
 		require.NoError(t, listener.Close())
-		command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port), "--managed=false")
+		command := exec.Command(binary, append([]string{"--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port)}, validManagedLaunchArgs(t)...)...)
+		command.Env = append(os.Environ(), "MECHA_SUPERVISOR_TOOLS="+filepath.Join(repoRoot, "tools"))
 		stdout, err := command.StdoutPipe()
 		require.NoError(t, err)
 		stderr, err := command.StderrPipe()

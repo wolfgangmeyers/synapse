@@ -18,7 +18,7 @@ import (
 func TestEmbeddedRootBootstrapRequiresCodexCredentialPathBeforeDatabase(t *testing.T) {
 	base := t.TempDir()
 	database := filepath.Join(base, "router.db")
-	args := []string{"--database", database, "--managed=true", "--embedded-root-bootstrap",
+	args := []string{"--database", database, "--embedded-root-bootstrap",
 		"--embedded-root-request-id", "a0777777-7777-4777-8777-777777777777",
 		"--embedded-root-name", "root", "--embedded-root-cwd", base,
 		"--embedded-root-model-provider", "openai-codex", "--embedded-root-model-id", "gpt-5.6-terra",
@@ -141,10 +141,6 @@ func TestCodexCredentialStartupOptIn(t *testing.T) {
 	require.NoError(t, configureCodexCredentials(ctx, defaultConfig, &unchanged))
 	require.Nil(t, unchanged.CodexCredentialStore)
 	require.Nil(t, unchanged.CodexRefresh)
-
-	legacy, err := parseConfig(append(args, "--managed=false"))
-	require.NoError(t, err)
-	require.NoError(t, configureCodexCredentials(ctx, legacy, &managed.ManagerOptions{}))
 
 	path := filepath.Join(private, "codex.json")
 	opted, err := parseConfig(append(args, "--codex-credential-path", path))

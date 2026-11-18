@@ -46,7 +46,6 @@ func TestEmbeddedWorkerDefaultFlagOptIn(t *testing.T) {
 	require.False(t, embeddedWorkerDefaultEnabled(bootstrap), "root bootstrap alone does not alter HTTP defaults")
 	for _, bad := range [][]string{
 		append(append([]string{}, args...), "--embedded-worker-default"),
-		append(append([]string{}, args...), "--managed=false", "--embedded-worker-default", "--codex-credential-path", path),
 	} {
 		_, err := parseConfig(bad)
 		require.Error(t, err)
