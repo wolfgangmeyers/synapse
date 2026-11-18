@@ -40,6 +40,11 @@ Claude workers can use the same applicable router-owned tools and configuration 
 - **When** workflow, parent workflow, or worker-tool settings lookup fails.
 - **Then** the call is denied without executing the tool; a missing active workflow is not an error.
 
+### Scenario: [CT-006] Parallel router tool execution with duration exceeding message persistence timeout
+- **Given** a running Claude worker turn invoking multiple router tools in parallel or quick succession.
+- **When** one tool execution takes longer than the 5-second non-user message save timeout.
+- **Then** concurrent tool execution and incoming stdout/persistence proceed without timing out or failing with `context deadline exceeded` or `stale process grant`; the 5-second persistence timeout strictly bounds message persistence rather than bridge lock wait time.
+
 ## Automated E2E Verification Matrix
 | Scenario ID | Scenario Description | E2E Test Suite | Test Case Name / coverage |
 | --- | --- | --- | --- |
@@ -48,5 +53,6 @@ Claude workers can use the same applicable router-owned tools and configuration 
 | CT-003 | Native tool controls | `tests/e2e/claude-code-tool-parity.spec.ts` | `Claude exposes shared tools and applies worker policy without restarting` (worker disclosure and inline controls; workflow disclosure remains untested) |
 | CT-004 | Invalid and stale requests | `tests/e2e/claude-code-workers.spec.ts` | `CC-006 missing tool ID or checked producer cannot mutate scratchpad`; `CC-008 idle grant cannot reuse foreground authority for effects` (malformed and unlisted requests remain untested) |
 | CT-005 | Policy storage unavailable | `tests/e2e/claude-code-tool-parity.spec.ts` | `Claude denies a checked tool when worker policy storage fails` (worker lookup; workflow and parent lookup E2E remain untested) |
+| CT-006 | Parallel tool execution exceeding message save timeout | `tests/e2e/claude-code-tool-parity.spec.ts` | Supporting Go regression test `TestClaudeParallelToolCallsExceedingPersistenceTimeout` in `router-proxy/internal/managed/` (E2E suite pending browser/CLI mock extension) |
 
 Supporting Go test `TestAdmissionFailsClosedOnPolicyReadErrors` covers workflow, parent workflow and worker lookup failures. Missing active workflow is exercised by the ordinary permitted call in CT-001/002. These are coverage mappings, not claims that tests have been run.

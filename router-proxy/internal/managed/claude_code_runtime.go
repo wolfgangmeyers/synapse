@@ -1363,15 +1363,6 @@ func claudeNextBeforeDeadline(p *ClaudeCodeProcess, ctx context.Context, deadlin
 var errClaudeTerminalOutput = errors.New("assistant output after checked terminating result")
 
 func (r *claudeCodeRuntime) appendChecked(ctx context.Context, message agent.AgentMessage) error {
-	if message.MessageRole() != ai.RoleUser {
-		// Output already received belongs to the admitted turn. A caller cancel
-		// must not abort its checked append before readTurn can interrupt and
-		// drain the partial answer. Keep owner values/fences and bound the write;
-		// user consumption and tool execution retain their cancellation policy.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-	}
 	if r.bridge != nil {
 		r.bridge.serial.Lock()
 		defer r.bridge.serial.Unlock()
@@ -1384,6 +1375,17 @@ func (r *claudeCodeRuntime) appendChecked(ctx context.Context, message agent.Age
 		if result, ok := message.(ai.ToolResultMessage); ok && strings.HasPrefix(r.rawToolName(result.ToolCallID), "mcp__mecha__") {
 			return r.bridge.observeResult(ctx, result)
 		}
+	}
+	if message.MessageRole() != ai.RoleUser {
+		// Output already received belongs to the admitted turn. A caller cancel
+		// must not abort its checked append before readTurn can interrupt and
+		// drain the partial answer. Keep owner values/fences and bound the write;
+		// user consumption and tool execution retain their cancellation policy.
+		// Start timeout after acquiring bridge.serial so long-running tool
+		// executions do not exhaust the message persistence budget.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
 	}
 	return r.p.AppendCheckedMessage(ctx, message)
 }
