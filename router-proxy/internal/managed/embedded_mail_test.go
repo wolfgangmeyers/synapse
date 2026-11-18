@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -708,4 +709,159 @@ func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
 
 		require.True(t, sawNudgePrompt.Load(), "model must receive the answer synthesis nudge prompt")
 	})
+}
+
+func TestClaudeBlockUnclassifiedSurfacesHistoryOnStaleFence(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	require.NoError(t, os.Chmod(root, 0700))
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	manager, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		EmbeddedMailBackoff:   10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer manager.Close(ctx)
+
+	agentID := "claude-worker"
+	binding := store.EmbeddedBinding{
+		AgentID:    agentID,
+		SessionID:  "session-1",
+		Epoch:      1,
+		Generation: "1",
+	}
+	attempt := store.EmbeddedMailAttempt{
+		AttemptID:            "attempt-stale-1",
+		Binding:              binding,
+		MessageID:            "msg-stale-1",
+		MessageIncarnationID: "inc-1",
+	}
+
+	lane := manager.laneFor(agentID)
+	manager.blockClaudeUnclassified(lane, &attempt, errors.New("simulated turn failure"))
+
+	entries, err := db.GetManagedCompleteHistory(ctx, agentID)
+	require.NoError(t, err)
+	found := false
+	for _, entry := range entries {
+		if entry.MessageContent != nil && strings.Contains(*entry.MessageContent, claudeUnclassifiedDiagnostic) {
+			found = true
+			if entry.Presentation == nil || entry.Presentation.Summary != "Claude mail blocked" {
+				t.Fatalf("expected presentation summary \"Claude mail blocked\", got %+v", entry.Presentation)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected diagnostic history entry recorded on stale fence fallback, got none")
+	}
+
+	require.NotNil(t, lane.claudeUnclassifiedBlocked)
+	require.Equal(t, attempt.MessageID, lane.claudeUnclassifiedBlocked.MessageID)
+}
+
+func TestClaudeUnclassifiedFailureDoesNotBlockQueue(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	require.NoError(t, os.Chmod(root, 0700))
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	manager, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		EmbeddedMailBackoff:   10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer manager.Close(ctx)
+
+	launched, err := manager.Launch(ctx, LaunchRequest{
+		Name:      "claude-worker-2",
+		Cwd:       root,
+		Runtime:   "embedded",
+		Model:     &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		RequestID: "d1111111-2222-3333-4444-555555555555",
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	agentID := launched.Agent.AgentID
+	binding := store.EmbeddedBinding{
+		AgentID:    agentID,
+		SessionID:  "session-2",
+		Epoch:      1,
+		Generation: "1",
+	}
+
+	msgID1 := "b2222222-2222-4222-8222-222222222223"
+	_, err = db.Enqueue(ctx, protocol.Envelope{
+		ID:        msgID1,
+		From:      "user",
+		To:        agentID,
+		Body:      "first failing message",
+		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}, store.EnqueueOptions{})
+	require.NoError(t, err)
+	target1, err := db.ResolveMessageTarget(ctx, msgID1)
+	require.NoError(t, err)
+	require.Equal(t, "managed", target1.SourceKind)
+
+	msgID2 := "b2222222-2222-4222-8222-222222222224"
+	_, err = db.Enqueue(ctx, protocol.Envelope{
+		ID:        msgID2,
+		From:      "user",
+		To:        agentID,
+		Body:      "second message",
+		CreatedAt: time.Now().UTC().Add(time.Second).Format("2006-01-02T15:04:05.000Z"),
+	}, store.EnqueueOptions{})
+	require.NoError(t, err)
+	target2, err := db.ResolveMessageTarget(ctx, msgID2)
+	require.NoError(t, err)
+	require.Equal(t, "managed", target2.SourceKind)
+
+	lane := manager.laneFor(agentID)
+	attempt1 := store.EmbeddedMailAttempt{
+		AttemptID:            "attempt-fail-1",
+		Binding:              binding,
+		MessageID:            msgID1,
+		MessageIncarnationID: "inc-1",
+	}
+
+	manager.blockClaudeUnclassified(lane, &attempt1, errors.New("simulated turn failure"))
+
+	require.NotNil(t, lane.claudeUnclassifiedBlocked)
+	nextID, err := db.NextEmbeddedMail(ctx, agentID)
+	require.NoError(t, err)
+	if nextID != msgID2 {
+		t.Fatalf("expected NextEmbeddedMail to return %s, got %q", msgID2, nextID)
+	}
 }
