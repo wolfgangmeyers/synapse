@@ -670,4 +670,50 @@ test.describe("Workflow Collections E2E (SPEC-WORKFLOW-COLLECTIONS-001)", () => 
     await expect(page.locator(".workflow-card-name").filter({ hasText: /^Interactive Pipeline$/ })).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".workflow-card-name").filter({ hasText: /^Interactive Pipeline Duplicated$/ })).toBeVisible({ timeout: 5000 });
   });
+
+  test("UI interaction: duplicates workflow card directly in collection with auto-renaming and count update", async ({ page }) => {
+    // 1. Create a workflow in default collection
+    await f.api("/v1/workflows", { name: "Deploy Service", collection_id: "default" });
+
+    await f.open(page);
+
+    // Navigate to Workflows page
+    const trigger = page.locator(".managed-actions-trigger");
+    await expect(trigger).toBeVisible({ timeout: 10000 });
+    await trigger.click();
+    await page.locator('button[role="menuitem"]:has-text("Workflows")').click();
+    await expect(page.locator(".workflows-title h2")).toContainText("Workflows");
+
+    // Verify initial card is visible and collection count shows 1
+    const defaultPill = page.locator(`.workflow-collection-pill:has-text("Default")`);
+    await expect(defaultPill).toBeVisible({ timeout: 5000 });
+    await expect(defaultPill.locator(".pill-count")).toHaveText("1");
+
+    const originalCard = page.locator(`.workflow-card`).filter({ has: page.locator('.workflow-card-name', { hasText: /^Deploy Service$/ }) });
+    await expect(originalCard).toBeVisible({ timeout: 5000 });
+
+    // Duplicate workflow via direct card action button
+    const dupBtn = originalCard.locator('button[aria-label="Duplicate workflow"]');
+    await expect(dupBtn).toBeVisible();
+    await dupBtn.click();
+
+    // Verify user remains on the collection grid and both cards are visible
+    const copyCard = page.locator(`.workflow-card`).filter({ has: page.locator('.workflow-card-name', { hasText: /^Deploy Service \(Copy\)$/ }) });
+    await expect(copyCard).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`.workflow-card-name`).filter({ hasText: /^Deploy Service$/ })).toBeVisible();
+    await expect(page.locator(`.workflow-card-name`).filter({ hasText: /^Deploy Service \(Copy\)$/ })).toBeVisible();
+
+    // Verify collection workflow count updated to 2
+    await expect(defaultPill.locator(".pill-count")).toHaveText("2");
+
+    // Duplicate again from the original card to verify (Copy 2) auto-renaming
+    await dupBtn.click();
+
+    const copy2Card = page.locator(`.workflow-card`).filter({ has: page.locator('.workflow-card-name', { hasText: /^Deploy Service \(Copy 2\)$/ }) });
+    await expect(copy2Card).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`.workflow-card-name`).filter({ hasText: /^Deploy Service \(Copy 2\)$/ })).toBeVisible();
+
+    // Verify collection workflow count updated to 3
+    await expect(defaultPill.locator(".pill-count")).toHaveText("3");
+  });
 });
