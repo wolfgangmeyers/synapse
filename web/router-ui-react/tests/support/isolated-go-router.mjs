@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,6 +231,37 @@ export async function startIsolatedGoRouter({ repositoryRoot = REPOSITORY_ROOT, 
   const logPath = join(root, "go-router.jsonl");
   const binaryPath = join(root, "mailbox-router");
   const port = await allocateLoopbackPort();
+  const home = join(root, "managed-home");
+  const piAgentDir = join(home, ".pi", "agent");
+  const sessionRoot = join(home, "sessions");
+  const cwdRoot = join(root, "work");
+  await mkdir(piAgentDir, { recursive: true, mode: 0o700 });
+  await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
+  await mkdir(cwdRoot, { recursive: true, mode: 0o700 });
+  const piPath = join(root, "fake-managed-pi.mjs");
+  const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), "../functional/fixtures");
+  const fakePiSource = resolve(fixturesDir, "fake-managed-pi.mjs");
+  let piContent = await readFile(fakePiSource, "utf8");
+  if (piContent.startsWith("#!/usr/bin/env node")) {
+    piContent = `#!${process.execPath}\n` + piContent.slice("#!/usr/bin/env node\n".length);
+    await writeFile(piPath, piContent, { mode: 0o700 });
+  } else {
+    await copyFile(fakePiSource, piPath);
+    await chmod(piPath, 0o700);
+  }
+  const authPath = resolve(fixturesDir, "fake-provider-auth.mjs");
+  const managedArgs = [
+    "--managed-pi", piPath,
+    "--managed-home", home,
+    "--managed-pi-agent-dir", piAgentDir,
+    "--managed-session-root", sessionRoot,
+    "--managed-manifest", join(repositoryRoot, "router", "contract", "managed-tools-v1.json"),
+    "--managed-pi-subagents", join(resolve(repositoryRoot, ".."), "pi-packages", "packages", "pi-subagents", "src", "index.ts"),
+    "--managed-auth-helper", authPath,
+    "--managed-runtime-root", repositoryRoot,
+    "--managed-cwd-roots", root,
+    "--managed-quiet-recipient", "functional-supervisor",
+  ];
   let processInfo;
   try {
     const configuredBinary = process.env.MECHA_GO_ROUTER_BINARY;
@@ -244,9 +275,7 @@ export async function startIsolatedGoRouter({ repositoryRoot = REPOSITORY_ROOT, 
     }
     processInfo = await spawnRouterProcess({
       command: binaryPath,
-      // Transport tests exercise the ordinary router protocol. Keep managed Pi
-      // off so this fixture does not require its production launch runtime.
-      args: ["--database", databasePath, "--log", logPath, "--host", "127.0.0.1", "--port", String(port), "--managed=false"],
+      args: ["--database", databasePath, "--log", logPath, "--host", "127.0.0.1", "--port", String(port), ...managedArgs],
       cwd: repositoryRoot,
       root,
       expectedPort: port,

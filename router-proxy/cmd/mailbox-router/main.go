@@ -68,7 +68,7 @@ func launchConfiguredEmbeddedRoot(ctx context.Context, options config, manager *
 	if !options.embeddedRoot.Enabled {
 		return nil
 	}
-	if manager == nil || !options.managed.Enabled {
+	if manager == nil {
 		return errors.New("embedded root bootstrap requires managed mode")
 	}
 	root := options.embeddedRoot
@@ -99,8 +99,6 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.codexCredentialPath, "codex-credential-path", "", "explicit private local Codex credential file (managed mode only)")
 	flags.BoolVar(&result.embeddedWorkerDefault, "embedded-worker-default", false, "default bare managed HTTP launches to embedded workers (requires private Codex credential)")
 	flags.BoolVar(&result.testClock, "test-clock", false, "enable deterministic fixed test clock with /v1/test/clock/advance endpoint")
-	var managedEnabled bool
-	flags.BoolVar(&managedEnabled, "managed", true, "enable router-managed Pi launches (set false to preserve legacy-only routing)")
 	flags.BoolVar(&result.embeddedRoot.Enabled, "embedded-root-bootstrap", false, "reserve the explicitly configured embedded root before readiness")
 	flags.StringVar(&result.embeddedRoot.RequestID, "embedded-root-request-id", "", "stable root launch request UUID")
 	flags.StringVar(&result.embeddedRoot.Name, "embedded-root-name", "", "root agent name")
@@ -173,9 +171,6 @@ func parseConfig(args []string) (config, error) {
 	root := result.embeddedRoot
 	rootFieldsPresent := root.RequestID != "" || root.Name != "" || root.Cwd != "" || root.Model.Provider != "" || root.Model.ID != "" || root.InitialInstruction != ""
 	if root.Enabled {
-		if !managedEnabled {
-			return config{}, errors.New("embedded root bootstrap requires managed mode")
-		}
 		provider, modelID := strings.TrimSpace(root.Model.Provider), strings.TrimSpace(root.Model.ID)
 		if (provider == "") != (modelID == "") {
 			return config{}, errors.New("embedded root model provider and ID must be provided together")
@@ -189,13 +184,10 @@ func parseConfig(args []string) (config, error) {
 	} else if rootFieldsPresent {
 		return config{}, errors.New("embedded root fields require --embedded-root-bootstrap=true")
 	}
-	if result.codexCredentialPath != "" && !managedEnabled {
-		return config{}, errors.New("--codex-credential-path requires managed mode")
+	if result.embeddedWorkerDefault && result.codexCredentialPath == "" {
+		return config{}, errors.New("--embedded-worker-default requires --codex-credential-path")
 	}
-	if result.embeddedWorkerDefault && (!managedEnabled || result.codexCredentialPath == "") {
-		return config{}, errors.New("--embedded-worker-default requires managed mode and --codex-credential-path")
-	}
-	result.managed = managed.Config{Enabled: managedEnabled, AllowManagedLaunchRecipeMismatch: allowManagedLaunchRecipeMismatch, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, RouterURL: managedRouterURL, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: true, AllowManagedLaunchRecipeMismatch: allowManagedLaunchRecipeMismatch, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, RouterURL: managedRouterURL, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: true, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
@@ -210,9 +202,6 @@ func embeddedWorkerDefaultEnabled(options config) bool {
 func configureCodexCredentials(ctx context.Context, options config, managerOptions *managed.ManagerOptions) error {
 	if options.codexCredentialPath == "" {
 		return nil
-	}
-	if !options.managed.Enabled {
-		return errors.New("Codex credential path requires managed mode")
 	}
 	credentials, err := store.OpenLocalCodexCredentialStore(options.codexCredentialPath)
 	if err != nil {
@@ -254,7 +243,7 @@ func main() {
 		return
 	}
 	if len(os.Args) == 2 && os.Args[1] == "--help" {
-		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=true|false] [managed launch flags]")
+		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [managed launch flags]")
 		return
 	}
 	options, err := parseConfig(os.Args[1:])
@@ -332,103 +321,99 @@ func main() {
 	managedLogger := managedEventLogger(logWriter, os.Stderr)
 	var managedManager *managed.Manager
 	var providerAuth *managed.ProviderAuthCoordinator
-	if options.managed.Enabled {
-		if err := durable.SetCanonicalQuietRecipient(ctx, options.managed.CanonicalQuietRecipientID); err != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageStoreManifest, err))
-		}
-		manifest, _, manifestErr := managed.ValidateManifestFile(options.managed.ManifestPath, "")
-		if manifestErr != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageStoreManifest, manifestErr))
-		}
-		if err := startupResult(stageStoreManifest, nil); err != nil {
-			log.Fatal(err)
-		}
-		if err := startupEntered(stageHelper); err != nil {
-			log.Fatal(err)
-		}
-		rootExecutor, rootErr := newMailboxRouterRootControlExecutor(options.managed)
-		if rootErr != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, rootErr))
-		}
-		rootHandlers, rootErr := managed.NewOperationalRootControlHandlers(manifest, rootExecutor)
-		if rootErr != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, rootErr))
-		}
-		codexOptions.Attachments = attachmentsStore
-		codexOptions.Store = durable
-		codexOptions.EventSink = managedLogger
-		codexOptions.Config = options.managed
-		codexOptions.Manifest = manifest
-		codexOptions.ProcessFactory = managedProcessFactory()
-		codexOptions.RPCFactory = managedRPCFactory()
-		codexOptions.CatalogSource = managed.StoreCatalogSource{Store: durable}
-		codexOptions.RootControlHandlers = rootHandlers
-		if testClock != nil {
-			codexOptions.Clock = testClock
-		}
-		if codexOptions.GoalContinuationDelay <= 0 {
-			codexOptions.GoalContinuationDelay = 10 * time.Second
-		}
-		if err := managed.LoadCodexModelsStore(options.managed.PiAgentDir); err != nil {
-			log.Printf("ordinary Pi model store unavailable: %v", err)
-		}
-		if err := managed.SyncCustomModelsToAI(ctx, durable); err != nil {
-			log.Printf("custom models sync unavailable: %v", err)
-		}
-		managedManager, err = managed.NewManager(codexOptions)
-		if err != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, err))
-		}
-		if err := configurePrivateStatusProbe(managedManager); err != nil {
+	if err := durable.SetCanonicalQuietRecipient(ctx, options.managed.CanonicalQuietRecipientID); err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageStoreManifest, err))
+	}
+	manifest, _, manifestErr := managed.ValidateManifestFile(options.managed.ManifestPath, "")
+	if manifestErr != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageStoreManifest, manifestErr))
+	}
+	if err := startupResult(stageStoreManifest, nil); err != nil {
+		log.Fatal(err)
+	}
+	if err := startupEntered(stageHelper); err != nil {
+		log.Fatal(err)
+	}
+	rootExecutor, rootErr := newMailboxRouterRootControlExecutor(options.managed)
+	if rootErr != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, rootErr))
+	}
+	rootHandlers, rootErr := managed.NewOperationalRootControlHandlers(manifest, rootExecutor)
+	if rootErr != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, rootErr))
+	}
+	codexOptions.Attachments = attachmentsStore
+	codexOptions.Store = durable
+	codexOptions.EventSink = managedLogger
+	codexOptions.Config = options.managed
+	codexOptions.Manifest = manifest
+	codexOptions.ProcessFactory = managedProcessFactory()
+	codexOptions.RPCFactory = managedRPCFactory()
+	codexOptions.CatalogSource = managed.StoreCatalogSource{Store: durable}
+	codexOptions.RootControlHandlers = rootHandlers
+	if testClock != nil {
+		codexOptions.Clock = testClock
+	}
+	if codexOptions.GoalContinuationDelay <= 0 {
+		codexOptions.GoalContinuationDelay = 10 * time.Second
+	}
+	if err := managed.LoadCodexModelsStore(options.managed.PiAgentDir); err != nil {
+		log.Printf("ordinary Pi model store unavailable: %v", err)
+	}
+	if err := managed.SyncCustomModelsToAI(ctx, durable); err != nil {
+		log.Printf("custom models sync unavailable: %v", err)
+	}
+	managedManager, err = managed.NewManager(codexOptions)
+	if err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, err))
+	}
+	if err := configurePrivateStatusProbe(managedManager); err != nil {
+		_ = managedManager.Close(ctx)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, errors.New("private status probe activation failed")))
+	}
+	nodeExecutable, nodeErr := exec.LookPath("node")
+	if nodeErr != nil || !filepath.IsAbs(nodeExecutable) {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, errors.New("managed provider helper requires an absolute Node executable")))
+	}
+	ordinaryAuth := fixedAuthHelper{config: options.managed, nodeExecutable: nodeExecutable, ownedCodex: codexOptions.CodexCredentialStore != nil}
+	var authHelper managed.ProviderAuthHelper = ordinaryAuth
+	if codexOptions.CodexCredentialStore != nil {
+		codexOptions.CodexCredentialStore.SetProjection(ordinaryAuth.consumeCodexCredential)
+		if err := codexOptions.CodexCredentialStore.SynchronizeProjection(ctx); err != nil {
 			_ = managedManager.Close(ctx)
 			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, errors.New("private status probe activation failed")))
+			log.Fatal(startupResult(stageHelper, errors.New("provider credential synchronization failed")))
 		}
-		nodeExecutable, nodeErr := exec.LookPath("node")
-		if nodeErr != nil || !filepath.IsAbs(nodeExecutable) {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, errors.New("managed provider helper requires an absolute Node executable")))
-		}
-		ordinaryAuth := fixedAuthHelper{config: options.managed, nodeExecutable: nodeExecutable, ownedCodex: codexOptions.CodexCredentialStore != nil}
-		var authHelper managed.ProviderAuthHelper = ordinaryAuth
-		if codexOptions.CodexCredentialStore != nil {
-			codexOptions.CodexCredentialStore.SetProjection(ordinaryAuth.consumeCodexCredential)
-			if err := codexOptions.CodexCredentialStore.SynchronizeProjection(ctx); err != nil {
-				_ = managedManager.Close(ctx)
-				_ = durable.Close()
-				log.Fatal(startupResult(stageHelper, errors.New("provider credential synchronization failed")))
-			}
-			authHelper = managed.CodexBrowserAuth{Ordinary: ordinaryAuth, Credentials: codexOptions.CodexCredentialStore, Client: &http.Client{Timeout: 30 * time.Second}, Manager: managedManager}
-		}
-		providerAuth, err = managed.NewProviderAuthCoordinator(durable, managedManager, authHelper)
-		if err != nil {
-			_, _ = attachmentsStore.Sweep(nil)
-			_ = durable.Close()
-			log.Fatal(startupResult(stageHelper, err))
-		}
-		// Provider settings starts from ordinary Pi's current local auth. This
-		// records only the bounded status/catalog projection; credentials never
-		// enter router storage or logs.
-		if _, err := providerAuth.Snapshot(ctx); err != nil {
-			if err := startupSnapshotUnavailable(); err != nil {
-				log.Fatal(err)
-			}
-			log.Print("managed provider status is unavailable")
-		} else if err := startupResult(stageHelper, nil); err != nil {
+		authHelper = managed.CodexBrowserAuth{Ordinary: ordinaryAuth, Credentials: codexOptions.CodexCredentialStore, Client: &http.Client{Timeout: 30 * time.Second}, Manager: managedManager}
+	}
+	providerAuth, err = managed.NewProviderAuthCoordinator(durable, managedManager, authHelper)
+	if err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
+		log.Fatal(startupResult(stageHelper, err))
+	}
+	// Provider settings starts from ordinary Pi's current local auth. This
+	// records only the bounded status/catalog projection; credentials never
+	// enter router storage or logs.
+	if _, err := providerAuth.Snapshot(ctx); err != nil {
+		if err := startupSnapshotUnavailable(); err != nil {
 			log.Fatal(err)
 		}
-	} else if err := startupResult(stageStoreManifest, nil); err != nil {
+		log.Print("managed provider status is unavailable")
+	} else if err := startupResult(stageHelper, nil); err != nil {
 		log.Fatal(err)
 	}
 	if err := startupEntered(stageListen); err != nil {

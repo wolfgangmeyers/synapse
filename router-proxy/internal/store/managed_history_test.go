@@ -347,3 +347,148 @@ func TestManagedHistoryMessageBoundedTo512Bytes(t *testing.T) {
 	require.Equal(t, entry.Message, page.Entries[0].Message)
 }
 
+func TestManagedHistoryPresentationBoundsThinkingAndCompanionText(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	// 1. When a presentation has Thinking > 5KB and CompanionText > 10KB,
+	// managedHistoryPresentationJSON succeeds and produces JSON <= 2048 bytes.
+	bigThinking := strings.Repeat("Reasoning step through the problem carefully. ", 150) // ~6.7KB > 5KB
+	bigCompanionText := strings.Repeat("Companion text explaining the context and details. ", 250) // ~12.5KB > 10KB
+	require.Greater(t, len(bigThinking), 5000)
+	require.Greater(t, len(bigCompanionText), 10000)
+
+	pres := &ManagedHistoryPresentation{
+		Kind:          "tool",
+		ToolName:      "functions.bash",
+		Outcome:       "success",
+		Summary:       "Ran big command",
+		Thinking:      bigThinking,
+		CompanionText: bigCompanionText,
+	}
+
+	encodedJSON, err := managedHistoryPresentationJSON(pres)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len([]byte(encodedJSON)), 2048)
+	require.NotEmpty(t, encodedJSON)
+
+	// 2. When an entry is recorded as active (outcome: "active"), and then updated
+	// with an oversized presentation (Thinking > 5KB, CompanionText > 10KB, outcome: "success"),
+	// the entry is successfully updated with outcome: "success".
+	eventKey := "tool-run-123"
+	activePres := &ManagedHistoryPresentation{
+		Kind:     "tool",
+		ToolName: "functions.bash",
+		Outcome:  "active",
+		Summary:  "Bash tool executing",
+	}
+
+	entry1, err := durable.RecordManagedCompleteHistoryWithPresentation(
+		ctx,
+		"worker",
+		"managed_control",
+		"info",
+		"Bash running",
+		eventKey,
+		activePres,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "active", entry1.Presentation.Outcome)
+
+	entry2, err := durable.RecordManagedCompleteHistoryWithPresentation(
+		ctx,
+		"worker",
+		"managed_control",
+		"info",
+		"Bash finished",
+		eventKey,
+		pres,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "success", entry2.Presentation.Outcome)
+
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "success", page.Entries[0].Presentation.Outcome)
+	require.Equal(t, "Bash finished", page.Entries[0].Message)
+}
+
+func TestManagedHistoryFallbackPresentationOnValidationFailure(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	// 1. Initial tool call in active state
+	eventKey := "tool-run-fallback-456"
+	activePres := &ManagedHistoryPresentation{
+		Kind:     "tool",
+		ToolName: "functions.bash",
+		Outcome:  "active",
+		Summary:  "Executing bash tool",
+	}
+
+	entry1, err := durable.RecordManagedCompleteHistoryWithPresentation(
+		ctx,
+		"worker",
+		"managed_tool",
+		"info",
+		"Ran bash",
+		eventKey,
+		activePres,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "active", entry1.Presentation.Outcome)
+
+	// 2. An invalid presentation with illegal sensitive characters in Summary
+	invalidPres := &ManagedHistoryPresentation{
+		Kind:     "tool",
+		ToolName: "functions.bash",
+		Outcome:  "failed",
+		Summary:  "token=sensitive-secret-that-fails-validation",
+	}
+
+	// Attempting to record with invalidPres fails validation
+	_, err = durable.RecordManagedCompleteHistoryWithPresentation(
+		ctx,
+		"worker",
+		"managed_tool",
+		"error",
+		"Bash failed",
+		eventKey,
+		invalidPres,
+	)
+	require.Error(t, err)
+
+	// 3. Clean minimal fallback presentation successfully transitions the active row
+	// to a terminal failed state.
+	fallbackPres := &ManagedHistoryPresentation{
+		Kind:     "tool",
+		ToolName: "functions.bash",
+		Outcome:  "failed",
+		Summary:  "The operation could not be completed.",
+	}
+
+	entry2, err := durable.RecordManagedCompleteHistoryWithPresentation(
+		ctx,
+		"worker",
+		"managed_tool",
+		"error",
+		"Bash failed",
+		eventKey,
+		fallbackPres,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "failed", entry2.Presentation.Outcome)
+	require.Equal(t, "The operation could not be completed.", entry2.Presentation.Summary)
+
+	// Verify terminal state in complete history
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "failed", page.Entries[0].Presentation.Outcome)
+	require.Equal(t, "Bash failed", page.Entries[0].Message)
+	require.Equal(t, "The operation could not be completed.", page.Entries[0].Presentation.Summary)
+}
+
+
+

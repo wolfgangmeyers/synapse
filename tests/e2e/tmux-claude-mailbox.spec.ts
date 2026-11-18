@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, chmodSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -11,7 +11,7 @@ import { connect as netConnect } from 'node:net';
 // The pane is a deterministic raw-input stand-in for Claude, not a mock sidecar.
 test('router-selected tmux session delivers and sidecar exits when window disappears', async () => {
   test.setTimeout(120000);
-  const root = mkdtempSync(join(tmpdir(), 'mw-tmux-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'mw-tmux-')));
   const socket = join(root, 'sock');
   const bytes = join(root, 'pane');
   const workDir = join(root, "work dir ' quoted");
@@ -31,7 +31,31 @@ test('router-selected tmux session delivers and sidecar exits when window disapp
     expect(tmux('set-option','-t','mecha-private','default-command',`env PATH=${root}:${process.env.PATH} bash --noprofile --norc`).status).toBe(0);
     const port = await new Promise<number>((resolvePort, reject) => { const server = createServer(); server.once('error', reject); server.listen(0,'127.0.0.1',()=>{const address=server.address(); if (!address || typeof address === 'string') return reject(new Error('address')); const p=address.port; server.close(()=>resolvePort(p));}); });
     const base = `http://127.0.0.1:${port}`;
-    const router = spawn(binary, ['--managed=false','--host=127.0.0.1',`--port=${port}`,`--database=${root}/router.db`,`--log=${root}/router.log`], {env:{...process.env, HOME:root, TMUX:`${socket},0,0`}, stdio:'ignore'}); children.push(router);
+    const repoRoot = resolve('.');
+    const managedHome = join(root, 'managed-home');
+    const piAgentDir = join(managedHome, '.pi', 'agent');
+    const sessionRoot = join(managedHome, 'sessions');
+    mkdirSync(piAgentDir, { recursive: true, mode: 0o700 });
+    mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
+    const piPath = join(root, 'fake-pi.mjs');
+    writeFileSync(piPath, `#!${process.execPath}\nprocess.exit(1);\n`, { mode: 0o700 });
+    const routerArgs = [
+      '--host=127.0.0.1',
+      `--port=${port}`,
+      `--database=${root}/router.db`,
+      `--log=${root}/router.log`,
+      '--managed-pi', piPath,
+      '--managed-home', managedHome,
+      '--managed-pi-agent-dir', piAgentDir,
+      '--managed-session-root', sessionRoot,
+      '--managed-manifest', join(repoRoot, 'router', 'contract', 'managed-tools-v1.json'),
+      '--managed-pi-subagents', resolve(repoRoot, '../pi-packages/packages/pi-subagents/src/index.ts'),
+      '--managed-auth-helper', resolve(repoRoot, 'web/router-ui-react/tests/functional/fixtures/fake-provider-auth.mjs'),
+      '--managed-runtime-root', repoRoot,
+      '--managed-cwd-roots', root,
+      '--managed-quiet-recipient', 'functional-supervisor',
+    ];
+    const router = spawn(binary, routerArgs, {env:{...process.env, HOME:root, TMUX:`${socket},0,0`}, stdio:'ignore'}); children.push(router);
     await expect.poll(async()=>{try { return (await fetch(`${base}/v1/health`)).status; } catch {return 0;}}, {timeout:15000}).toBe(200);
     const inventory = await (await fetch(`${base}/v1/tmux/windows`)).json();
     expect(inventory.session).toBe('mecha-private');

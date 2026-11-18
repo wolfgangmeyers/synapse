@@ -126,16 +126,75 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	return value.Error == nil || (utf8.ValidString(value.Error.Code) && len([]byte(value.Error.Code)) > 0 && len([]byte(value.Error.Code)) <= 128 && value.Error.DetailAvailable == false)
 }
 
+// boundUTF8String truncates s to at most maxBytes while ensuring the boundary
+// steps backwards to a valid UTF-8 rune start, avoiding corrupted multi-byte runes.
+// This prevents producing invalid UTF-8 sequences when strings are cut at byte boundaries.
+func boundUTF8String(s string, maxBytes int) string {
+	if len([]byte(s)) <= maxBytes {
+		return s
+	}
+	// Step backwards from maxBytes until we hit a valid UTF-8 rune start
+	limit := maxBytes
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
+}
+
+// boundManagedHistoryPresentation bounds CompanionText <= 768 and Thinking <= 512
+// so the serialized presentation JSON stays well within the 2048-byte limit.
+// By proactively clipping these optional diagnostic fields before JSON marshaling,
+// presentation records preserve their core metadata without exceeding the database column limit.
+func boundManagedHistoryPresentation(p *ManagedHistoryPresentation) *ManagedHistoryPresentation {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	if len([]byte(cp.CompanionText)) > 768 {
+		cp.CompanionText = boundUTF8String(cp.CompanionText, 768)
+	}
+	if len([]byte(cp.Thinking)) > 512 {
+		cp.Thinking = boundUTF8String(cp.Thinking, 512)
+	}
+	return &cp
+}
+
 func managedHistoryPresentationJSON(value *ManagedHistoryPresentation) (string, error) {
 	if value == nil {
 		return "", nil
 	}
+	value = boundManagedHistoryPresentation(value)
 	if !validManagedHistoryPresentation(value) {
 		return "", errors.New("managed history presentation is invalid")
 	}
 	encoded, err := json.Marshal(value)
-	if err != nil || len(encoded) < 2 || len(encoded) > 2048 {
+	if err != nil {
 		return "", errors.New("managed history presentation is invalid")
+	}
+	if len(encoded) < 2 {
+		return "", errors.New("managed history presentation is invalid")
+	}
+	if len(encoded) > 2048 {
+		// If size limit is exceeded due to thinking/companion text, strip them
+		// while retaining the valid core fields.
+		cp := *value
+		cp.Thinking = ""
+		cp.CompanionText = ""
+		if len([]byte(cp.Summary)) > 512 {
+			cp.Summary = boundUTF8String(cp.Summary, 512)
+		}
+		if !managedHistoryText(cp.Summary, 512, true) {
+			if cp.Outcome == "failed" || cp.Outcome == "error" {
+				cp.Summary = "The operation could not be completed."
+			} else {
+				cp.Summary = "Completed"
+			}
+		}
+		minEncoded, minErr := json.Marshal(&cp)
+		if minErr != nil || len(minEncoded) < 2 || len(minEncoded) > 2048 {
+			return "", errors.New("managed history presentation is invalid")
+		}
+		return string(minEncoded), nil
 	}
 	return string(encoded), nil
 }
@@ -418,6 +477,13 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 	detail := managedHistoryDetails{}
 	if len(details) > 0 {
 		detail = details[0]
+	}
+	if presentationJSON == "" && presentation != nil {
+		var err error
+		presentationJSON, err = managedHistoryPresentationJSON(presentation)
+		if err != nil {
+			return ManagedHistoryEntry{}, err
+		}
 	}
 	var entry ManagedHistoryEntry
 	if eventKey != "" {
