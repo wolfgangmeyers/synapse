@@ -1543,13 +1543,30 @@ func TestGoogleAuth_LargeTranscriptPrunedRetainsAllUserMessages(t *testing.T) {
 		require.NotEqual(t, prevRole, currRole, "consecutive turns must alternate role")
 	}
 
-	// 4. Verify thought_signature on any functionCall
+	// 4. Verify thought_signature on any functionCall (legacy model / default)
 	for _, turn := range contents {
 		if turn["role"] == "model" {
 			for _, p := range turn["parts"].([]any) {
 				if pMap, ok := p.(map[string]any); ok {
 					if _, ok := pMap["functionCall"]; ok {
 						require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+					}
+				}
+			}
+		}
+	}
+
+	// 5. Verify Gemini 4 model omits dummy thought signatures
+	g4Model := &ai.Model{ID: "gemini-4-hydrogen", ContextWindow: 1048576}
+	contentsG4 := convertMessagesToGoogleContents(messages, g4Model)
+	for _, turn := range contentsG4 {
+		if turn["role"] == "model" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if _, ok := pMap["functionCall"]; ok {
+						require.NotEqual(t, "skip_thought_signature_validator", pMap["thought_signature"])
+						require.NotContains(t, pMap, "thought_signature")
+						require.NotContains(t, pMap, "thoughtSignature")
 					}
 				}
 			}
@@ -1633,13 +1650,28 @@ func TestGoogleAuth_WorkflowsLiveEntriesPruning(t *testing.T) {
 		require.NotEqual(t, prevRole, currRole, "consecutive turns must alternate role")
 	}
 
-	// Verify all functionCalls have thought_signature
+	// Verify all functionCalls have thought_signature (legacy model / default)
 	for _, turn := range contents {
 		if turn["role"] == "model" {
 			for _, p := range turn["parts"].([]any) {
 				if pMap, ok := p.(map[string]any); ok {
 					if _, ok := pMap["functionCall"]; ok {
 						require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+					}
+				}
+			}
+		}
+	}
+
+	// Verify Gemini 4 model omits dummy thought signatures
+	contentsG4 := convertMessagesToGoogleContents(messages, &ai.Model{ID: "gemini-4-hydrogen", ContextWindow: 1048576})
+	for _, turn := range contentsG4 {
+		if turn["role"] == "model" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if _, ok := pMap["functionCall"]; ok {
+						require.NotContains(t, pMap, "thought_signature")
+						require.NotContains(t, pMap, "thoughtSignature")
 					}
 				}
 			}
@@ -1896,4 +1928,351 @@ func TestAntigravityRemovalRejectsModel(t *testing.T) {
 	_, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"})
 	require.Error(t, err)
 	require.False(t, validProviderAuthProvider("antigravity"))
+}
+
+func TestGoogleAuth_Gemini4ThoughtSignatureReplay(t *testing.T) {
+	gemini4Model := &ai.Model{ID: "gemini-4-hydrogen", ContextWindow: 1048576}
+	legacyModel := &ai.Model{ID: "gemini-2.5-flash", ContextWindow: 1048576}
+
+	t.Run("Gemini 4 preserves authentic thought signature", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:               "call_123",
+						Name:             "bash",
+						Arguments:        map[string]any{"command": "echo hi"},
+						ThoughtSignature: "sig_crypto_valid_123",
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_123",
+				ToolName:   "bash",
+				Content:    ai.ContentList{ai.TextContent{Text: "hi"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		require.Len(t, contents, 3)
+		require.Equal(t, "model", contents[1]["role"])
+
+		modelParts := contents[1]["parts"].([]any)
+		require.Len(t, modelParts, 1)
+		pMap := modelParts[0].(map[string]any)
+		require.Contains(t, pMap, "functionCall")
+		require.Equal(t, "sig_crypto_valid_123", pMap["thoughtSignature"])
+		require.Equal(t, "sig_crypto_valid_123", pMap["thought_signature"])
+	})
+
+	t.Run("Gemini 4 omits dummy signature when authentic signature is empty", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:        "call_456",
+						Name:      "read",
+						Arguments: map[string]any{"path": "foo.txt"},
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_456",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "contents"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		require.Len(t, contents, 3)
+		require.Equal(t, "model", contents[1]["role"])
+
+		modelParts := contents[1]["parts"].([]any)
+		pMap := modelParts[0].(map[string]any)
+		require.Contains(t, pMap, "functionCall")
+		require.NotContains(t, pMap, "thoughtSignature")
+		require.NotContains(t, pMap, "thought_signature")
+	})
+
+	t.Run("Gemini 4 omits dummy signature for pointer tool call with empty signature", func(t *testing.T) {
+		tc := &ai.ToolCall{
+			ID:        "call_ptr",
+			Name:      "write",
+			Arguments: map[string]any{"path": "bar.txt"},
+		}
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "write file"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{tc},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_ptr",
+				ToolName:   "write",
+				Content:    ai.ContentList{ai.TextContent{Text: "ok"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		require.Len(t, contents, 3)
+		require.Equal(t, "model", contents[1]["role"])
+
+		modelParts := contents[1]["parts"].([]any)
+		pMap := modelParts[0].(map[string]any)
+		require.Contains(t, pMap, "functionCall")
+		require.NotContains(t, pMap, "thoughtSignature")
+		require.NotContains(t, pMap, "thought_signature")
+	})
+
+	t.Run("Gemini 4 omits dummy signature on backfilled orphaned tool result", func(t *testing.T) {
+		// No preceding assistant turn with functionCall
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "first question"}}},
+			ai.ToolResultMessage{
+				ToolCallID: "call_orphaned",
+				ToolName:   "bash",
+				Content:    ai.ContentList{ai.TextContent{Text: "orphaned output"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		// Should have synthesized preceding model turn for the tool result
+		require.GreaterOrEqual(t, len(contents), 2)
+		var modelTurn map[string]any
+		for _, turn := range contents {
+			if turn["role"] == "model" {
+				modelTurn = turn
+				break
+			}
+		}
+		require.NotNil(t, modelTurn)
+		parts := modelTurn["parts"].([]any)
+		require.NotEmpty(t, parts)
+		fcPart := parts[0].(map[string]any)
+		require.Contains(t, fcPart, "functionCall")
+		require.NotContains(t, fcPart, "thoughtSignature")
+		require.NotContains(t, fcPart, "thought_signature")
+	})
+
+	t.Run("Legacy model retains skip_thought_signature_validator for backward compatibility", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:        "call_legacy",
+						Name:      "read",
+						Arguments: map[string]any{"path": "legacy.txt"},
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_legacy",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "contents"}},
+			},
+		}
+
+		// When called with legacy model
+		contents := convertMessagesToGoogleContents(msgs, legacyModel)
+		require.Len(t, contents, 3)
+		modelParts := contents[1]["parts"].([]any)
+		pMap := modelParts[0].(map[string]any)
+		require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+		require.Equal(t, "skip_thought_signature_validator", pMap["thoughtSignature"])
+
+		// When called without model (default legacy behavior)
+		contentsDefault := convertMessagesToGoogleContents(msgs)
+		require.Len(t, contentsDefault, 3)
+		modelPartsDef := contentsDefault[1]["parts"].([]any)
+		pMapDef := modelPartsDef[0].(map[string]any)
+		require.Equal(t, "skip_thought_signature_validator", pMapDef["thought_signature"])
+		require.Equal(t, "skip_thought_signature_validator", pMapDef["thoughtSignature"])
+	})
+
+	t.Run("Gemini 4 model ID passed as string argument (gemini-4-hydrogen and google-vertex/gemini-4-argon)", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:        "call_str_id",
+						Name:      "bash",
+						Arguments: map[string]any{"command": "uptime"},
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_str_id",
+				ToolName:   "bash",
+				Content:    ai.ContentList{ai.TextContent{Text: "10:00 up 1 day"}},
+			},
+		}
+
+		for _, modelStr := range []string{"gemini-4-hydrogen", "google-vertex/gemini-4-argon"} {
+			contents := convertMessagesToGoogleContents(msgs, modelStr)
+			require.Len(t, contents, 3)
+			require.Equal(t, "model", contents[1]["role"])
+			modelParts := contents[1]["parts"].([]any)
+			require.NotEmpty(t, modelParts)
+			fcPart := modelParts[0].(map[string]any)
+			require.Contains(t, fcPart, "functionCall")
+			require.NotContains(t, fcPart, "thoughtSignature", "model string %s must omit thoughtSignature", modelStr)
+			require.NotContains(t, fcPart, "thought_signature", "model string %s must omit thought_signature", modelStr)
+		}
+	})
+
+	t.Run("Empty assistant turn retention under Gemini 4 retains empty response without phantom dummy signature", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "First prompt"}}},
+			ai.AssistantMessage{Content: ai.ContentList{}},
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Follow-up reminder"}}},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		require.Len(t, contents, 3)
+		require.Equal(t, "user", contents[0]["role"])
+		require.Equal(t, "model", contents[1]["role"])
+		require.Equal(t, "user", contents[2]["role"])
+
+		modelParts := contents[1]["parts"].([]any)
+		require.Len(t, modelParts, 1)
+		part := modelParts[0].(map[string]any)
+		require.Equal(t, "(empty response)", part["text"])
+		require.NotContains(t, part, "thoughtSignature")
+		require.NotContains(t, part, "thought_signature")
+	})
+
+	t.Run("Multi-turn sequence interleaving tool calls with thoughtSignature and empty assistant response turns", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Step 1: Check status"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:               "call_multi_1",
+						Name:             "bash",
+						Arguments:        map[string]any{"command": "ps aux"},
+						ThoughtSignature: "sig_multi_turn_1",
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_multi_1",
+				ToolName:   "bash",
+				Content:    ai.ContentList{ai.TextContent{Text: "PID 1 init"}},
+			},
+			// Interleaved empty assistant turn
+			ai.AssistantMessage{Content: ai.ContentList{}},
+			// Follow-up user notification
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Step 2: Run second tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:               "call_multi_2",
+						Name:             "read",
+						Arguments:        map[string]any{"path": "status.txt"},
+						ThoughtSignature: "sig_multi_turn_2",
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_multi_2",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "OK"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		// Expected turns:
+		// Turn 0: user (Step 1)
+		// Turn 1: model (functionCall: bash, sig_multi_turn_1)
+		// Turn 2: user (functionResponse: bash)
+		// Turn 3: model ((empty response))
+		// Turn 4: user (Step 2)
+		// Turn 5: model (functionCall: read, sig_multi_turn_2)
+		// Turn 6: user (functionResponse: read)
+		require.Len(t, contents, 7)
+
+		// Verify roles alternate
+		for i := 0; i < len(contents); i++ {
+			expectedRole := "user"
+			if i%2 == 1 {
+				expectedRole = "model"
+			}
+			require.Equal(t, expectedRole, contents[i]["role"], "turn %d role mismatch", i)
+		}
+
+		// Turn 1
+		turn1Parts := contents[1]["parts"].([]any)
+		require.Len(t, turn1Parts, 1)
+		tc1Map := turn1Parts[0].(map[string]any)
+		require.Equal(t, "sig_multi_turn_1", tc1Map["thoughtSignature"])
+		require.Equal(t, "sig_multi_turn_1", tc1Map["thought_signature"])
+
+		// Turn 3 (empty assistant response turn)
+		turn3Parts := contents[3]["parts"].([]any)
+		require.Len(t, turn3Parts, 1)
+		emptyMap := turn3Parts[0].(map[string]any)
+		require.Equal(t, "(empty response)", emptyMap["text"])
+		require.NotContains(t, emptyMap, "thoughtSignature")
+		require.NotContains(t, emptyMap, "thought_signature")
+
+		// Turn 5
+		turn5Parts := contents[5]["parts"].([]any)
+		require.Len(t, turn5Parts, 1)
+		tc2Map := turn5Parts[0].(map[string]any)
+		require.Equal(t, "sig_multi_turn_2", tc2Map["thoughtSignature"])
+		require.Equal(t, "sig_multi_turn_2", tc2Map["thought_signature"])
+	})
+
+	t.Run("Backfill branch where preceding model turn exists with fewer function calls than responses", func(t *testing.T) {
+		// Model turn had 1 call to "read", but 2 tool results for "read" were returned.
+		// convertMessagesToGoogleContents executes the branch:
+		// if precedingModelTurn != nil && existingResponses+1 > existingCalls { ... }
+		// Verifying that for Gemini 4, no dummy signature is added to the backfilled functionCall part.
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Read two files"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:               "call_first_read",
+						Name:             "read",
+						Arguments:        map[string]any{"path": "file1.txt"},
+						ThoughtSignature: "sig_first_read",
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_first_read",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "file 1 content"}},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_extra_read",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "file 2 content"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, gemini4Model)
+		require.GreaterOrEqual(t, len(contents), 2)
+		require.Equal(t, "model", contents[1]["role"])
+
+		modelParts := contents[1]["parts"].([]any)
+		// Should have original functionCall plus backfilled functionCall
+		require.Len(t, modelParts, 2)
+
+		// First call retains authentic signature
+		p1 := modelParts[0].(map[string]any)
+		require.Equal(t, "sig_first_read", p1["thoughtSignature"])
+
+		// Backfilled call must NOT have dummy signature
+		p2 := modelParts[1].(map[string]any)
+		fc2, ok := p2["functionCall"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "read", fc2["name"])
+		require.NotContains(t, p2, "thoughtSignature")
+		require.NotContains(t, p2, "thought_signature")
+	})
 }

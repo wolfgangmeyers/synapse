@@ -14,7 +14,7 @@ export const selections = [
   { provider: "google-vertex", id: "gemini-3.8-flash" },
   { provider: "openai-codex", id: "gpt-6.1-terra" },
 ];
-type Reply = { tool: string; args: object } | { answer: string };
+type Reply = { tool: string; args: object; thoughtSignature?: string } | { answer: string };
 export async function providerFixture(signedOutGoogle = false) {
   const repo = resolve(import.meta.dirname, "../..");
   const root = await mkdtemp(join(tmpdir(), "agr-e2e-"));
@@ -50,7 +50,11 @@ export async function providerFixture(signedOutGoogle = false) {
       if (!reply) { violations.push("unqueued provider request"); res.writeHead(400).end(); return; }
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       if (!codex) {
-        const part = "tool" in reply ? { functionCall: { name: reply.tool, args: reply.args } } : { text: reply.answer };
+        const part: Record<string, any> = "tool" in reply ? { functionCall: { name: reply.tool, args: reply.args } } : { text: reply.answer };
+        if ("tool" in reply && reply.thoughtSignature) {
+          part.thoughtSignature = reply.thoughtSignature;
+          part.thought_signature = reply.thoughtSignature;
+        }
         res.end(sse([{ candidates: [{ content: { role: "model", parts: [part] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 8 } }])); return;
       }
       const id = `agr_${history.length}`;

@@ -28,7 +28,7 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-PROVIDERS-ANTIGRAVITY-REMOVAL-001` | Remove Antigravity; preserve Gemini API-key, Vertex and Codex | `Settings` | [`antigravity-removal.spec.md`](./antigravity-removal.spec.md) | `tests/e2e/antigravity-removal.spec.ts` (planned) | `Draft` |
-| `SPEC-PROVIDERS-GOOGLE-GEMINI-4-001` | Add Gemini 4 models (argon, carbon, hydrogen) to Google & Vertex providers | `Settings` | [`google-gemini-4-models.spec.md`](./google-gemini-4-models.spec.md) | `router-proxy/internal/managed/embedded_vertex_test.go`, `auth-helper/auth-helper.test.mjs` | `Active` |
+| `SPEC-PROVIDERS-GOOGLE-GEMINI-4-001` | Add Gemini 4 models (argon, carbon, hydrogen) to Google & Vertex providers and multi-turn thought signature replay | `Settings` | [`google-gemini-4-models.spec.md`](./google-gemini-4-models.spec.md) | `tests/e2e/gemini-4-multi-turn.spec.ts`, `router-proxy/internal/managed/embedded_vertex_test.go`, `router-proxy/internal/managed/embedded_google_stream_parser_test.go`, `router-proxy/internal/managed/embedded_google_auth_test.go`, `auth-helper/auth-helper.test.mjs` | `Active` |
 | `SPEC-MANAGED-RESTART-ALL-REMOVAL-001` | Remove managed Restart All; preserve individual restart | `Managed Agents` | [`restart-all-removal.spec.md`](./restart-all-removal.spec.md) | `tests/e2e/individual-restart.spec.ts` | `Draft` |
 
 ## Agent Lifecycle & Execution Specifications

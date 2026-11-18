@@ -326,9 +326,14 @@ func collectPruned(messages []ai.Message, omitted map[int]bool) []ai.Message {
 	return result
 }
 
-func parseConvertOptions(args []any) (int, map[string]string) {
+func isGemini4Model(modelID string) bool {
+	return strings.Contains(modelID, "gemini-4")
+}
+
+func parseConvertOptions(args []any) (int, map[string]string, bool) {
 	contextWindow := 1048576 // default to 1M (Gemini standard)
 	droppedToolCalls := make(map[string]string)
+	isGemini4 := false
 
 	for _, arg := range args {
 		switch v := arg.(type) {
@@ -336,9 +341,18 @@ func parseConvertOptions(args []any) (int, map[string]string) {
 			if v > 0 {
 				contextWindow = v
 			}
+		case string:
+			if isGemini4Model(v) {
+				isGemini4 = true
+			}
 		case *ai.Model:
-			if v != nil && v.ContextWindow > 0 {
-				contextWindow = v.ContextWindow
+			if v != nil {
+				if v.ContextWindow > 0 {
+					contextWindow = v.ContextWindow
+				}
+				if isGemini4Model(v.ID) {
+					isGemini4 = true
+				}
 			}
 		case map[string]string:
 			if v != nil {
@@ -348,7 +362,7 @@ func parseConvertOptions(args []any) (int, map[string]string) {
 			}
 		}
 	}
-	return contextWindow, droppedToolCalls
+	return contextWindow, droppedToolCalls, isGemini4
 }
 
 func pruneTranscriptMessages(messages []ai.Message, targetTokens int) []ai.Message {
@@ -525,7 +539,7 @@ func partsHaveText(parts []any) bool {
 }
 
 func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[string]any {
-	contextWindow, droppedToolCalls := parseConvertOptions(args)
+	contextWindow, droppedToolCalls, isGemini4 := parseConvertOptions(args)
 	triggerTokens := contextWindow * 80 / 100
 	targetTokens := contextWindow * 50 / 100
 
@@ -625,28 +639,32 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 					}
 				}
 				if existingResponses+1 > existingCalls {
-					precedingModelTurn["parts"] = append(precedingModelTurn["parts"].([]any), map[string]any{
+					part := map[string]any{
 						"functionCall": map[string]any{
 							"name": toolName,
 							"args": map[string]any{},
 						},
-						"thought_signature": "skip_thought_signature_validator",
-						"thoughtSignature":  "skip_thought_signature_validator",
-					})
+					}
+					if !isGemini4 {
+						part["thought_signature"] = "skip_thought_signature_validator"
+						part["thoughtSignature"] = "skip_thought_signature_validator"
+					}
+					precedingModelTurn["parts"] = append(precedingModelTurn["parts"].([]any), part)
 				}
 			} else if len(rawContents) > 0 {
+				part := map[string]any{
+					"functionCall": map[string]any{
+						"name": toolName,
+						"args": map[string]any{},
+					},
+				}
+				if !isGemini4 {
+					part["thought_signature"] = "skip_thought_signature_validator"
+					part["thoughtSignature"] = "skip_thought_signature_validator"
+				}
 				precedingModelTurn = map[string]any{
 					"role": "model",
-					"parts": []any{
-						map[string]any{
-							"functionCall": map[string]any{
-								"name": toolName,
-								"args": map[string]any{},
-							},
-							"thought_signature": "skip_thought_signature_validator",
-							"thoughtSignature":  "skip_thought_signature_validator",
-						},
-					},
+					"parts": []any{part},
 				}
 				rawContents = append(rawContents, precedingModelTurn)
 			}
@@ -771,14 +789,20 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						if args == nil {
 							args = map[string]any{}
 						}
-						parts = append(parts, map[string]any{
+						partMap := map[string]any{
 							"functionCall": map[string]any{
 								"name": call.Name,
 								"args": args,
 							},
-							"thought_signature": "skip_thought_signature_validator",
-							"thoughtSignature":  "skip_thought_signature_validator",
-						})
+						}
+						if call.ThoughtSignature != "" {
+							partMap["thoughtSignature"] = call.ThoughtSignature
+							partMap["thought_signature"] = call.ThoughtSignature
+						} else if !isGemini4 {
+							partMap["thought_signature"] = "skip_thought_signature_validator"
+							partMap["thoughtSignature"] = "skip_thought_signature_validator"
+						}
+						parts = append(parts, partMap)
 					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
 						callID := call.ID
 						if callID == "" {
@@ -800,14 +824,20 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						if args == nil {
 							args = map[string]any{}
 						}
-						parts = append(parts, map[string]any{
+						partMap := map[string]any{
 							"functionCall": map[string]any{
 								"name": call.Name,
 								"args": args,
 							},
-							"thought_signature": "skip_thought_signature_validator",
-							"thoughtSignature":  "skip_thought_signature_validator",
-						})
+						}
+						if call.ThoughtSignature != "" {
+							partMap["thoughtSignature"] = call.ThoughtSignature
+							partMap["thought_signature"] = call.ThoughtSignature
+						} else if !isGemini4 {
+							partMap["thought_signature"] = "skip_thought_signature_validator"
+							partMap["thoughtSignature"] = "skip_thought_signature_validator"
+						}
+						parts = append(parts, partMap)
 					}
 				}
 				// If all text parts were stripped (e.g. only simulated observations or empty whitespace),
