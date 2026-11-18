@@ -96,6 +96,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-TOOL-PRESENTATION-RESILIENCE-001` | Tool Presentation Size Limit Resilience | `AgentManagement` | [`tool-presentation-resilience.spec.md`](./tool-presentation-resilience.spec.md) | `tests/e2e/tool-presentation-resilience.spec.ts` | `Active` |
 | `SPEC-WORKFLOWS-003` | Structured Workflow Schedules & Test Clock | `Workflows` | [`SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md`](./SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
 | `SPEC-WORKFLOW-COLLECTIONS-001` | Multiple Workflow Collections with Per-Collection Git Sync, Move, and Copy | `Workflows` | [`workflow-collections.spec.md`](./workflow-collections.spec.md) | `tests/e2e/workflow-collections.spec.ts` | `Active` |
+| `SPEC-WORKFLOWS-CRASH-NUDGE-001` | Workflow Crash Nudge Recovery & Stopped Worker Continuations | `Workflows` | [`workflow-crash-nudge-recovery.spec.md`](./workflow-crash-nudge-recovery.spec.md) | `tests/e2e/workflow-stopped-worker-nudge.spec.ts` | `Active` |
 
 ---
 
