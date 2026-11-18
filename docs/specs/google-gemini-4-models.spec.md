@@ -49,6 +49,20 @@ Previous behavior had several limitations:
 - **When** the operational event is recorded to `managed_complete_history`
 - **Then** the message text is safely truncated with ellipsis to 512 bytes so the transaction succeeds and the full error remains accessible in details/logs.
 
+### Scenario 6: Authentic Thought Signature Replay in Multi-Turn Tool Interaction
+- **Given** a managed agent interacting with a Gemini 4 model (`gemini-4-hydrogen`, `gemini-4-argon`, or `gemini-4-carbon`).
+- **When** the upstream Google/Vertex SSE stream returns tool calls accompanied by part-level `thoughtSignature` (or `thought_signature`).
+- **Then** `scanGeminiSSEStream` populates `ai.ToolCall.ThoughtSignature`.
+- **When** subsequent turns replay historical messages via `convertMessagesToGoogleContents`.
+- **Then** the serialized model turn includes the authentic `thoughtSignature` in the function call part.
+
+### Scenario 7: Omission of Dummy Signatures for Gemini 4 on Interrupted and Backfilled Tool Calls
+- **Given** a transcript being converted for a Gemini 4 model (such as `gemini-4-hydrogen`, `gemini-4-argon`, or `gemini-4-carbon`).
+- **When** historical tool calls lack an authentic thought signature (empty or undefined), or when missing function calls are synthesized/backfilled for orphaned or extra tool results.
+- **Then** `convertMessagesToGoogleContents` omits `thought_signature` and `thoughtSignature` entirely (both properties undefined/absent on the serialized function call part) rather than injecting `"skip_thought_signature_validator"`.
+- **And** over the wire in HTTP payloads to Google and Vertex AI endpoints, no dummy signature strings appear in function call objects.
+- **And** for legacy non-Gemini-4 models, `"skip_thought_signature_validator"` is retained for backward compatibility.
+
 ---
 
 ## 3. Verification & Acceptance Criteria
@@ -58,4 +72,8 @@ Previous behavior had several limitations:
 - [x] Unit tests verify thinking level configuration emits `"thinkingLevel": "LOW"` for Gemini 4 models when reasoning is off.
 - [x] Unit tests verify `sanitizeGeminiParameters` converts `["<type>", "null"]` to singular type with `nullable: true`.
 - [x] Unit tests verify `managed_complete_history` bounds messages > 512 bytes.
+- [x] Unit tests verify `scanGeminiSSEStream` captures part-level `thoughtSignature` / `thought_signature` into `ai.ToolCall.ThoughtSignature`.
+- [x] Unit tests verify `convertMessagesToGoogleContents` preserves authentic thought signatures for Gemini 4 models and omits dummy signatures on missing/backfilled/interrupted calls.
+- [x] Unit tests verify backward compatibility for legacy non-Gemini-4 models preserving `"skip_thought_signature_validator"`.
+- [x] E2E Playwright tests (`tests/e2e/gemini-4-multi-turn.spec.ts`) verify multi-turn chaining across multiple tool calls with distinct signatures and confirm over-the-wire omission of dummy signatures for Gemini 4 on tool calls without authentic signatures.
 - [x] Live end-to-end multi-turn verification on an isolated router with Vertex AI `gemini-4-hydrogen`.

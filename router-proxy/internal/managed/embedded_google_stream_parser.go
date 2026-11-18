@@ -38,9 +38,11 @@ func scanGeminiSSEStream(r io.Reader, idGen func(string) string, stream *ai.Assi
 		Content struct {
 			Role  string `json:"role"`
 			Parts []struct {
-				Text         string `json:"text"`
-				Thought      bool   `json:"thought"`
-				FunctionCall *struct {
+				Text                  string `json:"text"`
+				Thought               bool   `json:"thought"`
+				ThoughtSignature      string `json:"thoughtSignature"`
+				ThoughtSignatureSnake string `json:"thought_signature"`
+				FunctionCall          *struct {
 					Name string         `json:"name"`
 					Args map[string]any `json:"args"`
 				} `json:"functionCall"`
@@ -166,10 +168,15 @@ func scanGeminiSSEStream(r io.Reader, idGen func(string) string, stream *ai.Assi
 						currentBlock = nil
 					}
 					callID := idGen(part.FunctionCall.Name)
+					sig := part.ThoughtSignature
+					if sig == "" {
+						sig = part.ThoughtSignatureSnake
+					}
 					tc := ai.ToolCall{
-						ID:        callID,
-						Name:      part.FunctionCall.Name,
-						Arguments: part.FunctionCall.Args,
+						ID:               callID,
+						Name:             part.FunctionCall.Name,
+						Arguments:        part.FunctionCall.Args,
+						ThoughtSignature: sig,
 					}
 					accumulatedToolCalls = append(accumulatedToolCalls, tc)
 					if stream != nil {
