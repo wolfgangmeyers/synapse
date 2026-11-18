@@ -184,5 +184,6 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-UI-BRAND-001` | Synapse sidebar wordmark | `AgentManagement` | [`sidebar-brand.spec.md`](./sidebar-brand.spec.md) | `tests/e2e/sidebar-brand.spec.ts` | `Active` |
+| `SPEC-AGENT-TERMINATION-DEADLOCK-001` | Agent Termination Deadlock Resilience | `AgentManagement` | [`agent-termination-deadlock-resilience.spec.md`](./agent-termination-deadlock-resilience.spec.md) | `tests/e2e/agent-termination-deadlock.spec.ts` | `Draft` |
 
 - [Embedded restart concurrent replay](embedded-restart-replay-race.spec.md) — regression spec; unit coverage, E2E not added for this scoped fix.

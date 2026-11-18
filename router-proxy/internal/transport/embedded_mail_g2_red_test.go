@@ -111,7 +111,7 @@ func (f *embeddedHTTPG2Fixture) logMailRootReadinessFailure(t *testing.T, agentI
 	defer cancel()
 	f.router.mu.RLock()
 	t.Logf("readiness fixture: manager_present=%t router_manager_matches=%t listener_bound=%t router_closed=%t router_readiness=%q process_generation=%d process_key_present=%t listener_path=httptest.NewServer (not Router.Listen) recovered_launch=false calls=%d",
-		f.manager != nil, f.router.managed == f.manager, f.router.listener != nil, f.router.closed, f.router.readinessStatus, f.router.embeddedProcessGeneration, f.router.embeddedProcessGeneration > 0, f.calls.Load())
+		f.manager != nil, f.router.managed == f.manager, f.router.listener != nil, f.router.closed, f.router.readiness(), f.router.embeddedProcessGeneration, f.router.embeddedProcessGeneration > 0, f.calls.Load())
 	f.router.mu.RUnlock()
 	row, err := f.db.ManagedAgent(ctx, agentID)
 	t.Logf("readiness Store.ManagedAgent: agent=%q read_error=%v", agentID, err)

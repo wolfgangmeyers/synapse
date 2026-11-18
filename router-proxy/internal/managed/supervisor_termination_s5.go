@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -181,6 +182,10 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 	if err != nil && !admission.Committed {
 		return TerminateResult{}, err
 	}
+	if admissionHeld {
+		lane.admission.Unlock()
+		admissionHeld = false
+	}
 	if admission.Replayed {
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, admissionErr
 	}
@@ -204,8 +209,6 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 		m.claudeCodeProcesses.mu.Lock()
 		entry := m.claudeCodeProcesses.entries[request.AgentID]
 		m.claudeCodeProcesses.mu.Unlock()
-		lane.admission.Unlock()
-		admissionHeld = false
 		if active != nil {
 			active.Interrupt()
 		}
@@ -394,7 +397,11 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			doCleanupWT = cleanupWorktree[0]
 		}
 		if doCleanupWT && agent.Worktree && agent.WorktreeBasePath != "" && agent.Cwd != "" {
-			_ = gitworktree.RemoveWorktree(context.Background(), agent.WorktreeBasePath, agent.Cwd, true)
+			worktreeCtx, worktreeCancel := context.WithTimeout(m.runCtx, 15*time.Second)
+			defer worktreeCancel()
+			if wtErr := gitworktree.RemoveWorktree(worktreeCtx, agent.WorktreeBasePath, agent.Cwd, true); wtErr != nil {
+				log.Printf("managed termination: action %s: remove worktree %s: %v", actionID, agent.Cwd, wtErr)
+			}
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "cleanup", "agent_cleanup", "cleanup", "durable_write", source); err != nil {
 			log.Printf("managed termination: action %s: advance: %v", actionID, err)
@@ -550,12 +557,7 @@ func (m *Manager) cascadeAbortSubagents(parentAgentID string) {
 	filtered := m.subagentsQueue[:0]
 	for _, task := range m.subagentsQueue {
 		if matches(task) {
-			task.mu.Lock()
-			task.stopped = true
-			if task.cancel != nil {
-				task.cancel()
-			}
-			task.mu.Unlock()
+			toAbort = append(toAbort, task)
 		} else {
 			filtered = append(filtered, task)
 		}
@@ -566,12 +568,19 @@ func (m *Manager) cascadeAbortSubagents(parentAgentID string) {
 	for _, task := range toAbort {
 		task.mu.Lock()
 		task.stopped = true
-		if task.cancel != nil {
-			task.cancel()
-		}
-		if task.activeSession != nil {
-			task.activeSession.Abort()
-		}
+		cancel := task.cancel
+		session := task.activeSession
+		activeClaude := task.activeClaude
 		task.mu.Unlock()
+
+		if cancel != nil {
+			cancel()
+		}
+		if session != nil {
+			session.Abort()
+		}
+		if activeClaude != nil {
+			_ = activeClaude.Interrupt(context.Background())
+		}
 	}
 }

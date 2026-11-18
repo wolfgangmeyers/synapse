@@ -1295,10 +1295,17 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 		r.mu.Unlock()
 		return s.sendError("goal_control_capacity_exceeded", frameString(frame, "frame_id"))
 	}
+	r.mu.Unlock()
+
 	desired, err := r.store.UpsertGoalControlDesired(context.Background(), target.agentID, target.instanceID, config, timestamp(expires))
 	if err != nil {
-		r.mu.Unlock()
 		return s.sendError("goal_control_persist_failed", frameString(frame, "frame_id"))
+	}
+
+	r.mu.Lock()
+	if _, ok := r.pendingGoal[key]; ok {
+		r.mu.Unlock()
+		return s.sendError("goal_control_already_pending", frameString(frame, "frame_id"))
 	}
 	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: expires, revision: desired.Revision}
 	r.pendingGoal[key] = pending
@@ -1323,25 +1330,35 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 	}
 	key := frameString(frame, "source_agent_id") + "\x00" + frameString(frame, "control_id")
 	revision, revisionPresent := frameInt(frame, "revision")
-	r.mu.Lock()
+	if !revisionPresent {
+		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
+	}
+
 	desired, desiredErr := r.store.GoalControlDesiredFor(context.Background(), s.agentID, s.instanceID)
-	pending := r.pendingGoal[key]
 	desiredMatches := desiredErr == nil && desired != nil && desired.Revision == revision
 	if desiredMatches {
 		sourceAgent, sourceOK := desired.Config["sourceAgentId"].(string)
 		controlID, controlOK := desired.Config["controlId"].(string)
 		desiredMatches = sourceOK && controlOK && sourceAgent == frameString(frame, "source_agent_id") && controlID == frameString(frame, "control_id")
 	}
-	pendingMatches := pending == nil || (pending.target == s && pending.revision == revision && pending.target.instanceID == frameString(frame, "instance_id") && pending.target.leaseID == frameString(frame, "lease_id") && !r.hasNewerGoalPendingLocked(pending))
-	if !revisionPresent || !desiredMatches || !pendingMatches {
-		r.mu.Unlock()
+	if !desiredMatches {
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
+
+	r.mu.RLock()
+	pending := r.pendingGoal[key]
+	pendingMatches := pending == nil || (pending.target == s && pending.revision == revision && pending.target.instanceID == frameString(frame, "instance_id") && pending.target.leaseID == frameString(frame, "lease_id") && !r.hasNewerGoalPendingLocked(pending))
+	r.mu.RUnlock()
+	if !pendingMatches {
+		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
+	}
+
 	consumed, consumeErr := r.store.ConsumeGoalControlDesired(context.Background(), s.agentID, s.instanceID, frameString(frame, "source_agent_id"), frameString(frame, "control_id"), revision)
 	if consumeErr != nil || consumed == nil {
-		r.mu.Unlock()
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
+
+	r.mu.Lock()
 	if pending != nil {
 		delete(r.pendingGoal, key)
 	}

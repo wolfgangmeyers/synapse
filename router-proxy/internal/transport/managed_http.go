@@ -2331,7 +2331,12 @@ func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, statu
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 	if r.uiLive != nil {
-		r.uiLive.publish(req.Context())
+		go func() {
+			defer func() {
+				_ = recover()
+			}()
+			r.uiLive.publish(context.Background())
+		}()
 	}
 }
 
