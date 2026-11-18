@@ -365,6 +365,13 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		return err
 	}
 	if reminder.LinkedMessageID != nil {
+		// Inspect LinkedMessageState to handle prior delivery outcomes:
+		// - If LinkedMessageState is nil (the linked message was pruned/deleted) or MessageDeadLetter:
+		//   the previous delivery attempt failed terminally. Self-heal by clearing linked_message_id
+		//   so this tick can proceed to dispatch a fresh reminder message.
+		// - If LinkedMessageState is still active (queued, leased, injection_requested): the prior
+		//   reminder message is still in flight. Advance next_due_at and skip dispatching to prevent
+		//   duplicate reminder delivery.
 		if reminder.LinkedMessageState == nil || *reminder.LinkedMessageState == domain.MessageDeadLetter {
 			reminder.LinkedMessageID = nil
 			reminder.LinkedMessageState = nil
@@ -420,6 +427,13 @@ func (s *Store) fireManagedRecurring(ctx context.Context, reminder *domain.Remin
 		return err
 	}
 	if reminder.LinkedMessageID != nil {
+		// Inspect LinkedMessageState to handle prior delivery outcomes:
+		// - If LinkedMessageState is nil (the linked message was pruned/deleted) or MessageDeadLetter:
+		//   the previous delivery attempt failed terminally. Self-heal by clearing linked_message_id
+		//   so this tick can proceed to dispatch a fresh reminder message.
+		// - If LinkedMessageState is still active (queued, leased, injection_requested): the prior
+		//   reminder message is still in flight. Advance next_due_at and skip dispatching to prevent
+		//   duplicate reminder delivery.
 		if reminder.LinkedMessageState == nil || *reminder.LinkedMessageState == domain.MessageDeadLetter {
 			reminder.LinkedMessageID = nil
 			reminder.LinkedMessageState = nil
