@@ -305,10 +305,10 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const handleDuplicate = async (wf: Workflow) => {
     try {
       setError(undefined);
-      const dup = await client.duplicateWorkflow(wf.id, { destination_collection_id: activeCollectionId });
-      await fetchWorkflows(activeCollectionId);
+      const targetCol = activeCollectionId || wf.collection_id || "default";
+      await client.duplicateWorkflow(wf.id, { destination_collection_id: targetCol });
+      await fetchWorkflows(targetCol);
       await fetchCollections();
-      setSelectedWorkflowId(dup.id);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to duplicate workflow");
     }
