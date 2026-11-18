@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -351,7 +352,7 @@ type Router struct {
 	startupDone                   chan struct{}
 	startupWork                   func(context.Context) error
 	startupManaged                func(context.Context, *managed.Manager) error
-	readinessStatus               string
+	readinessStatus               atomic.Pointer[string]
 	sweepCancel                   context.CancelFunc
 	sweepDone                     chan struct{}
 	closed                        bool
@@ -649,7 +650,8 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, testClock: testClock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
+	r := &Router{store: options.Store, clock: clock, testClock: testClock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
+	r.setReadiness("ok")
 	r.startupWork = r.runStartup
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
@@ -785,7 +787,7 @@ func (r *Router) Listen(ctx context.Context) error {
 		r.server = server
 		r.startupCancel = startupCancel
 		r.startupDone = startupDone
-		r.readinessStatus = "starting"
+		r.setReadiness("starting")
 		r.mu.Unlock()
 
 		startupErr := r.startupWork(startupCtx)
@@ -802,7 +804,7 @@ func (r *Router) Listen(ctx context.Context) error {
 				r.server = nil
 				r.startupCancel = nil
 				r.startupDone = nil
-				r.readinessStatus = ""
+				r.setReadiness("")
 			}
 			r.mu.Unlock()
 			return startupErr
@@ -815,7 +817,7 @@ func (r *Router) Listen(ctx context.Context) error {
 			<-serveDone
 			return errors.New("router is closed")
 		}
-		r.readinessStatus = "ok"
+		r.setReadiness("ok")
 		sweepCtx, sweepCancel := context.WithCancel(context.Background())
 		r.sweepCancel = sweepCancel
 		r.sweepDone = make(chan struct{})
@@ -1149,13 +1151,16 @@ func (r *Router) now() time.Time                       { return r.clock.Now().UT
 func (r *Router) TestClock() *deterministic.FixedClock { return r.testClock }
 func timestamp(value time.Time) string                 { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
 
+func (r *Router) setReadiness(status string) {
+	r.readinessStatus.Store(&status)
+}
+
 func (r *Router) readiness() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.readinessStatus == "" {
+	ptr := r.readinessStatus.Load()
+	if ptr == nil || *ptr == "" {
 		return "ok"
 	}
-	return r.readinessStatus
+	return *ptr
 }
 
 // emitEvent is the closed diagnostic path used by typed producers.

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
@@ -2533,7 +2534,17 @@ func closeRPCAndWait(rpc RPC) error {
 	}
 	err := rpc.Close()
 	if waiter, ok := rpc.(interface{ WaitForClose() }); ok {
-		waiter.WaitForClose()
+		done := make(chan struct{})
+		go func() {
+			defer func() { _ = recover() }()
+			waiter.WaitForClose()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// bounded timeout so wedged pipes/readers do not hang lane execution indefinitely
+		}
 	}
 	return err
 }
