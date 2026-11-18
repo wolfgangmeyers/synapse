@@ -220,6 +220,15 @@ func timeFromUnixMilli(value int64) string {
 	return time.UnixMilli(value).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 func (s *Store) rearmFailedReminder(ctx context.Context, messageID, now string) error {
+	// Callers such as Claude failure settlement, message dismissal, and direct recovery
+	// call rearmFailedReminder when a message enters dead_letter. Because active recurring
+	// reminders remain in state 'scheduled' rather than 'failed', the query below on
+	// state = 'failed' will not match them. Invoking rearmRecurring ensures any linked
+	// recurring reminders clear their linked_message_id and advance to their next due
+	// cycle rather than being left wedged on a dead-letter message.
+	if _, err := s.rearmRecurring(ctx, messageID, now); err != nil {
+		return err
+	}
 	rows, err := s.db.QueryContext(ctx, "SELECT id,next_due_at,interval_ms FROM reminders WHERE linked_message_id = ? AND state = 'failed'", messageID)
 	if err != nil {
 		return err
