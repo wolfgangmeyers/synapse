@@ -220,6 +220,9 @@ func timeFromUnixMilli(value int64) string {
 	return time.UnixMilli(value).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 func (s *Store) rearmFailedReminder(ctx context.Context, messageID, now string) error {
+	if _, err := s.rearmRecurring(ctx, messageID, now); err != nil {
+		return err
+	}
 	rows, err := s.db.QueryContext(ctx, "SELECT id,next_due_at,interval_ms FROM reminders WHERE linked_message_id = ? AND state = 'failed'", messageID)
 	if err != nil {
 		return err

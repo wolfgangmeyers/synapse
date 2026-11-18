@@ -365,8 +365,16 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		return err
 	}
 	if reminder.LinkedMessageID != nil {
-		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
-		return err
+		if reminder.LinkedMessageState == nil || *reminder.LinkedMessageState == domain.MessageDeadLetter {
+			reminder.LinkedMessageID = nil
+			reminder.LinkedMessageState = nil
+			if _, err := s.db.ExecContext(ctx, "UPDATE reminders SET linked_message_id=NULL WHERE id=?", reminder.ID); err != nil {
+				return err
+			}
+		} else {
+			_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
+			return err
+		}
 	}
 	prior, _ := protocol.ParseTimestamp(reminder.NextDueAt)
 	current, _ := protocol.ParseTimestamp(now)
@@ -407,9 +415,21 @@ func (s *Store) fireManagedRecurring(ctx context.Context, reminder *domain.Remin
 	if err != nil {
 		return err
 	}
-	if !live || reminder.LinkedMessageID != nil {
+	if !live {
 		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
 		return err
+	}
+	if reminder.LinkedMessageID != nil {
+		if reminder.LinkedMessageState == nil || *reminder.LinkedMessageState == domain.MessageDeadLetter {
+			reminder.LinkedMessageID = nil
+			reminder.LinkedMessageState = nil
+			if _, err := s.db.ExecContext(ctx, "UPDATE reminders SET linked_message_id=NULL WHERE id=?", reminder.ID); err != nil {
+				return err
+			}
+		} else {
+			_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
+			return err
+		}
 	}
 	prior, _ := protocol.ParseTimestamp(reminder.NextDueAt)
 	current, _ := protocol.ParseTimestamp(now)
