@@ -155,4 +155,48 @@ test.describe("SCN-WFIG-017 stopped workflow nudge", () => {
       expect(f.violations).toEqual([]);
     } catch (error) { await capture(f, "pi"); throw error; } finally { if (test.info().status === "passed") await capture(f, "pi-pass"); await f.close(); }
   });
+
+  test("nudges Claude worker after turn crash when workflow is active", async ({ page }) => {
+    test.setTimeout(120_000);
+    const f = await claudeWorkersHarness({
+      turns: [
+        [{ text: "Activation acknowledged" }],
+        [{ text: "Starting work in A..." }, { crash: 1 }],
+        [
+          {
+            mcp_call: {
+              id: "advance-to-b",
+              name: "mecha_workflow_transition",
+              input: { action: "transition", target_state: "B" },
+              require_catalog: true,
+            },
+          },
+          { text: "Recovered from crash and transitioned to B" },
+        ],
+        [{ text: "In State B successfully" }],
+      ],
+    });
+
+    try {
+      await f.open(page);
+      const agent = await f.launch(page);
+      const { workflow } = await setup(f, page, agent);
+
+      await clockUntil(f, async () => (await f.inputs()).length >= 2);
+      await clockUntil(f, async () => (await f.records()).some(r => r.kind === "mcp_call_response" && r.tool_id === "advance-to-b"));
+      await expect(page.getByText("Recovered from crash and transitioned to B").first()).toBeVisible();
+
+      await clockUntil(f, async () => (await f.inputs()).length >= 4);
+      await expect(page.getByText("In State B successfully").first()).toBeVisible();
+
+      const curAgent = await f.api(`/v1/managed-agents/${agent}`);
+      expect(curAgent.agent.active_workflow_id).toBe(workflow.id);
+      const states = await f.api(`/v1/workflows/${workflow.id}`);
+      const stateB = states.states.find((s: { name: string }) => s.name === "B");
+      expect(curAgent.agent.active_workflow_state_id).toBe(stateB.id);
+    } finally {
+      await f.close();
+    }
+  });
 });
+

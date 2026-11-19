@@ -375,7 +375,6 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		maxContinuations = defaultMaxConsecutiveGoalContinuations
 	}
 	if lane.consecutiveContinuations.Load() >= int64(maxContinuations) {
-		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", agentID, lane.consecutiveContinuations.Load())
 		return
 	}
 
@@ -384,7 +383,6 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 	if curAgent.Blocked {
-		log.Printf("[embedded:%s] Suppressing idle goal continuation because agent is blocked: %s", agentID, curAgent.BlockedReason)
 		return
 	}
 
@@ -413,7 +411,6 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		lane.consecutiveContinuations.Add(1)
 		m.settleGoalAttempt(lane)
 		lane.goalOwnerInvalid = true
-		log.Printf("kickoffIdleGoalContinuation: ensureEmbeddedOwner for %s: %v", agentID, err)
 		return
 	}
 
@@ -422,7 +419,6 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 	if hasPending {
-		log.Printf("kickoffIdleGoalContinuation: agent %s has pending wake or started continuation", agentID)
 		return
 	}
 
@@ -441,7 +437,12 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	// After that, only a reserved evaluator continuation may wake it again:
 	// unavailable/failed evaluation must not become an unkeyed NOT_DONE.
 	// Pending initial/replacement revisions, mail and Pi retain their paths.
-	if curAgent.SelectedModel.Provider == claudeCodeProvider &&
+	// However, if the agent has an active workflow, do NOT suppress the
+	// continuation wake. An active workflow requires continuous guidance and
+	// recovery even when the applied revision equals the desired revision,
+	// so the worker can recover after a crashed or failed turn.
+	hasActiveWorkflow := curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != ""
+	if !hasActiveWorkflow && curAgent.SelectedModel.Provider == claudeCodeProvider &&
 		policy.DesiredRevision > 0 && policy.AppliedRevision == policy.DesiredRevision && policy.ProjectionState == "applied" {
 		return
 	}

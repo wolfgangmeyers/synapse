@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Local protocol fixture: loopback-only HTTP and one fixed, bounded child.
-import { readFileSync, readSync, statSync, openSync, writeSync, closeSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, readSync, statSync, openSync, writeSync, closeSync, chmodSync } from 'node:fs';
 import { request as httpRequest, validateHeaderName, validateHeaderValue } from 'node:http';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -249,6 +249,20 @@ try {
     let model = models[options['--model']] ?? options['--model'] ?? models.sonnet;
     let sequence = 0;
     let turn = 0;
+    if (process.env.FAKE_CLAUDE_RECORD) {
+      const stateFile = `${process.env.FAKE_CLAUDE_RECORD}.turn`;
+      try {
+        turn = parseInt(readFileSync(stateFile, 'utf8'), 10) || 0;
+      } catch {}
+    }
+    function saveTurn() {
+      if (process.env.FAKE_CLAUDE_RECORD) {
+        const stateFile = `${process.env.FAKE_CLAUDE_RECORD}.turn`;
+        try {
+          writeFileSync(stateFile, String(turn));
+        } catch {}
+      }
+    }
     let executionTurns;
     let active = null;
     let blocked = false;
@@ -325,9 +339,11 @@ try {
           }
           result(false, '');
           turn++;
+          saveTurn();
         }
       }
       const steps = inputRule?.steps ?? (executionTurns ?? config.turns)?.[turn++] ?? [{ text: 'fake answer' }];
+      saveTurn();
       active = { inputID: next.value.uuid, steps, index: 0, text: '' };
       init();
       const proceed = () => {
