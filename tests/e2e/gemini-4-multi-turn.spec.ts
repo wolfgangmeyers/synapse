@@ -11,6 +11,7 @@ test("Gemini 4 multi-turn tool calling preserves authentic thought signature acr
       { provider: "google", id: "gemini-4-hydrogen" },
       { provider: "google-vertex", id: "gemini-4-argon" },
       { provider: "google-vertex", id: "gemini-4-carbon" },
+      { provider: "google-vertex", id: "gemini-3.8-flash" },
     ];
 
     for (const [i, model] of testCases.entries()) {
@@ -165,11 +166,16 @@ test("Gemini 4 multi-turn tool calling preserves authentic thought signature acr
     // Additional coverage: Scenario 7 verification of omission of dummy signatures over the wire
     // When a tool call returns without thought signature (e.g. empty or undefined),
     // verifying that over the wire thoughtSignature and thought_signature are omitted / undefined
-    // and NOT populated with "skip_thought_signature_validator".
-    {
-      const emptySigName = "g4-empty-sig-omission";
-      const emptySigModel = { provider: "google", id: "gemini-4-hydrogen" };
-      const emptySigAnswer = "Empty signature omission verified";
+    // and NOT populated with "skip_thought_signature_validator" for both Gemini 4 and Gemini 3.8 Flash.
+    const emptySigCases = [
+      { provider: "google", id: "gemini-4-hydrogen", name: "g4-empty-sig-omission" },
+      { provider: "google-vertex", id: "gemini-3.8-flash", name: "g38-empty-sig-omission" },
+    ];
+
+    for (const emptyCase of emptySigCases) {
+      const emptySigName = emptyCase.name;
+      const emptySigModel = { provider: emptyCase.provider, id: emptyCase.id };
+      const emptySigAnswer = `Empty signature omission verified for ${emptyCase.id}`;
       const startEmptySig = f.turns.length;
 
       // Turn 1: tool call with empty/omitted thoughtSignature

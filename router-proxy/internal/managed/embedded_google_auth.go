@@ -326,14 +326,25 @@ func collectPruned(messages []ai.Message, omitted map[int]bool) []ai.Message {
 	return result
 }
 
+// isStrictThoughtSignatureModel returns true for models requiring strict thought signature
+// handling (Gemini 4 and Gemini 3.8 models, e.g. gemini-3.8-flash). For these models,
+// authentic thought signatures must be replayed, while dummy fallback signatures
+// ("skip_thought_signature_validator") must be omitted to prevent empty turn stalls on Vertex AI.
+func isStrictThoughtSignatureModel(modelID string) bool {
+	return strings.Contains(modelID, "gemini-4") ||
+		strings.Contains(modelID, "gemini-3.8") ||
+		strings.Contains(modelID, "3.8")
+}
+
+// isGemini4Model is an alias kept for backward compatibility with existing callers.
 func isGemini4Model(modelID string) bool {
-	return strings.Contains(modelID, "gemini-4")
+	return isStrictThoughtSignatureModel(modelID)
 }
 
 func parseConvertOptions(args []any) (int, map[string]string, bool) {
 	contextWindow := 1048576 // default to 1M (Gemini standard)
 	droppedToolCalls := make(map[string]string)
-	isGemini4 := false
+	strictThoughtSignature := false
 
 	for _, arg := range args {
 		switch v := arg.(type) {
@@ -342,16 +353,16 @@ func parseConvertOptions(args []any) (int, map[string]string, bool) {
 				contextWindow = v
 			}
 		case string:
-			if isGemini4Model(v) {
-				isGemini4 = true
+			if isStrictThoughtSignatureModel(v) {
+				strictThoughtSignature = true
 			}
 		case *ai.Model:
 			if v != nil {
 				if v.ContextWindow > 0 {
 					contextWindow = v.ContextWindow
 				}
-				if isGemini4Model(v.ID) {
-					isGemini4 = true
+				if isStrictThoughtSignatureModel(v.ID) {
+					strictThoughtSignature = true
 				}
 			}
 		case map[string]string:
@@ -362,7 +373,7 @@ func parseConvertOptions(args []any) (int, map[string]string, bool) {
 			}
 		}
 	}
-	return contextWindow, droppedToolCalls, isGemini4
+	return contextWindow, droppedToolCalls, strictThoughtSignature
 }
 
 func pruneTranscriptMessages(messages []ai.Message, targetTokens int) []ai.Message {
@@ -539,7 +550,7 @@ func partsHaveText(parts []any) bool {
 }
 
 func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[string]any {
-	contextWindow, droppedToolCalls, isGemini4 := parseConvertOptions(args)
+	contextWindow, droppedToolCalls, strictThoughtSignature := parseConvertOptions(args)
 	triggerTokens := contextWindow * 80 / 100
 	targetTokens := contextWindow * 50 / 100
 
@@ -645,7 +656,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 							"args": map[string]any{},
 						},
 					}
-					if !isGemini4 {
+					if !strictThoughtSignature {
 						part["thought_signature"] = "skip_thought_signature_validator"
 						part["thoughtSignature"] = "skip_thought_signature_validator"
 					}
@@ -658,7 +669,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						"args": map[string]any{},
 					},
 				}
-				if !isGemini4 {
+				if !strictThoughtSignature {
 					part["thought_signature"] = "skip_thought_signature_validator"
 					part["thoughtSignature"] = "skip_thought_signature_validator"
 				}
@@ -798,7 +809,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						if call.ThoughtSignature != "" {
 							partMap["thoughtSignature"] = call.ThoughtSignature
 							partMap["thought_signature"] = call.ThoughtSignature
-						} else if !isGemini4 {
+						} else if !strictThoughtSignature {
 							partMap["thought_signature"] = "skip_thought_signature_validator"
 							partMap["thoughtSignature"] = "skip_thought_signature_validator"
 						}
@@ -833,7 +844,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						if call.ThoughtSignature != "" {
 							partMap["thoughtSignature"] = call.ThoughtSignature
 							partMap["thought_signature"] = call.ThoughtSignature
-						} else if !isGemini4 {
+						} else if !strictThoughtSignature {
 							partMap["thought_signature"] = "skip_thought_signature_validator"
 							partMap["thoughtSignature"] = "skip_thought_signature_validator"
 						}

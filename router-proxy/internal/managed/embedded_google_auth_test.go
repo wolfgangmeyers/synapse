@@ -2276,3 +2276,246 @@ func TestGoogleAuth_Gemini4ThoughtSignatureReplay(t *testing.T) {
 		require.NotContains(t, p2, "thought_signature")
 	})
 }
+
+func TestConvertMessagesToGoogleContents_Gemini38ThoughtSignature(t *testing.T) {
+	gemini38Models := []*ai.Model{
+		{ID: "gemini-3.8-flash", ContextWindow: 1048576},
+		{ID: "google-vertex/gemini-3.8-flash", ContextWindow: 1048576},
+	}
+	legacyModel := &ai.Model{ID: "gemini-2.5-flash", ContextWindow: 1048576}
+
+	t.Run("isStrictThoughtSignatureModel matches 3.8 and 4 models but not legacy", func(t *testing.T) {
+		require.True(t, isStrictThoughtSignatureModel("gemini-3.8-flash"))
+		require.True(t, isStrictThoughtSignatureModel("google-vertex/gemini-3.8-flash"))
+		require.True(t, isStrictThoughtSignatureModel("gemini-4-hydrogen"))
+		require.True(t, isStrictThoughtSignatureModel("google-vertex/gemini-4-argon"))
+		require.True(t, isStrictThoughtSignatureModel("gemini-4-carbon"))
+		require.False(t, isStrictThoughtSignatureModel("gemini-2.5-flash"))
+		require.False(t, isStrictThoughtSignatureModel("gemini-1.5-pro"))
+		require.False(t, isStrictThoughtSignatureModel("gpt-4o"))
+	})
+
+	for _, model := range gemini38Models {
+		model := model
+		t.Run(fmt.Sprintf("%s preserves authentic thought signature", model.ID), func(t *testing.T) {
+			msgs := []ai.Message{
+				ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+				ai.AssistantMessage{
+					Content: ai.ContentList{
+						ai.ToolCall{
+							ID:               "call_38_auth",
+							Name:             "bash",
+							Arguments:        map[string]any{"command": "date"},
+							ThoughtSignature: "sig_38_authentic_abc123",
+						},
+					},
+				},
+				ai.ToolResultMessage{
+					ToolCallID: "call_38_auth",
+					ToolName:   "bash",
+					Content:    ai.ContentList{ai.TextContent{Text: "Tue Nov 18"}},
+				},
+			}
+
+			// Test with *ai.Model
+			contents := convertMessagesToGoogleContents(msgs, model)
+			require.Len(t, contents, 3)
+			require.Equal(t, "model", contents[1]["role"])
+			modelParts := contents[1]["parts"].([]any)
+			require.Len(t, modelParts, 1)
+			pMap := modelParts[0].(map[string]any)
+			require.Contains(t, pMap, "functionCall")
+			require.Equal(t, "sig_38_authentic_abc123", pMap["thoughtSignature"])
+			require.Equal(t, "sig_38_authentic_abc123", pMap["thought_signature"])
+			require.NotEqual(t, "skip_thought_signature_validator", pMap["thoughtSignature"])
+			require.NotEqual(t, "skip_thought_signature_validator", pMap["thought_signature"])
+
+			// Test with string model ID argument
+			contentsStr := convertMessagesToGoogleContents(msgs, model.ID)
+			require.Len(t, contentsStr, 3)
+			modelPartsStr := contentsStr[1]["parts"].([]any)
+			pMapStr := modelPartsStr[0].(map[string]any)
+			require.Equal(t, "sig_38_authentic_abc123", pMapStr["thoughtSignature"])
+			require.Equal(t, "sig_38_authentic_abc123", pMapStr["thought_signature"])
+		})
+
+		t.Run(fmt.Sprintf("%s omits dummy signature when authentic signature is empty", model.ID), func(t *testing.T) {
+			msgs := []ai.Message{
+				ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+				ai.AssistantMessage{
+					Content: ai.ContentList{
+						ai.ToolCall{
+							ID:        "call_38_empty",
+							Name:      "read",
+							Arguments: map[string]any{"path": "data.json"},
+						},
+					},
+				},
+				ai.ToolResultMessage{
+					ToolCallID: "call_38_empty",
+					ToolName:   "read",
+					Content:    ai.ContentList{ai.TextContent{Text: "{}"}},
+				},
+			}
+
+			// Value tool call
+			contents := convertMessagesToGoogleContents(msgs, model)
+			require.Len(t, contents, 3)
+			require.Equal(t, "model", contents[1]["role"])
+			modelParts := contents[1]["parts"].([]any)
+			pMap := modelParts[0].(map[string]any)
+			require.Contains(t, pMap, "functionCall")
+			require.NotContains(t, pMap, "thoughtSignature")
+			require.NotContains(t, pMap, "thought_signature")
+
+			// Pointer tool call
+			ptrMsgs := []ai.Message{
+				ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+				ai.AssistantMessage{
+					Content: ai.ContentList{
+						&ai.ToolCall{
+							ID:        "call_38_empty_ptr",
+							Name:      "read",
+							Arguments: map[string]any{"path": "data.json"},
+						},
+					},
+				},
+				ai.ToolResultMessage{
+					ToolCallID: "call_38_empty_ptr",
+					ToolName:   "read",
+					Content:    ai.ContentList{ai.TextContent{Text: "{}"}},
+				},
+			}
+			ptrContents := convertMessagesToGoogleContents(ptrMsgs, model)
+			require.Len(t, ptrContents, 3)
+			ptrParts := ptrContents[1]["parts"].([]any)
+			ptrPMap := ptrParts[0].(map[string]any)
+			require.Contains(t, ptrPMap, "functionCall")
+			require.NotContains(t, ptrPMap, "thoughtSignature")
+			require.NotContains(t, ptrPMap, "thought_signature")
+		})
+
+		t.Run(fmt.Sprintf("%s omits dummy signature on backfilled orphaned tool result", model.ID), func(t *testing.T) {
+			msgs := []ai.Message{
+				ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "initial prompt"}}},
+				ai.ToolResultMessage{
+					ToolCallID: "call_orphaned_38",
+					ToolName:   "bash",
+					Content:    ai.ContentList{ai.TextContent{Text: "orphaned output"}},
+				},
+			}
+
+			contents := convertMessagesToGoogleContents(msgs, model)
+			require.GreaterOrEqual(t, len(contents), 2)
+			var modelTurn map[string]any
+			for _, turn := range contents {
+				if turn["role"] == "model" {
+					modelTurn = turn
+					break
+				}
+			}
+			require.NotNil(t, modelTurn)
+			parts := modelTurn["parts"].([]any)
+			require.NotEmpty(t, parts)
+			fcPart := parts[0].(map[string]any)
+			require.Contains(t, fcPart, "functionCall")
+			require.NotContains(t, fcPart, "thoughtSignature")
+			require.NotContains(t, fcPart, "thought_signature")
+		})
+
+		t.Run(fmt.Sprintf("%s omits dummy signature on backfilled extra tool result", model.ID), func(t *testing.T) {
+			msgs := []ai.Message{
+				ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run two reads"}}},
+				ai.AssistantMessage{
+					Content: ai.ContentList{
+						ai.ToolCall{
+							ID:               "call_38_r1",
+							Name:             "read",
+							Arguments:        map[string]any{"path": "file1.txt"},
+							ThoughtSignature: "sig_38_r1",
+						},
+					},
+				},
+				ai.ToolResultMessage{
+					ToolCallID: "call_38_r1",
+					ToolName:   "read",
+					Content:    ai.ContentList{ai.TextContent{Text: "content 1"}},
+				},
+				ai.ToolResultMessage{
+					ToolCallID: "call_38_r2",
+					ToolName:   "read",
+					Content:    ai.ContentList{ai.TextContent{Text: "content 2"}},
+				},
+			}
+
+			contents := convertMessagesToGoogleContents(msgs, model)
+			require.GreaterOrEqual(t, len(contents), 2)
+			require.Equal(t, "model", contents[1]["role"])
+			modelParts := contents[1]["parts"].([]any)
+			require.Len(t, modelParts, 2)
+
+			p1 := modelParts[0].(map[string]any)
+			require.Equal(t, "sig_38_r1", p1["thoughtSignature"])
+			require.Equal(t, "sig_38_r1", p1["thought_signature"])
+
+			p2 := modelParts[1].(map[string]any)
+			fc2, ok := p2["functionCall"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "read", fc2["name"])
+			require.NotContains(t, p2, "thoughtSignature")
+			require.NotContains(t, p2, "thought_signature")
+		})
+	}
+
+	t.Run("Legacy model gemini-2.5-flash still injects skip_thought_signature_validator", func(t *testing.T) {
+		msgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run tool"}}},
+			ai.AssistantMessage{
+				Content: ai.ContentList{
+					ai.ToolCall{
+						ID:        "call_legacy_25",
+						Name:      "read",
+						Arguments: map[string]any{"path": "legacy.txt"},
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call_legacy_25",
+				ToolName:   "read",
+				Content:    ai.ContentList{ai.TextContent{Text: "contents"}},
+			},
+		}
+
+		contents := convertMessagesToGoogleContents(msgs, legacyModel)
+		require.Len(t, contents, 3)
+		modelParts := contents[1]["parts"].([]any)
+		pMap := modelParts[0].(map[string]any)
+		require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+		require.Equal(t, "skip_thought_signature_validator", pMap["thoughtSignature"])
+
+		// Also check backfilled orphaned tool result retains dummy signature for legacy
+		orphanedMsgs := []ai.Message{
+			ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "initial prompt"}}},
+			ai.ToolResultMessage{
+				ToolCallID: "call_legacy_orphaned",
+				ToolName:   "bash",
+				Content:    ai.ContentList{ai.TextContent{Text: "orphaned output"}},
+			},
+		}
+		orphanedContents := convertMessagesToGoogleContents(orphanedMsgs, legacyModel)
+		require.GreaterOrEqual(t, len(orphanedContents), 2)
+		var modelTurn map[string]any
+		for _, turn := range orphanedContents {
+			if turn["role"] == "model" {
+				modelTurn = turn
+				break
+			}
+		}
+		require.NotNil(t, modelTurn)
+		parts := modelTurn["parts"].([]any)
+		require.NotEmpty(t, parts)
+		fcPart := parts[0].(map[string]any)
+		require.Equal(t, "skip_thought_signature_validator", fcPart["thought_signature"])
+		require.Equal(t, "skip_thought_signature_validator", fcPart["thoughtSignature"])
+	})
+}
