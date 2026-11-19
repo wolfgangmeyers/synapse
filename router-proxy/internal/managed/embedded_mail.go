@@ -200,15 +200,16 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 			m.flushEmbeddedReplies(m.runCtx, agentID)
 
 			if saved.SelectedModel.Provider == claudeCodeProvider {
+				log.Printf("[embedded:%s] ERROR Claude mail turn failed for message %s: %v", agentID, attempt.MessageID, err)
 				if errors.Is(err, errEmbeddedExecutionUnsettled) {
-					m.blockClaudeUnclassified(lane, attempt)
-					return
+					m.blockClaudeUnclassified(lane, attempt, err)
+					continue
 				}
 				held, holdErr := m.store.ClaudeMailHeld(context.Background(), attempt.MessageID)
 				if holdErr != nil {
 					// Unknown marker state must not be treated as a definite start failure.
-					m.blockClaudeUnclassified(lane, attempt)
-					return
+					m.blockClaudeUnclassified(lane, attempt, err)
+					continue
 				}
 				if held {
 					lane.claudePendingSettlement = attempt
@@ -216,8 +217,8 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 					continue
 				}
 				if !errors.Is(err, errClaudeDefiniteStart) {
-					m.blockClaudeUnclassified(lane, attempt)
-					return
+					m.blockClaudeUnclassified(lane, attempt, err)
+					continue
 				}
 			}
 			lane.mailAttempts[attempt.MessageID]++
@@ -465,11 +466,23 @@ func sameClaudeBlockedAttempt(a, b *store.EmbeddedMailAttempt) bool {
 	return a != nil && b != nil && a.MessageID == b.MessageID && a.MessageIncarnationID == b.MessageIncarnationID && a.Binding == b.Binding
 }
 
-func (m *Manager) blockClaudeUnclassified(lane *managedAgentLane, attempt *store.EmbeddedMailAttempt) {
+func (m *Manager) blockClaudeUnclassified(lane *managedAgentLane, attempt *store.EmbeddedMailAttempt, turnErr error) {
+	if lane == nil || attempt == nil {
+		return
+	}
 	lane.claudeUnclassifiedBlocked = attempt
+	log.Printf("[embedded:%s] Claude mail blocked after unclassified turn failure for message %s: %v", attempt.Binding.AgentID, attempt.MessageID, turnErr)
+
+	eventKey := "claude-unclassified:" + attempt.MessageID
+	presentation := &store.ManagedHistoryPresentation{
+		Kind:    "message",
+		Outcome: "error",
+		Summary: "Claude mail blocked",
+	}
+	diag := claudeUnclassifiedDiagnostic
 	entry, err := m.store.RecordClaudeUnclassifiedMail(context.Background(), attempt.Binding, attempt, claudeUnclassifiedDiagnostic)
 	if errors.Is(err, store.ErrStaleEmbeddedFence) {
-		return
+		entry, err = m.store.RecordManagedCompleteHistoryWithDetails(context.Background(), attempt.Binding.AgentID, "managed_message", "error", claudeUnclassifiedDiagnostic, eventKey, presentation, nil, &diag)
 	}
 	if err != nil && entry.ID == "" {
 		log.Printf("[embedded:%s] cannot record blocked Claude mail diagnostic: %v", attempt.Binding.AgentID, err)
@@ -478,6 +491,7 @@ func (m *Manager) blockClaudeUnclassified(lane *managedAgentLane, attempt *store
 		return
 	}
 	m.publishCompleteHistory(entry)
+	_ = m.store.DismissMailboxMessage(context.Background(), attempt.MessageID)
 }
 
 func (m *Manager) scheduleClaudeMailRetry(agentID string, delay time.Duration) {
