@@ -61,6 +61,10 @@ MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:87
 
 The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. For compatible local clients, use `127.0.0.1` in `MECHA_ROUTER_URL` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
 
+### Safe Router Upgrades and Restarts
+
+For zero-risk upgrades, database migration verification, worker quiescence, and crash-loop-safe restarts when operators lack direct keyboard access, follow the `router-safe-upgrade` skill (`.claude/skills/router-safe-upgrade/SKILL.md`).
+
 ## Isolated Router & Web UI Development Launches
 
 Subagent background shells or standard ephemeral shell commands terminate child processes when their session or harness exits. Never launch long-running test routers directly in ephemeral tool shells without detaching them. Use a persistent session manager such as tmux, or launch detached background processes via `nohup` / `setsid`.
@@ -155,7 +159,38 @@ Configuration and management dialogs (such as MCP Servers, Routers, Providers, e
 
 ## Maintenance
 
-When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
+When adding or updating a skill, keep this skill table current.
+
+## Skills
+
+| Skill | Description |
+|-------|-------------|
+| `augment-persona` | Analyze a persona file for gaps, generate targeted scenario-based questions, and integrate answers back into the persona. Use for improving existing personas, not generating new ones. |
+| `anxiety` | Monitor a target worker against a validated requirement packet from the same worktree, using read-only evidence and concrete escalation. |
+| `decompose` | Break large tasks into phased dev-loop iterations with clear boundaries, ordering, and inter-phase contracts. |
+| `generate-persona` | Generate a behavioral persona from any data source (chat logs, PR reviews, text files, git history), guided by intended use case. Replaces `generate-reviewer-persona` and `generate-supervisor-persona`. |
+| `generate-supervisor-persona` | **Deprecated** — thin wrapper that redirects to `generate-persona` with `--use supervision --source chat-logs`. |
+| `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
+| `mailbox` | Mailbox V2 async mailbox — Mailbox V2 router delivery formats and mandatory pre-read state-update rules. **Load with supervisor** so runtime-delivered mail is handled correctly. |
+| `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the registered checkout-source Mailbox V2 Pi extension without relocating, copying, symlinking, or restoring an installed artifact. |
+| `pr-watch` | Watch assigned GitHub pull requests and run the required review workflow from the dedicated PR-review agent. |
+| `remote-cloud-desktop` | Provision a generic Ubuntu KDE Plasma X11 desktop over xrdp with access restricted to a private overlay network. |
+| `router-safe-upgrade` | Perform zero-risk, crash-loop-safe upgrades of the mecha mailbox router with pre-flight diff analysis, isolated dry-runs, worker quiescence, and post-restart health checks. |
+| `roger-advanced-report-implementation` | Implement RogerEMR advanced/self-serve reports on the governed dataset, Parquet, DuckDB-WASM, and Report Builder architecture, distinct from fixed server-side reports. |
+| `roger-report-implementation` | Create RogerEMR fixed reports with evidence-backed source parity, Terra planning, correct permissions/stacking, screen-export agreement, isolated synthetic demos, and report-specific review gates. |
+| `slice-avatar-grid` | Slice AI-generated avatar grid sheets (like 4x4 robot helmet galleries) into individually centered, transparent PNG avatars for web/router-ui-react/avatars. Handles AI grid jitter, circle center detection, and antialiased circular background removal. |
+| `subagent-orchestration` | Delegate bounded work with explicit contracts, evidence gates, context limits, safe handoffs, and stop rules while the parent keeps orchestration and final validation. |
+| `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
+| `supervisor-review` | Supervisor readiness interrogation and quality gate before accepting worker done, blocked, parked, commit/push, draft PR, or review-ready state transitions. |
+| `supervisor-sweep` | Craft and maintain the supervisor general sweep reminder so active work, open-PR feedback, CI, and merge-conflict checks are captured every time. |
+| `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
+| `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
+| `watchdog` | LLM-based Watchdog momentum-nudge guidance. Not for direct invocation. |
+| `worker` | Worker agent instructions — provided by the supervisor when launching or resuming a managed worker. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Supervisors instruct workers to read it through the runtime's verified delivery path; do not invoke manually. |
+| `worker-launch` | Managed worker launch, resume, follow-up handoff, parking, shutdown, and Mailbox V2 coordination guidance for supervisors. |
+| `wolfgang-voice-review` | Private final gate for rewriting validated PR review findings into Wolfgang's review voice before posting. |
+| `workflow-management` | Manage and inspect router-owned durable workflow state graphs, transitions, and bundle schemas. Trigger: user asks about workflows, workflow definitions, bundle schemas, or states. |
+| `worktree` | Create, list, or remove git worktrees for isolated workstreams as sibling directories of the main repo. |
 
 ### Subagent visibility checker
 
