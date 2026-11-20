@@ -1805,8 +1805,11 @@ func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, e
 	return id, err
 }
 
-// NextEmbeddedSteerMail selects the oldest queued managed target not currently
-// in-flight in an active turn reservation.
+// NextEmbeddedSteerMail selects the oldest queued managed target eligible for
+// mid-turn steering. Routine subagent lifecycle notifications (m.id LIKE 'subagent-%')
+// and scheduled reminders are excluded so they do not abort in-flight multi-tool
+// batches; they are deferred until the turn settles into an idle state.
+// Intentional human user steering and background bash completions remain eligible to steer.
 func (s *Store) NextEmbeddedSteerMail(ctx context.Context, agentID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1814,7 +1817,7 @@ func (s *Store) NextEmbeddedSteerMail(ctx context.Context, agentID string) (stri
 		return "", errors.New("store is closed")
 	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.claude_stdin_started=0 AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.claude_stdin_started=0 AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) AND m.id NOT LIKE 'subagent-%' AND COALESCE(m.source_kind, '') NOT IN ('reminder') AND COALESCE(m.sender, '') NOT IN ('reminders') ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
