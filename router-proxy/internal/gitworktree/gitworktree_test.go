@@ -40,7 +40,7 @@ func TestCheckWorktree_NotRepo(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	res, err := CheckWorktree(ctx, dir)
+	res, err := CheckWorktree(ctx, dir, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestCheckWorktree_NotRepo(t *testing.T) {
 
 func TestCheckWorktree_NonExistent(t *testing.T) {
 	ctx := context.Background()
-	res, err := CheckWorktree(ctx, filepath.Join(t.TempDir(), "does-not-exist"))
+	res, err := CheckWorktree(ctx, filepath.Join(t.TempDir(), "does-not-exist"), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCheckWorktree_MainWorktree(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitRepo(t)
 
-	res, err := CheckWorktree(ctx, repo)
+	res, err := CheckWorktree(ctx, repo, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,12 +85,27 @@ func TestCheckWorktree_MainWorktree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Modified\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	res, err = CheckWorktree(ctx, repo)
+	res, err = CheckWorktree(ctx, repo, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !res.HasUncommittedChanges {
 		t.Errorf("expected HasUncommittedChanges true")
+	}
+
+	// When includeStatus is false, HasUncommittedChanges must be false even with modified files
+	resNoStatus, err := CheckWorktree(ctx, repo, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resNoStatus.IsGitRepo {
+		t.Errorf("expected IsGitRepo true")
+	}
+	if !resNoStatus.IsMainWorktree {
+		t.Errorf("expected IsMainWorktree true")
+	}
+	if resNoStatus.HasUncommittedChanges {
+		t.Errorf("expected HasUncommittedChanges false when includeStatus is false, got true")
 	}
 }
 
@@ -113,7 +128,7 @@ func TestCreateAndRemoveWorktree(t *testing.T) {
 	defer os.RemoveAll(wtPath)
 
 	// Check the created worktree
-	res, err := CheckWorktree(ctx, wtPath)
+	res, err := CheckWorktree(ctx, wtPath, true)
 	if err != nil {
 		t.Fatalf("CheckWorktree failed: %v", err)
 	}

@@ -731,7 +731,7 @@ export interface RouterHttpClient {
   managedInlineTools(id: string): Promise<ManagedInlineToolsResponse>;
   saveManagedInlineTools(id: string, enabled: boolean): Promise<ManagedInlineToolsResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
-  worktreeCheck(path: string): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
+  worktreeCheck(path: string, options?: { includeStatus?: boolean }): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
   launchManaged(payload: ManagedAgentLaunchPayload): Promise<ManagedOperationResponse>;
   restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
@@ -952,8 +952,12 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       if (options.limit !== undefined) query.set("limit", String(options.limit));
       return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));
     },
-    worktreeCheck: async (path: string) => {
-      const raw = await managedRequest(`/v1/git/worktree-check?path=${encodeURIComponent(path)}`, "GET");
+    worktreeCheck: async (path: string, options?: { includeStatus?: boolean }) => {
+      const query = new URLSearchParams({ path });
+      if (options?.includeStatus !== undefined) {
+        query.set("include_status", String(options.includeStatus));
+      }
+      const raw = await managedRequest(`/v1/git/worktree-check?${query.toString()}`, "GET");
       const body = recordValue(raw);
       return {
         is_git_repo: Boolean(body?.is_git_repo),

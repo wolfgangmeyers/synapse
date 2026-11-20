@@ -2430,13 +2430,13 @@ func (r *Router) handleGitWorktreeCheck(w http.ResponseWriter, req *http.Request
 		r.writeManagedError(w, req, &managedHTTPError{400, "BAD_REQUEST", "path parameter is required"})
 		return
 	}
-	result, err := gitworktree.CheckWorktree(req.Context(), path)
+	includeStatus := !strings.EqualFold(req.URL.Query().Get("include_status"), "false")
+	result, err := gitworktree.CheckWorktree(req.Context(), path, includeStatus)
 	if err != nil {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", err.Error()})
 		return
 	}
-	body, _ := json.Marshal(result)
-	r.writeManagedRaw(w, req, 200, map[string]string{"Content-Type": "application/json; charset=utf-8"}, body)
+	r.writeManagedJSON(w, req, http.StatusOK, result, nil)
 }
 
 func (r *Router) handleBackgroundBashDetail(w http.ResponseWriter, req *http.Request) {

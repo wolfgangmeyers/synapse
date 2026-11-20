@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactElement } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactElement } from "react";
 import type { ManagedAgent, ManagedAgentLaunchPayload, ModelSummary } from "../protocol/types";
 import type { ModelsResponse } from "../transport/http-client";
 import { DialogShell } from "./DialogShell";
@@ -18,11 +18,44 @@ export interface ManagedAgentDialogProps {
   onAction(agentId: string, action: "restart" | "reset" | "terminate", options?: { cleanupWorktree?: boolean }): Promise<void>;
   onListDirectories(path: string): Promise<{ path: string; parent: string; directories: Array<{ name: string; path: string }> }>;
   onModels?(): Promise<ModelsResponse>;
-  onWorktreeCheck?(path: string): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
+  onWorktreeCheck?(path: string, options?: { includeStatus?: boolean }): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
 }
 
 export function isGoogleProvider(provider: string | undefined): boolean {
   return provider === "google" || provider === "google-vertex";
+}
+
+// Bounded session cache for worktree check results (Scenario WTL-004).
+// Adheres to repository bounded retention policy: capped at 50 entries with LRU/FIFO eviction.
+const MAX_WORKTREE_CACHE_SIZE = 50;
+const worktreeCheckCache = new Map<string, { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>();
+
+function setCachedWorktreeCheck(path: string, result: { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }): void {
+  // If entry exists, delete before setting to refresh LRU order
+  if (worktreeCheckCache.has(path)) {
+    worktreeCheckCache.delete(path);
+  } else if (worktreeCheckCache.size >= MAX_WORKTREE_CACHE_SIZE) {
+    // Evict oldest entry (FIFO / least recently set)
+    const oldestKey = worktreeCheckCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      worktreeCheckCache.delete(oldestKey);
+    }
+  }
+  worktreeCheckCache.set(path, result);
+}
+
+function getCachedWorktreeCheck(path: string): { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean } | undefined {
+  const result = worktreeCheckCache.get(path);
+  if (result !== undefined) {
+    // Re-insert to mark as recently used
+    worktreeCheckCache.delete(path);
+    worktreeCheckCache.set(path, result);
+  }
+  return result;
+}
+
+export function clearWorktreeCheckCache(): void {
+  worktreeCheckCache.clear();
 }
 
 export function ManagedAgentDialog({ open, agent, pending = false, error, recentFolders, onClose, onLaunch, onAction, onListDirectories, onModels, onWorktreeCheck }: ManagedAgentDialogProps): ReactElement {
@@ -41,34 +74,75 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   const [worktreeBranch, setWorktreeBranch] = useState("");
   const [worktreeBranchUserEdited, setWorktreeBranchUserEdited] = useState(false);
 
+  // Keep a mutable ref to the latest onWorktreeCheck callback.
+  // This ensures that re-renders of the parent component (e.g. state updates or prop changes)
+  // never cancel or invalidate in-flight worktree check promises (Scenario WTL-002).
+  const onWorktreeCheckRef = useRef(onWorktreeCheck);
   useEffect(() => {
-    if (!open) return;
-    setName("");
-    setCwd(agent?.cwd ?? "");
-    setSelectedModel(agent?.model);
-    setInstruction("");
-    setConfirmTermination(false);
-    setIsMainWorktree(false);
-    setIsCheckingGit(false);
-    setWorktreeEnabled(false);
-    setWorktreeBranch("");
-    setWorktreeBranchUserEdited(false);
-  }, [agent, open]);
+    onWorktreeCheckRef.current = onWorktreeCheck;
+  });
 
-  // Debounce checking cwd for git worktree eligibility
-  useEffect(() => {
-    if (!open || agent || !onWorktreeCheck || !cwd.trim()) {
+  // Track the monotonically increasing ID and path of the active check to guard against
+  // out-of-order asynchronous responses (Scenario WTL-005).
+  const activeCheckIdRef = useRef(0);
+  const activePathRef = useRef("");
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Helper to execute or debounce worktree check for a given path
+  const triggerWorktreeCheck = (rawPath: string, delayMs: number): void => {
+    if (debounceTimerRef.current !== null) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
+    const trimmed = rawPath.trim();
+    activePathRef.current = trimmed;
+
+    if (!open || agent || !trimmed) {
       setIsMainWorktree(false);
       setIsCheckingGit(false);
       setWorktreeEnabled(false);
       return;
     }
-    let cancelled = false;
+
+    // Apply cached result immediately if available (Scenario WTL-004)
+    const cached = getCachedWorktreeCheck(trimmed);
+    if (cached) {
+      setIsCheckingGit(false);
+      if (cached.is_main_worktree) {
+        setIsMainWorktree(true);
+      } else {
+        setIsMainWorktree(false);
+        setWorktreeEnabled(false);
+      }
+      return;
+    }
+
+    if (!onWorktreeCheckRef.current) {
+      setIsMainWorktree(false);
+      setIsCheckingGit(false);
+      setWorktreeEnabled(false);
+      return;
+    }
+
     setIsCheckingGit(true);
-    const timer = setTimeout(() => {
-      onWorktreeCheck(cwd.trim())
+    const checkId = ++activeCheckIdRef.current;
+
+    const performCheck = (): void => {
+      const checkFn = onWorktreeCheckRef.current;
+      if (!checkFn) {
+        if (checkId === activeCheckIdRef.current) {
+          setIsCheckingGit(false);
+        }
+        return;
+      }
+
+      // Check worktree eligibility without running expensive git status --porcelain (Scenario WTL-006)
+      checkFn(trimmed, { includeStatus: false })
         .then((result) => {
-          if (cancelled) return;
+          // Discard stale responses if user has since navigated to another folder (Scenario WTL-005)
+          if (checkId !== activeCheckIdRef.current || trimmed !== activePathRef.current) return;
+          setCachedWorktreeCheck(trimmed, result);
           if (result.is_main_worktree) {
             setIsMainWorktree(true);
           } else {
@@ -77,23 +151,61 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
           }
         })
         .catch(() => {
-          if (cancelled) return;
+          if (checkId !== activeCheckIdRef.current || trimmed !== activePathRef.current) return;
           setIsMainWorktree(false);
           setWorktreeEnabled(false);
         })
         .finally(() => {
-          if (!cancelled) {
+          if (checkId === activeCheckIdRef.current) {
             setIsCheckingGit(false);
           }
         });
-    }, 500);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      setIsCheckingGit(false);
     };
-  }, [cwd, open, agent, onWorktreeCheck]);
+
+    if (delayMs === 0) {
+      performCheck();
+    } else {
+      debounceTimerRef.current = setTimeout(performCheck, delayMs);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    setName("");
+    const initialCwd = agent?.cwd ?? "";
+    setCwd(initialCwd);
+    setSelectedModel(agent?.model);
+    setInstruction("");
+    setConfirmTermination(false);
+    setIsMainWorktree(false);
+    setIsCheckingGit(false);
+    setWorktreeEnabled(false);
+    setWorktreeBranch("");
+    setWorktreeBranchUserEdited(false);
+
+    // When opening the dialog with an initial cwd, check immediately without debounce delay
+    if (initialCwd.trim() && !agent) {
+      triggerWorktreeCheck(initialCwd, 0);
+    }
+  }, [agent, open]);
+
+  // Handle cwd changes from ManagedDirectoryPicker (clean onChange(path: string) signature)
+  const handleCwdChange = (newPath: string): void => {
+    setCwd(newPath);
+    const trimmed = newPath.trim();
+    // If already in cache, apply immediately (0ms); otherwise debounce 150ms for manual typing
+    const isCached = trimmed !== "" && worktreeCheckCache.has(trimmed);
+    triggerWorktreeCheck(newPath, isCached ? 0 : 150);
+  };
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
 
   // Auto-slugify branch name from agent name when not user-edited
   useEffect(() => {
@@ -133,7 +245,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
       {confirmTermination ? <div className="managed-confirmation" role="alert"><p>Terminate {agent.agent_id}?</p><button type="button" className="danger-button" disabled={pending} onClick={() => { void onAction(agent.agent_id, "terminate"); }}>Terminate agent</button><button type="button" className="secondary" onClick={() => setConfirmTermination(false)}>Cancel</button></div> : null}
     </section> : <form className="managed-agent-form" onSubmit={submit}>
       <label>Name<input required value={name} onChange={(event) => setName(event.currentTarget.value)} autoComplete="off" /></label>
-      <ManagedDirectoryPicker value={cwd} {...(recentFolders === undefined ? {} : { recentFolders })} isCheckingGit={isCheckingGit} onChange={setCwd} list={onListDirectories} />
+      <ManagedDirectoryPicker value={cwd} {...(recentFolders === undefined ? {} : { recentFolders })} isCheckingGit={isCheckingGit} onChange={handleCwdChange} list={onListDirectories} />
       {isMainWorktree ? <div className="worktree-section">
         <button
           type="button"

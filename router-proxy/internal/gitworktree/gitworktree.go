@@ -40,8 +40,10 @@ func randomHex(byteLen int) (string, error) {
 }
 
 // CheckWorktree inspects path to determine if it is a git repo, whether it is the main worktree,
-// and whether it contains uncommitted changes.
-func CheckWorktree(ctx context.Context, path string) (WorktreeCheckResult, error) {
+// and whether it contains uncommitted changes. When includeStatus is true, git status --porcelain
+// is executed to populate HasUncommittedChanges; when false, that check is skipped and
+// HasUncommittedChanges is false.
+func CheckWorktree(ctx context.Context, path string, includeStatus bool) (WorktreeCheckResult, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -120,12 +122,14 @@ func CheckWorktree(ctx context.Context, path string) (WorktreeCheckResult, error
 		}
 	}
 
-	// Check for uncommitted changes
-	statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
-	statusOut, err := statusCmd.Output()
-	if err == nil {
-		if strings.TrimSpace(string(statusOut)) != "" {
-			result.HasUncommittedChanges = true
+	// Check for uncommitted changes if requested
+	if includeStatus {
+		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+		statusOut, err := statusCmd.Output()
+		if err == nil {
+			if strings.TrimSpace(string(statusOut)) != "" {
+				result.HasUncommittedChanges = true
+			}
 		}
 	}
 

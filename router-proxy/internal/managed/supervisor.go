@@ -886,7 +886,7 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		if strings.TrimSpace(request.WorktreeBranch) == "" {
 			return LaunchResult{}, errors.New("worktree branch is required")
 		}
-		check, checkErr := gitworktree.CheckWorktree(ctx, cwd)
+		check, checkErr := gitworktree.CheckWorktree(ctx, cwd, false)
 		if checkErr != nil {
 			return LaunchResult{}, fmt.Errorf("failed to check git worktree: %w", checkErr)
 		}

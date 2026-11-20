@@ -1,11 +1,21 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearWorktreeCheckCache, ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
+import { TerminateConfirmationDialog } from "../../src/components/TerminateConfirmationDialog";
 import type { ModelsResponse } from "../../src/transport/http-client";
 
+beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 40, y: 40, left: 40, top: 40, right: 840, bottom: 640, width: 800, height: 600, toJSON: () => ({}) });
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+});
+
 describe("ManagedAgentDialog", () => {
+  beforeEach(() => {
+    clearWorktreeCheckCache();
+  });
   afterEach(cleanup);
 
   it("uses the shared Goal dialog presentation", () => {
@@ -180,7 +190,7 @@ describe("ManagedAgentDialog", () => {
     const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: false, has_uncommitted_changes: false }));
     render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo/sub" } });
-    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo/sub"));
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo/sub", { includeStatus: false }));
     expect(screen.queryByRole("button", { name: /Create a worktree/i })).not.toBeInTheDocument();
   });
 
@@ -188,7 +198,7 @@ describe("ManagedAgentDialog", () => {
     const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
     render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
-    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo"));
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false }));
     expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
   });
 
@@ -247,7 +257,7 @@ describe("ManagedAgentDialog", () => {
     expect(screen.queryByText("Drop a folder from Finder.")).not.toBeInTheDocument();
 
     // Wait for the debounced call to happen
-    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo"));
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false }));
 
     // Settle the check
     resolveCheck({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false });
@@ -280,5 +290,253 @@ describe("ManagedAgentDialog", () => {
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByRole("option", { name: "Select folder /recent/one" })).toBeInTheDocument();
     expect(within(dialog).getByRole("option", { name: "Select folder /recent/two" })).toBeInTheDocument();
+  });
+
+  it("displays create worktree toggle immediately when selecting main worktree from recent folders (WTL-001)", async () => {
+    const user = userEvent.setup();
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    render(
+      <ManagedAgentDialog
+        open
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        recentFolders={["/allowed/repo"]}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+
+    const option = screen.getByRole("option", { name: "Select folder /allowed/repo" });
+    await user.click(option);
+
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false }));
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+  });
+
+  it("displays create worktree toggle immediately when selecting main worktree from folder browser (WTL-001)", async () => {
+    const user = userEvent.setup();
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    const onListDirectories = vi.fn(async (path: string) =>
+      path === "/allowed/repo"
+        ? { path: "/allowed/repo", parent: "/allowed", directories: [] }
+        : { path: "/allowed", parent: "", directories: [{ name: "repo", path: "/allowed/repo" }] },
+    );
+    render(
+      <ManagedAgentDialog
+        open
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={onListDirectories}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Browse folders" }));
+    const folderBrowser = await screen.findByRole("dialog", { name: "Choose working folder" });
+    const repoBtn = await within(folderBrowser).findByRole("button", { name: "repo" });
+    await user.click(repoBtn);
+    await user.click(within(folderBrowser).getByRole("button", { name: "Select folder" }));
+
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false }));
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+  });
+
+  it("preserves in-flight worktree check during parent component re-renders (WTL-002)", async () => {
+    let resolveCheck: (val: { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }) => void = () => {};
+    const onWorktreeCheck = vi.fn(() => new Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>((resolve) => {
+      resolveCheck = resolve;
+    }));
+
+    const { rerender } = render(
+      <ManagedAgentDialog
+        open
+        pending={false}
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false }));
+
+    const onWorktreeCheckNew = vi.fn();
+    rerender(
+      <ManagedAgentDialog
+        open
+        pending={true}
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        onWorktreeCheck={onWorktreeCheckNew}
+      />
+    );
+
+    resolveCheck({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false });
+
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+  });
+
+  it("debounces manual path input responsively at 150ms (WTL-003)", () => {
+    vi.useFakeTimers();
+    try {
+      const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+      render(
+        <ManagedAgentDialog
+          open
+          onClose={() => undefined}
+          onLaunch={async () => undefined}
+          onAction={async () => undefined}
+          onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+          onWorktreeCheck={onWorktreeCheck}
+        />
+      );
+
+      const input = screen.getByLabelText("Working folder");
+      fireEvent.change(input, { target: { value: "/allowed/repo" } });
+
+      vi.advanceTimersByTime(100);
+      expect(onWorktreeCheck).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(50);
+      expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo", { includeStatus: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("instantly renders worktree toggle for cached paths without network delay (WTL-004)", async () => {
+    const user = userEvent.setup();
+    const onWorktreeCheck = vi.fn(async (path: string) => {
+      if (path === "/allowed/repo-a") {
+        return { is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false };
+      }
+      return { is_git_repo: true, is_main_worktree: false, has_uncommitted_changes: false };
+    });
+
+    render(
+      <ManagedAgentDialog
+        open
+        recentFolders={["/allowed/repo-a", "/allowed/repo-b"]}
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    await user.click(screen.getByRole("option", { name: "Select folder /allowed/repo-a" }));
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+    expect(onWorktreeCheck).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    await user.click(screen.getByRole("option", { name: "Select folder /allowed/repo-b" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Create a worktree/i })).not.toBeInTheDocument());
+    expect(onWorktreeCheck).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    await user.click(screen.getByRole("option", { name: "Select folder /allowed/repo-a" }));
+
+    expect(screen.getByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+    expect(onWorktreeCheck).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards out-of-order check response when directory changes (WTL-005)", async () => {
+    let resolveSlowCheck: (val: { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }) => void = () => {};
+    const onWorktreeCheck = vi.fn((path: string) => {
+      if (path === "/allowed/slow-repo") {
+        return new Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>((resolve) => {
+          resolveSlowCheck = resolve;
+        });
+      }
+      return Promise.resolve({ is_git_repo: false, is_main_worktree: false, has_uncommitted_changes: false });
+    });
+
+    render(
+      <ManagedAgentDialog
+        open
+        recentFolders={["/allowed/slow-repo", "/allowed/fast-dir"]}
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    await user.click(screen.getByRole("option", { name: "Select folder /allowed/slow-repo" }));
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/slow-repo", { includeStatus: false }));
+
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    await user.click(screen.getByRole("option", { name: "Select folder /allowed/fast-dir" }));
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/fast-dir", { includeStatus: false }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Create a worktree/i })).not.toBeInTheDocument());
+
+    resolveSlowCheck({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(screen.queryByRole("button", { name: /Create a worktree/i })).not.toBeInTheDocument();
+  });
+
+  it("fast launch check bypasses expensive sequential git status via include_status=false (WTL-006)", async () => {
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    render(
+      <ManagedAgentDialog
+        open
+        onClose={() => undefined}
+        onLaunch={async () => undefined}
+        onAction={async () => undefined}
+        onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/huge-repo" } });
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/huge-repo", { includeStatus: false }));
+    expect(onWorktreeCheck).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ includeStatus: false }));
+  });
+
+  it("worker termination confirmation retains include_status=true by omitting includeStatus: false (WTL-007)", async () => {
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: false, has_uncommitted_changes: true }));
+    const worktreeAgent = {
+      agent_id: "managed-alpha",
+      source: "router-managed" as const,
+      cwd: "/allowed/project",
+      worktree: true,
+      model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+      desired_state: "running",
+      lifecycle_state: "running",
+      activity_state: "idle",
+      accepting_prompts: true,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2030-01-01T00:00:00.000Z",
+      started_at: null,
+      updated_at: "2030-01-01T00:00:00.000Z",
+      last_error: null,
+    };
+    render(
+      <TerminateConfirmationDialog
+        open
+        agent={worktreeAgent}
+        onClose={() => undefined}
+        onConfirm={async () => undefined}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/project");
+    expect(onWorktreeCheck).not.toHaveBeenCalledWith(expect.any(String), { includeStatus: false });
+    expect(await screen.findByText(/Warning: This worktree has uncommitted changes that will be lost\./i)).toBeInTheDocument();
   });
 });

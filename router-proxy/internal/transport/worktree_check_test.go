@@ -57,6 +57,44 @@ func TestHandleGitWorktreeCheck(t *testing.T) {
 		t.Fatalf("expected IsGitRepo=true and IsMainWorktree=true, got %+v", result)
 	}
 
+	// Create an uncommitted file
+	if err := os.WriteFile(filepath.Join(gitDir, "dirty.txt"), []byte("dirty"), 0644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	// Default (without include_status param) defaults to include_status=true and checks uncommitted changes
+	reqDefault := httptest.NewRequest(http.MethodGet, "/v1/git/worktree-check?path="+gitDir, nil)
+	rrDefault := httptest.NewRecorder()
+	r.handleGitWorktreeCheck(rrDefault, reqDefault)
+	if rrDefault.Code != http.StatusOK {
+		t.Fatalf("expected 200 for default include_status, got %d", rrDefault.Code)
+	}
+	var resDefault gitworktree.WorktreeCheckResult
+	if err := json.Unmarshal(rrDefault.Body.Bytes(), &resDefault); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resDefault.HasUncommittedChanges {
+		t.Errorf("expected HasUncommittedChanges=true when include_status is omitted")
+	}
+
+	// With include_status=false -> skips status check and returns has_uncommitted_changes=false
+	reqNoStatus := httptest.NewRequest(http.MethodGet, "/v1/git/worktree-check?path="+gitDir+"&include_status=false", nil)
+	rrNoStatus := httptest.NewRecorder()
+	r.handleGitWorktreeCheck(rrNoStatus, reqNoStatus)
+	if rrNoStatus.Code != http.StatusOK {
+		t.Fatalf("expected 200 for include_status=false, got %d", rrNoStatus.Code)
+	}
+	var resNoStatus gitworktree.WorktreeCheckResult
+	if err := json.Unmarshal(rrNoStatus.Body.Bytes(), &resNoStatus); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !resNoStatus.IsGitRepo || !resNoStatus.IsMainWorktree {
+		t.Errorf("expected IsGitRepo=true and IsMainWorktree=true for include_status=false, got %+v", resNoStatus)
+	}
+	if resNoStatus.HasUncommittedChanges {
+		t.Errorf("expected HasUncommittedChanges=false when include_status=false, got %+v", resNoStatus)
+	}
+
 	if !managedPath("/v1/git/worktree-check") {
 		t.Fatalf("expected managedPath to match /v1/git/worktree-check")
 	}
