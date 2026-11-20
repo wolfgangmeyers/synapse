@@ -286,10 +286,10 @@ func TestEmbeddedMailMidTurnSteering(t *testing.T) {
 	require.Zero(t, outboxCount, "final text requires an explicit send tool to become outbound mail")
 }
 
-// TestEmbeddedMailMultiToolInterruptedByMidTurnSteering tests that an active multi-tool
-// batch is interrupted mid-turn by an incoming user steering message, aborts subsequent
-// tools, and responds immediately to the user.
-func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
+// TestEmbeddedMailMultiToolCleanCompletionWithMidTurnSteering tests that batched
+// tool calls execute cleanly to completion without abortion when a mid-turn steering
+// message arrives, and the queued steering message is delivered with full context.
+func TestEmbeddedMailMultiToolCleanCompletionWithMidTurnSteering(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	require.NoError(t, os.Chmod(root, 0700))
@@ -304,10 +304,12 @@ func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
 
 	step1ActiveFile := filepath.Join(root, "step1_active.txt")
 	step1FinishFile := filepath.Join(root, "step1_finish.txt")
-	step2MarkerFile := filepath.Join(root, "step2_should_never_run.txt")
+	step2MarkerFile := filepath.Join(root, "step2_marker.txt")
 
 	var sawSteering atomic.Bool
-	var sawTool2Aborted atomic.Bool
+	var sawTool1Success atomic.Bool
+	var sawTool2Success atomic.Bool
+	var sawToolInterrupted atomic.Bool
 
 	// Initial step: worker responds to genesis
 	initialStep := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
@@ -324,7 +326,7 @@ func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
 		}, ai.StopToolUse)
 	}
 
-	// Step 2: Next step after tool call interruption, receives steering message in transcript
+	// Step 2: Next step after tool completion, receives steering message in transcript
 	multiStep2 := func(hist ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
 		for _, msg := range hist.Messages {
 			if u, ok := msg.(ai.UserMessage); ok {
@@ -337,18 +339,30 @@ func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
 				}
 			}
 			if tr, ok := msg.(ai.ToolResultMessage); ok {
+				if tr.ToolCallID == "call-step1" {
+					for _, c := range tr.Content {
+						if tc, ok := c.(ai.TextContent); ok {
+							if strings.Contains(tc.Text, "step1 complete") {
+								sawTool1Success.Store(true)
+							}
+						}
+					}
+				}
 				if tr.ToolCallID == "call-step2" {
 					for _, c := range tr.Content {
 						if tc, ok := c.(ai.TextContent); ok {
+							if strings.Contains(tc.Text, "step2 ran") {
+								sawTool2Success.Store(true)
+							}
 							if strings.Contains(tc.Text, "interrupted by user steering message") {
-								sawTool2Aborted.Store(true)
+								sawToolInterrupted.Store(true)
 							}
 						}
 					}
 				}
 			}
 		}
-		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "I halted the remaining tools and am responding to your steering message immediately."}}, ai.StopStop)
+		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "Both tools completed and I am responding to your steering message immediately."}}, ai.StopStop)
 	}
 
 	reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep, initialStep})
@@ -434,9 +448,9 @@ func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
 		return e == nil && a.ActivityState == "idle"
 	}, 3*time.Second, 10*time.Millisecond)
 
-	// Verify tool 2 was NEVER executed
-	_, statErr := os.Stat(step2MarkerFile)
-	require.True(t, os.IsNotExist(statErr), "tool 2 must NOT have been executed!")
+	// Verify tool 2 was executed cleanly to completion
+	_, statErr := os.ReadFile(step2MarkerFile)
+	require.NoError(t, statErr, "tool 2 must have been executed cleanly!")
 
 	// Verify message state was updated to acknowledged
 	steeredMsgRecord, err := db.MessageFor(ctx, steerMsgID)
@@ -445,19 +459,28 @@ func TestEmbeddedMailMultiToolInterruptedByMidTurnSteering(t *testing.T) {
 
 	// Verify the message was received by runLoop() as a steering message
 	require.True(t, sawSteering.Load(), "steering message must be delivered to runLoop()")
-	require.True(t, sawTool2Aborted.Load(), "tool 2 must have been aborted with steering error message")
+	require.True(t, sawTool1Success.Load(), "tool 1 must have executed successfully")
+	require.True(t, sawTool2Success.Load(), "tool 2 must have executed successfully")
+	require.False(t, sawToolInterrupted.Load(), "tool 2 must not have been aborted with steering error message")
 
-	// Verify that the final assistant response produces a reply in embedded_reply_outbox for the steered message sender
+	// Final assistant text is persisted for the user, never auto-routed as mail.
 	rawDB, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	defer rawDB.Close()
 
-	var replySender, replyRecipient, replyBody string
-	err = rawDB.QueryRowContext(ctx, `SELECT sender, recipient, body FROM embedded_reply_outbox WHERE attempt_id=(SELECT attempt_id FROM embedded_attempts WHERE message_id=?)`, steerMsgID).Scan(&replySender, &replyRecipient, &replyBody)
+	var finalBody string
+	err = rawDB.QueryRowContext(ctx, `SELECT body FROM embedded_entries WHERE agent_id=? AND kind='assistant' ORDER BY seq DESC LIMIT 1`, launched.Agent.AgentID).Scan(&finalBody)
 	require.NoError(t, err)
-	require.Equal(t, launched.Agent.AgentID, replySender)
-	require.Equal(t, "supervisor", replyRecipient)
-	require.Contains(t, replyBody, "I halted the remaining tools and am responding to your steering message immediately")
+	require.Contains(t, finalBody, "Both tools completed and I am responding to your steering message immediately")
+	var sender, recipient, histContent string
+	err = rawDB.QueryRowContext(ctx, `SELECT json_extract(presentation_json,'$.from'), json_extract(presentation_json,'$.to'), message_content FROM managed_complete_history WHERE agent_id=? AND category='assistant' ORDER BY sequence DESC LIMIT 1`, launched.Agent.AgentID).Scan(&sender, &recipient, &histContent)
+	require.NoError(t, err)
+	require.Equal(t, launched.Agent.AgentID, sender)
+	require.Equal(t, "user", recipient)
+	require.Equal(t, "Both tools completed and I am responding to your steering message immediately.", histContent)
+	var outboxCount int
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox`).Scan(&outboxCount))
+	require.Zero(t, outboxCount, "final text requires an explicit send tool to become outbound mail")
 }
 
 // TestEmbeddedMailToolsNoSyntheticFallbackText verifies that turns executing tools
