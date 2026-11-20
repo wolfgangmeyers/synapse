@@ -399,7 +399,8 @@ func (s *Store) ReadyEmbeddedRoot(ctx context.Context, b EmbeddedBinding, operat
 			return errors.New("stale embedded readiness")
 		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND runtime_generation=? AND runtime='embedded' AND desired_state='running' AND lifecycle_state='starting' AND launch_operation_id=? AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=? AND state='pending')`, now, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, operationID, operationID)
+		// Preserve 'active' if already executing an initial turn, otherwise default to 'idle'.
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state=CASE WHEN activity_state='active' THEN 'active' ELSE 'idle' END,accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND runtime_generation=? AND runtime='embedded' AND desired_state='running' AND lifecycle_state='starting' AND launch_operation_id=? AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=? AND state='pending')`, now, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, operationID, operationID)
 		if err != nil {
 			return err
 		}

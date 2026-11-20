@@ -72,3 +72,55 @@ func TestEmbeddedRootStartingBoundReadyCASAndCrashReopen(t *testing.T) {
 	require.Error(t, fresh.ReadyEmbeddedRoot(ctx, staleOwner, op.OperationID))
 	require.Error(t, fresh.ReadyEmbeddedRoot(ctx, wrong, op.OperationID))
 }
+
+func TestEmbeddedRootReadyPreservesActiveActivityState(t *testing.T) {
+	ctx := context.Background()
+	s, _ := embeddedRedStore(t)
+	agent := ManagedAgentRecord{
+		AgentID:           "active-ready-root",
+		Name:              "active-ready-root",
+		Cwd:               t.TempDir(),
+		SelectedModel:     ManagedModel{Provider: "openai-codex", ID: "gpt-5"},
+		Runtime:           "embedded",
+		PiSessionID:       "session-active-ready",
+		SessionEpoch:      1,
+		RuntimeGeneration: "gen-active-ready",
+		ManifestRevision:  1,
+		ManifestHash:      testManifestHash,
+	}
+	op := ManagedOperation{
+		OperationID:       "op-active-ready",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "op-active-ready",
+		CanonicalBodyHash: "hash",
+		ResponseStatus:    202,
+		ResponseHeaders:   map[string]string{},
+		ResponseBody:      []byte(`{}`),
+	}
+	require.NoError(t, s.ReserveManagedLaunch(ctx, agent, op))
+	b := EmbeddedBinding{AgentID: agent.AgentID, SessionID: agent.PiSessionID, Epoch: 1, Generation: agent.RuntimeGeneration}
+	require.NoError(t, s.BindEmbeddedSession(ctx, b, "root"))
+	b = claimEmbeddedFixture(t, s, b)
+
+	// Simulate an agent whose activity_state is already 'active' during startup
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'active' WHERE agent_id = ?`, agent.AgentID)
+	require.NoError(t, err)
+
+	before, err := s.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "starting", before.LifecycleState)
+	require.Equal(t, "active", before.ActivityState)
+
+	// Call ReadyEmbeddedRoot
+	require.NoError(t, s.ReadyEmbeddedRoot(ctx, b, op.OperationID))
+
+	// Verify that activity_state is preserved as 'active' and lifecycle_state is 'running'
+	after, err := s.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", after.LifecycleState)
+	require.Equal(t, "active", after.ActivityState)
+	require.True(t, after.AcceptingPrompts)
+	require.NotEmpty(t, after.StartedAt)
+}
+

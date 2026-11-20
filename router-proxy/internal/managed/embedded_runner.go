@@ -222,6 +222,16 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		m.embeddedOwners[agent.AgentID] = owner
 		m.mu.Unlock()
 		runCtx = context.WithValue(runCtx, embeddedOwnerContextKey{}, owner)
+
+		if err := m.store.ReadyEmbeddedRoot(runCtx, binding, operationID); err != nil {
+			if runCtx.Err() == nil {
+				m.failEmbeddedOwner(binding, operationID, "EMBEDDED_READY_FAILED", err)
+			}
+			return
+		}
+		lane.goalOwnerInvalid = false
+		_ = m.store.MarkManagedOperationTerminal(runCtx, operationID)
+
 		runner := m.embeddedRunnerFactory
 		if runner == nil {
 			runner = m.runEmbeddedSession
@@ -247,14 +257,6 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		if runCtx.Err() != nil {
 			return
 		}
-		if err := m.store.ReadyEmbeddedRoot(runCtx, binding, operationID); err != nil {
-			if runCtx.Err() == nil {
-				m.failEmbeddedOwner(binding, operationID, "EMBEDDED_READY_FAILED", err)
-			}
-			return
-		}
-		lane.goalOwnerInvalid = false
-		_ = m.store.MarkManagedOperationTerminal(runCtx, operationID)
 		if m.embeddedRunnerFactory == nil && runCtx.Err() == nil {
 			published := false
 			m.mu.Lock()

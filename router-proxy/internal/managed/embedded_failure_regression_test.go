@@ -256,3 +256,146 @@ func TestEmbeddedOrdinaryMailProviderErrorRemainsReadable(t *testing.T) {
 func TestEmbeddedMailFailureRecordingFaultUsesSafeDiagnostic(t *testing.T) {
 	t.Skip("mail turn errors no longer fail the worker")
 }
+
+func TestEmbeddedRunnerReadinessBeforeTurnBlocksAndTimeoutImmunity(t *testing.T) {
+	f := newFailureFixture(t)
+	turnEntered := make(chan struct{})
+	unblockTurn := make(chan struct{})
+
+	// Replace embedded runner with one that blocks simulating a long-running turn
+	f.m.embeddedRunnerFactory = func(ctx context.Context, agent store.ManagedAgentRecord) error {
+		close(turnEntered)
+		select {
+		case <-unblockTurn:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	launched, err := f.m.LaunchEmbeddedRoot(context.Background(), LaunchRequest{
+		Name:               "long-running-agent",
+		Cwd:                f.root,
+		Runtime:            "embedded",
+		InitialInstruction: "think for a long time",
+		RequestID:          "e5555555-5555-4555-8555-555555555555",
+	})
+	require.NoError(t, err)
+
+	// Wait until runner starts and is actively blocked in its turn
+	select {
+	case <-turnEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not enter turn within deadline")
+	}
+
+	// While runner is still blocked, verify:
+	// 1. Agent record in store has lifecycle_state = 'running'
+	// 2. Launch operation is terminal
+	record, err := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", record.LifecycleState)
+	require.True(t, record.AcceptingPrompts)
+	require.NotEmpty(t, record.StartedAt)
+
+	// In the real system, runEmbeddedSession sets activity_state to 'active' during turns.
+	// In this mock test, update activity_state to 'active' to match real turn execution semantics.
+	owner, ok := f.m.embeddedOwners[launched.Agent.AgentID]
+	require.True(t, ok)
+	require.NoError(t, f.db.SetEmbeddedActivityState(context.Background(), owner.binding, "active"))
+
+	record, err = f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", record.LifecycleState)
+	require.Equal(t, "active", record.ActivityState)
+
+	require.NotEmpty(t, record.LaunchOperationID)
+	op, err := f.db.ManagedOperation(context.Background(), record.LaunchOperationID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", op.State)
+
+	// Now advance clock and call TimeoutStuckLaunches(ctx, 2*time.Minute)
+	// Even though launched earlier and clock advanced past timeout window, agent must NOT be killed because lifecycle_state == 'running'
+	require.NoError(t, f.clock.Advance(3*time.Minute))
+	timedOut, err := f.db.TimeoutStuckLaunches(context.Background(), 2*time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, 0, timedOut)
+
+	// Verify agent remains running
+	recordAfterSweep, err := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", recordAfterSweep.LifecycleState)
+
+	// Cleanly unblock turn
+	close(unblockTurn)
+	f.laneBarrier(t, launched.Agent.AgentID)
+
+	// After unblocking turn and waiting for laneBarrier, simulate turn completion settlement to idle
+	require.NoError(t, f.db.SetEmbeddedActivityState(context.Background(), owner.binding, "idle"))
+	finalRecord, err := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", finalRecord.ActivityState)
+	require.Equal(t, "running", finalRecord.LifecycleState)
+}
+
+func TestEmbeddedRunnerReadinessFailure(t *testing.T) {
+	f := newFailureFixture(t)
+
+	// Inject trigger into DB so that updating managed_agents during ReadyEmbeddedRoot fails
+	_, err := f.raw.Exec(`CREATE TRIGGER fail_embedded_ready BEFORE UPDATE OF lifecycle_state ON managed_agents WHEN NEW.lifecycle_state = 'running' BEGIN SELECT RAISE(ABORT, 'injected ready failure'); END;`)
+	require.NoError(t, err)
+
+	launched, err := f.m.LaunchEmbeddedRoot(context.Background(), LaunchRequest{
+		Name:               "ready-fail-agent",
+		Cwd:                f.root,
+		Runtime:            "embedded",
+		InitialInstruction: "startup test",
+		RequestID:          "e6666666-6666-4666-8666-666666666666",
+	})
+	require.NoError(t, err)
+
+	// Wait for agent to reach failed lifecycle
+	require.Eventually(t, func() bool {
+		rec, e := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+		return e == nil && rec.LifecycleState == "failed"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	record, err := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", record.LifecycleState)
+	require.Equal(t, "failed", record.ActivityState)
+	require.Equal(t, "EMBEDDED_READY_FAILED", record.LastErrorCode)
+	require.Contains(t, record.LastErrorMessage, "injected ready failure")
+}
+
+func TestEmbeddedRunnerStartupFailureAfterReadiness(t *testing.T) {
+	f := newFailureFixture(t)
+
+	// Configure embedded runner factory to fail with an explicit startup error
+	f.m.embeddedRunnerFactory = func(ctx context.Context, agent store.ManagedAgentRecord) error {
+		return errors.New("simulated startup runner failure")
+	}
+
+	launched, err := f.m.LaunchEmbeddedRoot(context.Background(), LaunchRequest{
+		Name:               "start-fail-agent",
+		Cwd:                f.root,
+		Runtime:            "embedded",
+		InitialInstruction: "startup test",
+		RequestID:          "e7777777-7777-4777-8777-777777777777",
+	})
+	require.NoError(t, err)
+
+	// Wait for agent to reach failed lifecycle
+	require.Eventually(t, func() bool {
+		rec, e := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+		return e == nil && rec.LifecycleState == "failed"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	record, err := f.db.ManagedAgent(context.Background(), launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", record.LifecycleState)
+	require.Equal(t, "failed", record.ActivityState)
+	require.Equal(t, "EMBEDDED_START_FAILED", record.LastErrorCode)
+	require.Contains(t, record.LastErrorMessage, "simulated startup runner failure")
+}
+

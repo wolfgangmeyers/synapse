@@ -8,6 +8,143 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTimeoutStuckLaunchesImmunityForActiveAndProgressingAgents(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := s.clock.Now()
+	threeMinsAgo := formatTimestamp(now.Add(-3 * time.Minute))
+	thirtySecsAgo := formatTimestamp(now.Add(-30 * time.Second))
+
+	// 1. Launch an agent in starting with created_at older than timeout (3 mins ago), but with activity_state = 'active'
+	activeAgent := ManagedAgentRecord{
+		AgentID:           "active-starting-agent",
+		Name:              "active-starting-agent",
+		SlotHeld:          true,
+		Cwd:               "/tmp",
+		SelectedModel:     ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		DesiredState:      "running",
+		LifecycleState:    "starting",
+		ActivityState:     "active",
+		PiSessionID:       "session-active",
+		SessionEpoch:      1,
+		RuntimeGeneration: "gen-active",
+		ManifestRevision:  1,
+		ManifestHash:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Runtime:           "embedded",
+		CreatedAt:         threeMinsAgo,
+		UpdatedAt:         threeMinsAgo,
+	}
+	activeOp := ManagedOperation{
+		OperationID:       "op-active-1",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "op-active-1",
+		CanonicalBodyHash: "hash-active",
+		State:             "pending",
+		ResponseStatus:    202,
+		ResponseBody:      []byte(`{}`),
+		CreatedAt:         threeMinsAgo,
+	}
+	require.NoError(t, s.ReserveManagedEmbeddedLaunch(ctx, activeAgent, activeOp, 32, "worker"))
+	// Overwrite timestamps and activity_state to simulate pre-existing active starting agent
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'active', created_at = ?, updated_at = ? WHERE agent_id = ?`, threeMinsAgo, threeMinsAgo, "active-starting-agent")
+	require.NoError(t, err)
+
+	// 2. Launch another agent in starting with created_at older than timeout (3 mins ago), but with updated_at recent (30s ago)
+	progressingAgent := ManagedAgentRecord{
+		AgentID:           "progressing-starting-agent",
+		Name:              "progressing-starting-agent",
+		SlotHeld:          true,
+		Cwd:               "/tmp",
+		SelectedModel:     ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		DesiredState:      "running",
+		LifecycleState:    "starting",
+		ActivityState:     "starting",
+		PiSessionID:       "session-progressing",
+		SessionEpoch:      1,
+		RuntimeGeneration: "gen-progressing",
+		ManifestRevision:  1,
+		ManifestHash:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Runtime:           "embedded",
+		CreatedAt:         threeMinsAgo,
+		UpdatedAt:         thirtySecsAgo,
+	}
+	progressingOp := ManagedOperation{
+		OperationID:       "op-progressing-1",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "op-progressing-1",
+		CanonicalBodyHash: "hash-progressing",
+		State:             "pending",
+		ResponseStatus:    202,
+		ResponseBody:      []byte(`{}`),
+		CreatedAt:         threeMinsAgo,
+	}
+	require.NoError(t, s.ReserveManagedEmbeddedLaunch(ctx, progressingAgent, progressingOp, 32, "worker"))
+	_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET created_at = ?, updated_at = ? WHERE agent_id = ?`, threeMinsAgo, thirtySecsAgo, "progressing-starting-agent")
+	require.NoError(t, err)
+
+	// 3. Launch a third agent in starting with created_at and updated_at older than timeout and activity_state = 'starting' (stuck)
+	stuckAgent := ManagedAgentRecord{
+		AgentID:           "stuck-starting-agent",
+		Name:              "stuck-starting-agent",
+		SlotHeld:          true,
+		Cwd:               "/tmp",
+		SelectedModel:     ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		DesiredState:      "running",
+		LifecycleState:    "starting",
+		ActivityState:     "starting",
+		PiSessionID:       "session-stuck-3",
+		SessionEpoch:      1,
+		RuntimeGeneration: "gen-stuck-3",
+		ManifestRevision:  1,
+		ManifestHash:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Runtime:           "embedded",
+		CreatedAt:         threeMinsAgo,
+		UpdatedAt:         threeMinsAgo,
+	}
+	stuckOp := ManagedOperation{
+		OperationID:       "op-stuck-3",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "op-stuck-3",
+		CanonicalBodyHash: "hash-stuck-3",
+		State:             "pending",
+		ResponseStatus:    202,
+		ResponseBody:      []byte(`{}`),
+		CreatedAt:         threeMinsAgo,
+	}
+	require.NoError(t, s.ReserveManagedEmbeddedLaunch(ctx, stuckAgent, stuckOp, 32, "worker"))
+	_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET created_at = ?, updated_at = ? WHERE agent_id = ?`, threeMinsAgo, threeMinsAgo, "stuck-starting-agent")
+	require.NoError(t, err)
+
+	// 4. Call TimeoutStuckLaunches(ctx, 2*time.Minute)
+	timedOutCount, err := s.TimeoutStuckLaunches(ctx, 2*time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, 1, timedOutCount)
+
+	// 5. Assert that only the third (stuck) agent timed out and failed. The first two remain in starting.
+	activeRec, err := s.ManagedAgent(ctx, "active-starting-agent")
+	require.NoError(t, err)
+	require.Equal(t, "starting", activeRec.LifecycleState)
+	require.Equal(t, "active", activeRec.ActivityState)
+
+	progressingRec, err := s.ManagedAgent(ctx, "progressing-starting-agent")
+	require.NoError(t, err)
+	require.Equal(t, "starting", progressingRec.LifecycleState)
+	require.Equal(t, "starting", progressingRec.ActivityState)
+
+	stuckRec, err := s.ManagedAgent(ctx, "stuck-starting-agent")
+	require.NoError(t, err)
+	require.Equal(t, "failed", stuckRec.LifecycleState)
+	require.Equal(t, "failed", stuckRec.ActivityState)
+	require.Equal(t, "LAUNCH_TIMEOUT", stuckRec.LastErrorCode)
+
+	stuckOpRec, err := s.ManagedOperation(ctx, "op-stuck-3")
+	require.NoError(t, err)
+	require.Equal(t, "terminal", stuckOpRec.State)
+}
+
 func TestSubagentPrefixRootAgentSnapshotAndListing(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

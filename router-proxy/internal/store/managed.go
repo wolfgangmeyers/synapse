@@ -6127,12 +6127,13 @@ func (s *Store) TimeoutStuckLaunches(ctx context.Context, timeout time.Duration)
 			return colErr
 		}
 		var whereClause string
+		// Do not time out launches actively running turns or showing recent progress updates.
 		if hasParent {
-			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND (parent_agent_id IS NULL OR parent_agent_id = '') AND created_at < ? `
+			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND activity_state != 'active' AND (parent_agent_id IS NULL OR parent_agent_id = '') AND created_at < ? AND updated_at < ? `
 		} else {
-			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) AND created_at < ? `
+			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND activity_state != 'active' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) AND created_at < ? AND updated_at < ? `
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT agent_id, launch_operation_id FROM managed_agents`+whereClause, cutoff)
+		rows, err := s.db.QueryContext(ctx, `SELECT agent_id, launch_operation_id FROM managed_agents`+whereClause, cutoff, cutoff)
 		if err != nil {
 			return err
 		}
