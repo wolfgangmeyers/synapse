@@ -7753,3 +7753,311 @@ select.form-control option,
 .workflow-journal-timeline li::marker { color: #54baff; }
 .workflow-journal-timeline summary { cursor: pointer; color: #9ed5ff; }
 @media (max-width: 650px) { .workflow-journal-layout { grid-template-columns: 1fr; } .workflow-journal-dialog { width: 96vw; } }
+
+/* Broadcast Message Dialog */
+.broadcast-dialog {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.broadcast-dialog .dialog-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: calc(100dvh - 64px);
+}
+
+.broadcast-dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.broadcast-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+.broadcast-count-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.broadcast-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.broadcast-recipient-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.broadcast-recipient-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.broadcast-recipient-row:hover {
+  background: rgba(15, 23, 42, 0.7);
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+.broadcast-recipient-row.selected {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.broadcast-recipient-row input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: #6366f1;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.broadcast-recipient-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: rgba(13, 20, 36, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.broadcast-recipient-avatar .agent-avatar-image {
+  width: 100%;
+  height: 100%;
+}
+
+.broadcast-agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+}
+
+.broadcast-agent-id {
+  font-size: 12px;
+  color: #64748b;
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.broadcast-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: rgba(100, 116, 139, 0.2);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+.broadcast-status-badge.status-active {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.broadcast-status-badge.status-idle {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.broadcast-status-badge.status-stopped,
+.broadcast-status-badge.status-terminated {
+  background: rgba(148, 163, 184, 0.12);
+  color: #64748b;
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+.broadcast-status-badge.status-failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.broadcast-recipient-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.broadcast-recipient-status.delivered {
+  color: #34d399;
+}
+
+.broadcast-recipient-status.queued {
+  color: #38bdf8;
+}
+
+.broadcast-recipient-status.error {
+  color: #f87171;
+}
+
+.broadcast-error-msg {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.broadcast-empty {
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+  padding: 16px 0;
+  margin: 0;
+}
+
+.broadcast-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.broadcast-subject-input,
+.broadcast-body-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.broadcast-body-input {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.broadcast-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #38bdf8;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+.broadcast-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(56, 189, 248, 0.3);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+
+.broadcast-summary {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.broadcast-summary.success {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+.broadcast-summary.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.broadcast-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.broadcast-dialog .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.broadcast-dialog .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.broadcast-dialog .btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.broadcast-dialog .btn-primary {
+  background: #3b82f6;
+  color: #ffffff;
+  border-color: rgba(59, 130, 246, 0.6);
+}
+
+.broadcast-dialog .btn-primary:hover:not(:disabled) {
+  background: #2563eb;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+.broadcast-dialog .btn-secondary {
+  background: rgba(30, 41, 59, 0.6);
+  color: #cbd5e1;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.broadcast-dialog .btn-secondary:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.8);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+

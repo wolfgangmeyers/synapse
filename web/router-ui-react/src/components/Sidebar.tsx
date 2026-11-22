@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { sourceAgentKey, type Agent } from "../state/agent-projection";
 import type { Arrival } from "../domain/arrivals";
-import { humanName } from "../state/selectors";
+import { humanName, isCompletedAgent } from "../state/selectors";
 import { BrandHeader } from "./BrandHeader";
 import { RouterSelector } from "./RouterSelector";
 import type { ConnectionState } from "./ConnectionStatus";
@@ -50,6 +50,7 @@ export interface SidebarProps {
   onWorkflows?: (() => void) | undefined;
   onWorkflowSchedules?: (() => void) | undefined;
   onOpenProgressHistory?: ((agentId: string) => void) | undefined;
+  onBroadcastMessage?: (() => void) | undefined;
 }
 function browserStorage(): StorageAdapter | undefined {
   try { return globalThis.localStorage; } catch { return undefined; }
@@ -59,14 +60,7 @@ function isBackgroundAgent(agent: Agent): boolean {
   return Boolean(agent.is_background ?? agent.managed_agent?.is_background);
 }
 
-function isCompletedAgent(agent: Agent): boolean {
-  const lifecycle = agent.lifecycle_state ?? agent.managed_agent?.lifecycle_state;
-  const desired = agent.desired_state ?? agent.managed_agent?.desired_state;
-  const activity = agent.activity_state ?? agent.managed_agent?.activity_state;
-  return lifecycle === "terminated" || lifecycle === "failed" || desired === "terminated" || activity === "stopped" || activity === "failed";
-}
-
-export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onLaunchBackgroundWorkflow, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onKnowledgeBase, onWorkflows, onWorkflowSchedules, onOpenProgressHistory }: SidebarProps): ReactElement {
+export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onLaunchBackgroundWorkflow, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onKnowledgeBase, onWorkflows, onWorkflowSchedules, onOpenProgressHistory, onBroadcastMessage }: SidebarProps): ReactElement {
   const [localFilter, setLocalFilter] = useState(filter ?? "");
   const [localTab, setLocalTab] = useState<"agents" | "background">("agents");
   const sidebarTab = controlledTab ?? localTab;
@@ -95,7 +89,7 @@ export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, 
   const managedActionsId = useId();
   const managedActionsRef = useRef<HTMLDivElement>(null);
   const isConnected = connection === "connected";
-  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onLaunchBackgroundWorkflow || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers || onToolDefaults || onKnowledgeBase || onWorkflows || onWorkflowSchedules);
+  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onLaunchBackgroundWorkflow || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers || onToolDefaults || onKnowledgeBase || onWorkflows || onWorkflowSchedules || onBroadcastMessage);
   const activeFilter = filter ?? localFilter;
 
   const activeBgCount = useMemo(() => {
@@ -188,6 +182,9 @@ export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, 
     if (onContextThresholds) {
       items.push({ id: "context-thresholds", label: "Context Thresholds", icon: "fa-solid fa-gauge-high", action: onContextThresholds });
     }
+    if (onBroadcastMessage) {
+      items.push({ id: "broadcast-message", label: "Broadcast Message", icon: "fa-solid fa-bullhorn", action: onBroadcastMessage });
+    }
     return items;
   }, [
     onLaunchManaged,
@@ -201,6 +198,7 @@ export function Sidebar({ sidebarTab: controlledTab, onSidebarTabChange, scope, 
     onWorkflows,
     onSystemOneConfig,
     onContextThresholds,
+    onBroadcastMessage,
   ]);
 
   useEffect(() => {

@@ -91,8 +91,9 @@ export function avatarForAgent(agentName: string): AgentAvatarAppearance {
   };
 }
 
-export function AgentAvatar({ agentId }: { agentId: string }): ReactElement {
-  const appearance = avatarForAgent(agentId);
+export function AgentAvatar({ agentId, agent }: { agentId?: string; agent?: { agent_id: string } }): ReactElement {
+  const id = agentId ?? agent?.agent_id ?? "agent";
+  const appearance = avatarForAgent(id);
   return (
     <span className="agent-avatar-image">
       <img src={appearance.src} alt="" />

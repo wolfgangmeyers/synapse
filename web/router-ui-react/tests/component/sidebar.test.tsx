@@ -72,6 +72,30 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
   });
 
+  it("includes Broadcast Message in managed actions menu when onBroadcastMessage is provided", async () => {
+    const user = userEvent.setup();
+    const onBroadcastMessage = vi.fn();
+    render(
+      <Sidebar
+        scope={{ routerUrl: "http://router.test", agentId: "web" }}
+        routerLabel="local"
+        connection="connected"
+        connectionIdentity="wolfgang"
+        agents={[]}
+        onBroadcastMessage={onBroadcastMessage}
+      />
+    );
+
+    const menuButton = screen.getByRole("button", { name: "Managed actions" });
+    await user.click(menuButton);
+    const menu = screen.getByRole("menu", { name: "Server controls menu" });
+    expect(menu).toHaveTextContent("Broadcast Message");
+
+    await user.click(screen.getByRole("menuitem", { name: "Broadcast Message" }));
+    expect(onBroadcastMessage).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
+  });
+
   it("moves an agent to the top of the visible list when selectedAgentId changes", () => {
     const agents = [
       { agent_id: "alpha.bot", source: "router-managed" as const },
