@@ -3,13 +3,22 @@ package store
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/stretchr/testify/require"
 )
+
+func isWorkflowAdminTool(name string) bool {
+	switch name {
+	case "workflow_list", "workflow_get", "workflow_save", "workflow_delete", "workflow_assign",
+		"workflow_state_list", "workflow_state_get", "workflow_state_save", "workflow_state_delete":
+		return true
+	default:
+		return false
+	}
+}
 
 func setupTestStoreForTools(t *testing.T) (*Store, context.Context) {
 	t.Helper()
@@ -75,9 +84,9 @@ func TestManagedTools(t *testing.T) {
 		require.Equal(t, 4, categoryCounts["System & Shell"])
 		require.Equal(t, 5, categoryCounts["Subagent Lifecycle"])
 		require.Equal(t, 5, categoryCounts["Messaging & Routing"])
-		require.Equal(t, 16, categoryCounts["Workflow Management"])
+		require.Equal(t, 18, categoryCounts["Workflow Management"])
 		require.Equal(t, 7, categoryCounts["Knowledge Base & Search"])
-		require.Equal(t, 5, categoryCounts["Worker Administration"])
+		require.Equal(t, 6, categoryCounts["Worker Administration"])
 	})
 
 	t.Run("SetToolDefault enables and disables", func(t *testing.T) {
@@ -123,7 +132,7 @@ func TestManagedTools(t *testing.T) {
 		for _, tool := range defaults {
 			if tool.Category == "File Operations" {
 				require.False(t, tool.Enabled, "file ops tool %s should be disabled", tool.ToolName)
-			} else if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
+			} else if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && isWorkflowAdminTool(tool.ToolName)) {
 				require.False(t, tool.Enabled, "admin tool %s should remain disabled", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other category %s tool %s should remain enabled", tool.Category, tool.ToolName)
@@ -189,7 +198,7 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
+			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && isWorkflowAdminTool(tool.ToolName)) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -204,7 +213,7 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			if tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
+			if tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && isWorkflowAdminTool(tool.ToolName)) {
 				require.False(t, tool.Enabled, "%s should be disabled for this agent", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other tool %s should remain enabled", tool.ToolName)
@@ -227,7 +236,7 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
+			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && isWorkflowAdminTool(tool.ToolName)) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -241,7 +250,7 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
+			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && isWorkflowAdminTool(tool.ToolName)) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled, "tool %s should be restored to default enabled", tool.ToolName)

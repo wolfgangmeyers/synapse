@@ -70,4 +70,5 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "worker_set_model", Category: "Worker Administration", Description: "Change the model assigned to a worker", DefaultEnabled: false, IsAdmin: true},
 	{ToolName: "worker_set_goal", Category: "Worker Administration", Description: "Set, inspect, or clear the goal of a worker", DefaultEnabled: false, IsAdmin: true},
 	{ToolName: "worker_status", Category: "Worker Administration", Description: "Query detailed status of workers", DefaultEnabled: false, IsAdmin: true},
+	{ToolName: "worker_list", Category: "Worker Administration", Description: "List managed workers with status filtering, goal policy, worktree metadata, and uptime", DefaultEnabled: false, IsAdmin: true},
 }
