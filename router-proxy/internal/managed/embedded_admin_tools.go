@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
@@ -16,13 +17,14 @@ import (
 // AdminToolsCategory is the category for worker administration tools.
 const AdminToolsCategory = "Worker Administration"
 
-// AdminToolNames lists the 5 administrative tools for worker lifecycle and configuration.
+// AdminToolNames lists the 6 administrative tools for worker lifecycle and configuration.
 var AdminToolNames = []string{
 	"worker_spawn",
 	"worker_terminate",
 	"worker_set_model",
 	"worker_set_goal",
 	"worker_status",
+	"worker_list",
 }
 
 func embeddedWorkerSpawnSchema() *ai.Schema {
@@ -525,7 +527,146 @@ func (m *Manager) embeddedWorkerStatusTool(owner embeddedOwner) agent.AgentTool 
 	}
 }
 
-// embeddedAdminTools returns the 5 admin tools for an embedded session.
+func embeddedWorkerListSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Opt("status", ai.EnumOf("all", "active", "running", "stopped").Describe("Filter workers by status: all, active, running, stopped. Defaults to all.")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func (m *Manager) embeddedWorkerListTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "worker_list",
+		Description: "List managed workers with status filtering, goal policy, worktree metadata, and uptime.",
+		Parameters:  embeddedWorkerListSchema(),
+		Execute: func(ctx context.Context, callID string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if m == nil || m.store == nil {
+				return agent.AgentToolResult{}, errors.New("manager store is unavailable")
+			}
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			}
+
+			status := "all"
+			if rawStatus, ok := args["status"]; ok && rawStatus != nil {
+				sStr, ok := rawStatus.(string)
+				if !ok {
+					return agent.AgentToolResult{}, errors.New("status must be a string")
+				}
+				sStr = strings.TrimSpace(sStr)
+				if sStr != "" {
+					status = sStr
+				}
+			}
+			if status != "all" && status != "active" && status != "running" && status != "stopped" {
+				return agent.AgentToolResult{}, fmt.Errorf("invalid status filter %q: must be 'all', 'active', 'running', or 'stopped'", status)
+			}
+
+			agents, err := m.store.ManagedAgents(ctx)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			workersList := make([]map[string]any, 0, len(agents))
+			for _, a := range agents {
+				// Status filter criteria:
+				// - "all": matches all workers.
+				// - "running": matches LifecycleState == "running".
+				// - "active": matches running/starting/restarting or ActivityState == "active".
+				// - "stopped": matches stopped/failed/terminating/terminated or DesiredState == "stopped"/"terminated".
+				var matches bool
+				switch status {
+				case "all":
+					matches = true
+				case "running":
+					matches = a.LifecycleState == "running"
+				case "active":
+					matches = a.LifecycleState == "running" || a.LifecycleState == "starting" || a.LifecycleState == "restarting" || a.ActivityState == "active"
+				case "stopped":
+					matches = a.LifecycleState == "stopped" || a.LifecycleState == "failed" || a.LifecycleState == "terminating" || a.LifecycleState == "terminated" || a.DesiredState == "stopped" || a.DesiredState == "terminated"
+				}
+
+				if !matches {
+					continue
+				}
+
+				// Goal policy: returns goal config and revisions if configured, or null/omitted.
+				policy, _ := m.store.ManagedGoalPolicyFor(ctx, a.AgentID)
+				var goalInfo map[string]any
+				if policy != nil && (policy.Config.Enabled || strings.TrimSpace(policy.Config.Goal) != "") {
+					goalInfo = map[string]any{
+						"enabled":          policy.Config.Enabled,
+						"goal":             policy.Config.Goal,
+						"projection_state": policy.ProjectionState,
+						"desired_revision": policy.DesiredRevision,
+						"applied_revision": policy.AppliedRevision,
+					}
+				}
+
+				// Uptime: parsed from started_at, clamped to 0 if stopped/inactive or if negative (clock skew).
+				var uptimeSeconds int64
+				if a.StartedAt != "" {
+					var startTime time.Time
+					var parseErr error
+					for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.000Z", time.RFC3339} {
+						startTime, parseErr = time.Parse(layout, a.StartedAt)
+						if parseErr == nil {
+							break
+						}
+					}
+					if parseErr == nil && !startTime.IsZero() {
+						isActiveOrRunning := a.LifecycleState == "running" || a.LifecycleState == "starting" || a.LifecycleState == "restarting" || a.ActivityState == "active"
+						if isActiveOrRunning {
+							diff := int64(m.now().Sub(startTime).Seconds())
+							if diff > 0 {
+								uptimeSeconds = diff
+							}
+						}
+					}
+				}
+
+				workersList = append(workersList, map[string]any{
+					"agent_id":           a.AgentID,
+					"name":               a.Name,
+					"runtime":            a.Runtime,
+					"lifecycle_state":    a.LifecycleState,
+					"activity_state":     a.ActivityState,
+					"desired_state":      a.DesiredState,
+					"cwd":                a.Cwd,
+					"model": map[string]any{
+						"provider": a.SelectedModel.Provider,
+						"id":       a.SelectedModel.ID,
+					},
+					"goal":               goalInfo,
+					"worktree":           a.Worktree,
+					"worktree_base_path": a.WorktreeBasePath,
+					"worktree_branch":    a.WorktreeBranch,
+					"created_at":         a.CreatedAt,
+					"started_at":         a.StartedAt,
+					"updated_at":         a.UpdatedAt,
+					"uptime_seconds":     uptimeSeconds,
+				})
+			}
+
+			respBytes, err := json.Marshal(map[string]any{
+				"status":  "ok",
+				"filter":  status,
+				"total":   len(workersList),
+				"workers": workersList,
+			})
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+		},
+	}
+}
+
+// embeddedAdminTools returns the 6 admin tools for an embedded session.
 func (m *Manager) embeddedAdminTools(owner embeddedOwner) []agent.AgentTool {
 	return []agent.AgentTool{
 		m.embeddedWorkerSpawnTool(owner),
@@ -533,6 +674,7 @@ func (m *Manager) embeddedAdminTools(owner embeddedOwner) []agent.AgentTool {
 		m.embeddedWorkerSetModelTool(owner),
 		m.embeddedWorkerSetGoalTool(owner),
 		m.embeddedWorkerStatusTool(owner),
+		m.embeddedWorkerListTool(owner),
 	}
 }
 
