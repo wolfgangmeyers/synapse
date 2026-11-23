@@ -82,3 +82,100 @@ test("removes worker tool and preserves mailbox and admin lifecycle", async ({ p
     expect(f.violations).toEqual([]);
   } catch (err) { console.error("ROUTER STDERR", stderr); console.error("ROUTER LOG", await (await import("node:fs/promises")).readFile(f.router.logPath, "utf8")); throw err; } finally { await f.close(); }
 });
+
+test("lists managed workers with status filter and metadata", async ({ page }) => {
+  test.setTimeout(120_000);
+  const f = await workflowHarness();
+  let stderr = ""; f.router.process.stderr?.on("data", b => { stderr += String(b); });
+  const caller = "worker-list-caller";
+  try {
+    await f.api("/v1/managed-agents", { name: caller, cwd: join(f.router.root, "work"), runtime: "embedded", model });
+    await expect.poll(() => f.rows("SELECT lifecycle_state FROM managed_agents WHERE agent_id=?", caller)[0]?.lifecycle_state).toBe("running");
+    await f.open(page);
+    const row = page.locator(`.agent-row[data-agent-id="${caller}"]`);
+    await expect(row).toBeVisible();
+    await row.locator(".agent-row-select").click();
+
+    async function turn(reply: Reply, final: string) {
+      const start = f.requests.length;
+      const baseline = Number(f.rows("SELECT COALESCE(MAX(seq), -1) AS seq FROM embedded_entries WHERE agent_id=?", caller)[0].seq);
+      f.replies.push(reply, { answer: final });
+      const initial = await f.router.advanceClock(1);
+      const clock = await f.router.advanceClock(Math.max(1, Date.now() + 2000 - Date.parse(initial.now)));
+      await f.api("/v1/messages", { id: randomUUID(), from: "user", to: caller, body: "Execute the fixture call", created_at: new Date(clock.now).toISOString(), source: { kind: "web_ui" } });
+      await expect.poll(() => f.requests.length).toBe(start + 2);
+      await expect.poll(() => f.rows("SELECT seq, CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind='assistant' ORDER BY seq", caller)
+        .filter(entry => Number(entry.seq) > baseline)
+        .map(entry => JSON.parse(String(entry.body)).content)).toContainEqual([expect.objectContaining({ type: "text", text: final })]);
+      return f.requests[start];
+    }
+
+    // Step 1: disabled rejection
+    const disabledRequest = await turn({ tool: "worker_list", args: { status: "all" } }, "Rejected disabled worker_list");
+    const disabledDefs = disabledRequest.tools as { name: string }[];
+    expect(disabledDefs.some(t => t.name === "worker_list")).toBe(false);
+    expect(lastToolOutput(f)).toMatch(/unavailable|rejected|not found/i);
+
+    // Step 2: Enable worker_list via PUT /v1/managed-agents/${caller}/tools
+    await f.api(`/v1/managed-agents/${caller}/tools`, { tool_name: "worker_list", enabled: true }, "PUT");
+
+    // Step 3: Call turn({ tool: "worker_list", args: { status: "all" } }, "Listed workers all")
+    const listAllRequest = await turn({ tool: "worker_list", args: { status: "all" } }, "Listed workers all");
+    expect((listAllRequest.tools as { name: string }[]).some(t => t.name === "worker_list")).toBe(true);
+
+    const listAllOutput = JSON.parse(lastToolOutput(f));
+    expect(listAllOutput.status).toBe("ok");
+    expect(listAllOutput.filter).toBe("all");
+    expect(listAllOutput.total).toBeGreaterThanOrEqual(1);
+    const callerEntry = listAllOutput.workers.find((w: { agent_id: string }) => w.agent_id === caller);
+    expect(callerEntry).toBeDefined();
+    expect(callerEntry.agent_id).toBe(caller);
+    expect(callerEntry.runtime).toBe("embedded");
+    expect(callerEntry.updated_at).toBeDefined();
+    expect(callerEntry.lifecycle_state).toBe("running");
+    expect(callerEntry.cwd).toBe(join(f.router.root, "work"));
+    expect(callerEntry.model).toEqual({ provider: model.provider, id: model.id });
+    expect(callerEntry.uptime_seconds).toBeGreaterThanOrEqual(0);
+
+    // Step 3b: Call turn with omitted status default ({})
+    await turn({ tool: "worker_list", args: {} }, "Listed workers default omitted");
+    const listOmittedOutput = JSON.parse(lastToolOutput(f));
+    expect(listOmittedOutput.status).toBe("ok");
+    expect(listOmittedOutput.filter).toBe("all");
+    expect(listOmittedOutput.workers.some((w: { agent_id: string }) => w.agent_id === caller)).toBe(true);
+
+    // Step 4: Call turn({ tool: "worker_list", args: { status: "running" } }, "Listed workers running")
+    await turn({ tool: "worker_list", args: { status: "running" } }, "Listed workers running");
+    const listRunningOutput = JSON.parse(lastToolOutput(f));
+    expect(listRunningOutput.status).toBe("ok");
+    expect(listRunningOutput.filter).toBe("running");
+    expect(listRunningOutput.workers.some((w: { agent_id: string }) => w.agent_id === caller)).toBe(true);
+
+    // Step 4b: Call turn({ tool: "worker_list", args: { status: "active" } }, "Listed workers active")
+    await turn({ tool: "worker_list", args: { status: "active" } }, "Listed workers active");
+    const listActiveOutput = JSON.parse(lastToolOutput(f));
+    expect(listActiveOutput.status).toBe("ok");
+    expect(listActiveOutput.filter).toBe("active");
+    expect(listActiveOutput.workers.some((w: { agent_id: string }) => w.agent_id === caller)).toBe(true);
+
+    // Step 5: Call turn({ tool: "worker_list", args: { status: "stopped" } }, "Listed workers stopped")
+    await turn({ tool: "worker_list", args: { status: "stopped" } }, "Listed workers stopped");
+    const listStoppedOutput = JSON.parse(lastToolOutput(f));
+    expect(listStoppedOutput.status).toBe("ok");
+    expect(listStoppedOutput.filter).toBe("stopped");
+
+    // Step 6: Call turn with invalid status rejection ({ status: "invalid_status" })
+    await turn({ tool: "worker_list", args: { status: "invalid_status" } }, "Rejected invalid status");
+    expect(lastToolOutput(f)).toMatch(/invalid arguments for worker_list|invalid status/i);
+
+    expect(f.wsFrames.length).toBeGreaterThan(0);
+    expect(f.violations).toEqual([]);
+  } catch (err) {
+    console.error("ROUTER STDERR", stderr);
+    console.error("ROUTER LOG", await (await import("node:fs/promises")).readFile(f.router.logPath, "utf8"));
+    throw err;
+  } finally {
+    await f.close();
+  }
+});
+

@@ -53,6 +53,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "worker_set_model", Name: "worker_set_model", Category: "admin", Description: "Change the model of a managed worker"},
 	{ID: "worker_set_goal", Name: "worker_set_goal", Category: "admin", Description: "Set, inspect, or clear the goal of a managed worker"},
 	{ID: "worker_status", Name: "worker_status", Category: "admin", Description: "Inspect detailed state and active subagents of managed workers"},
+	{ID: "worker_list", Name: "worker_list", Category: "admin", Description: "List managed workers with status filtering, goal policy, worktree metadata, and uptime"},
 	{ID: "workflow_list", Name: "workflow_list", Category: "admin", Description: "List all workflows with summary statistics"},
 	{ID: "workflow_get", Name: "workflow_get", Category: "admin", Description: "Retrieve full workflow details including states and export bundle"},
 	{ID: "workflow_save", Name: "workflow_save", Category: "admin", Description: "Create or update a workflow from an export bundle or fields"},

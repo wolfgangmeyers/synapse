@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
@@ -54,7 +55,7 @@ func TestAdminTools_RegistrationAndFiltering(t *testing.T) {
 
 	ctx := context.Background()
 	adminTools := mgr.embeddedSessionTools(owner)
-	require.Len(t, adminTools, 5)
+	require.Len(t, adminTools, 6)
 
 	toolNames := make(map[string]bool)
 	for _, tool := range adminTools {
@@ -64,7 +65,7 @@ func TestAdminTools_RegistrationAndFiltering(t *testing.T) {
 		require.True(t, toolNames[expectedName], "expected tool %s to be present in embeddedSessionTools", expectedName)
 	}
 
-	// 1. By default, with enabled = 0 in managed_tool_defaults, filterToolsForAgent strips all 5 admin tools
+	// 1. By default, with enabled = 0 in managed_tool_defaults, filterToolsForAgent strips all 6 admin tools
 	baseTools := append([]agent.AgentTool(nil), adminTools...)
 	filtered, err := mgr.filterToolsForAgent(ctx, owner.binding.AgentID, baseTools)
 	require.NoError(t, err)
@@ -410,4 +411,240 @@ func TestAdminTools_WorkerStatus(t *testing.T) {
 		"worker_id": "ghost-worker",
 	}, nil)
 	require.Error(t, err)
+}
+
+func TestAdminTools_WorkerList(t *testing.T) {
+	mgr, db, owner, root := setupAdminToolsFixture(t)
+	defer db.Close()
+	defer mgr.Close(context.Background())
+
+	ctx := context.Background()
+	listTool := mgr.embeddedWorkerListTool(owner)
+	require.Equal(t, "worker_list", listTool.Name)
+	require.NotNil(t, listTool.Parameters)
+
+	// 1. Worker A: Running worker with goal set and started_at in the past
+	now := mgr.now()
+	launchA := store.ManagedAgentRecord{
+		AgentID:          "worker-list-a",
+		Name:             "worker-list-a",
+		Cwd:              root,
+		SelectedModel:    store.ManagedModel{Provider: "google-vertex", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "active",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-hash-a",
+		CreatedAt:        now.Add(-200 * time.Second).UTC().Format(time.RFC3339),
+		StartedAt:        now.Add(-120 * time.Second).UTC().Format(time.RFC3339),
+		UpdatedAt:        now.UTC().Format(time.RFC3339),
+	}
+	opA := store.ManagedOperation{
+		OperationID:    "op-list-a",
+		Method:         "POST",
+		CanonicalPath:  "/v1/managed-agents",
+		RequestID:      "req-list-a",
+		ResponseStatus: 202,
+		ResponseBody:   []byte(`{}`),
+	}
+	require.NoError(t, db.ReserveManagedLaunch(ctx, launchA, opA))
+	_, err := db.SetManagedGoalDesiredState(ctx, "worker-list-a", true, "Complete milestone A")
+	require.NoError(t, err)
+
+	// 2. Worker B: Running worker with worktree metadata
+	launchB := store.ManagedAgentRecord{
+		AgentID:          "worker-list-b",
+		Name:             "worker-list-b",
+		Cwd:              root,
+		SelectedModel:    store.ManagedModel{Provider: "google-vertex", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		Worktree:         true,
+		WorktreeBasePath: "/tmp/repo",
+		WorktreeBranch:   "feature/worker-b",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-hash-b",
+		CreatedAt:        now.Add(-100 * time.Second).UTC().Format(time.RFC3339),
+		StartedAt:        now.Add(-60 * time.Second).UTC().Format(time.RFC3339),
+		UpdatedAt:        now.UTC().Format(time.RFC3339),
+	}
+	opB := store.ManagedOperation{
+		OperationID:    "op-list-b",
+		Method:         "POST",
+		CanonicalPath:  "/v1/managed-agents",
+		RequestID:      "req-list-b",
+		ResponseStatus: 202,
+		ResponseBody:   []byte(`{}`),
+	}
+	require.NoError(t, db.ReserveManagedLaunch(ctx, launchB, opB))
+
+	// 3. Worker C: Terminated / stopped worker
+	launchC := store.ManagedAgentRecord{
+		AgentID:          "worker-list-c",
+		Name:             "worker-list-c",
+		Cwd:              root,
+		SelectedModel:    store.ManagedModel{Provider: "google-vertex", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "terminated",
+		LifecycleState:   "failed",
+		ActivityState:    "stopped",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-hash-c",
+		CreatedAt:        now.Add(-50 * time.Second).UTC().Format(time.RFC3339),
+		StartedAt:        now.Add(-40 * time.Second).UTC().Format(time.RFC3339),
+		UpdatedAt:        now.UTC().Format(time.RFC3339),
+	}
+	opC := store.ManagedOperation{
+		OperationID:    "op-list-c",
+		Method:         "POST",
+		CanonicalPath:  "/v1/managed-agents",
+		RequestID:      "req-list-c",
+		ResponseStatus: 202,
+		ResponseBody:   []byte(`{}`),
+	}
+	require.NoError(t, db.ReserveManagedLaunch(ctx, launchC, opC))
+
+	// Helper to parse payload
+	parsePayload := func(res agent.AgentToolResult) map[string]any {
+		require.Len(t, res.Content, 1)
+		var p map[string]any
+		require.NoError(t, json.Unmarshal([]byte(res.Content[0].(ai.TextContent).Text), &p))
+		return p
+	}
+
+	// 4. Default / omitted status defaults to "all"
+	resOmitted, err := listTool.Execute(ctx, "call-omitted", map[string]any{}, nil)
+	require.NoError(t, err)
+	pOmitted := parsePayload(resOmitted)
+	require.Equal(t, "ok", pOmitted["status"])
+	require.Equal(t, "all", pOmitted["filter"])
+	workersOmitted := pOmitted["workers"].([]any)
+	require.GreaterOrEqual(t, len(workersOmitted), 4)
+
+	// 5. Explicit status: "all"
+	resAll, err := listTool.Execute(ctx, "call-all", map[string]any{"status": "all"}, nil)
+	require.NoError(t, err)
+	pAll := parsePayload(resAll)
+	require.Equal(t, "ok", pAll["status"])
+	require.Equal(t, "all", pAll["filter"])
+	workersAll := pAll["workers"].([]any)
+	require.Equal(t, len(workersOmitted), len(workersAll))
+
+	// 6. Status: "running"
+	resRunning, err := listTool.Execute(ctx, "call-running", map[string]any{"status": "running"}, nil)
+	require.NoError(t, err)
+	pRunning := parsePayload(resRunning)
+	require.Equal(t, "ok", pRunning["status"])
+	require.Equal(t, "running", pRunning["filter"])
+	workersRunning := pRunning["workers"].([]any)
+	runningIDs := make(map[string]bool)
+	for _, w := range workersRunning {
+		wMap := w.(map[string]any)
+		require.Equal(t, "running", wMap["lifecycle_state"])
+		runningIDs[wMap["agent_id"].(string)] = true
+	}
+	require.True(t, runningIDs["worker-list-a"], "worker-list-a must be in running filter")
+	require.True(t, runningIDs["worker-list-b"], "worker-list-b must be in running filter")
+	require.False(t, runningIDs["worker-list-c"], "worker-list-c must not be in running filter")
+
+	// 7. Status: "active"
+	resActive, err := listTool.Execute(ctx, "call-active", map[string]any{"status": "active"}, nil)
+	require.NoError(t, err)
+	pActive := parsePayload(resActive)
+	require.Equal(t, "ok", pActive["status"])
+	require.Equal(t, "active", pActive["filter"])
+	workersActive := pActive["workers"].([]any)
+	activeIDs := make(map[string]bool)
+	for _, w := range workersActive {
+		wMap := w.(map[string]any)
+		activeIDs[wMap["agent_id"].(string)] = true
+	}
+	require.True(t, activeIDs["worker-list-a"], "worker-list-a must be in active filter")
+	require.True(t, activeIDs["worker-list-b"], "worker-list-b must be in active filter")
+	require.False(t, activeIDs["worker-list-c"], "worker-list-c must not be in active filter")
+
+	// 8. Status: "stopped"
+	resStopped, err := listTool.Execute(ctx, "call-stopped", map[string]any{"status": "stopped"}, nil)
+	require.NoError(t, err)
+	pStopped := parsePayload(resStopped)
+	require.Equal(t, "ok", pStopped["status"])
+	require.Equal(t, "stopped", pStopped["filter"])
+	workersStopped := pStopped["workers"].([]any)
+	stoppedIDs := make(map[string]bool)
+	for _, w := range workersStopped {
+		wMap := w.(map[string]any)
+		stoppedIDs[wMap["agent_id"].(string)] = true
+	}
+	require.True(t, stoppedIDs["worker-list-c"], "worker-list-c must be in stopped filter")
+	require.False(t, stoppedIDs["worker-list-a"], "worker-list-a must not be in stopped filter")
+	require.False(t, stoppedIDs["worker-list-b"], "worker-list-b must not be in stopped filter")
+
+	// 9. Verify record hydration details
+	workersMap := make(map[string]map[string]any)
+	for _, w := range workersAll {
+		wMap := w.(map[string]any)
+		require.NotEmpty(t, wMap["runtime"])
+		require.NotEmpty(t, wMap["updated_at"])
+		workersMap[wMap["agent_id"].(string)] = wMap
+	}
+
+	// Worker A hydration (goal, uptime)
+	wA := workersMap["worker-list-a"]
+	require.NotNil(t, wA)
+	require.Equal(t, "worker-list-a", wA["name"])
+	require.Equal(t, "embedded", wA["runtime"])
+	require.NotEmpty(t, wA["updated_at"])
+	require.Equal(t, "running", wA["lifecycle_state"])
+	require.Equal(t, "active", wA["activity_state"])
+	require.Equal(t, "running", wA["desired_state"])
+	require.Equal(t, root, wA["cwd"])
+	modelA, ok := wA["model"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "google-vertex", modelA["provider"])
+	require.Equal(t, "gemini-3.8-flash", modelA["id"])
+	goalA, ok := wA["goal"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, goalA["enabled"])
+	require.Equal(t, "Complete milestone A", goalA["goal"])
+	require.False(t, wA["worktree"].(bool))
+	require.Empty(t, wA["worktree_base_path"])
+	require.Empty(t, wA["worktree_branch"])
+	uptimeA := int64(wA["uptime_seconds"].(float64))
+	require.GreaterOrEqual(t, uptimeA, int64(120), "worker A uptime must be >= 120s")
+
+	// Worker B hydration (worktree metadata)
+	wB := workersMap["worker-list-b"]
+	require.NotNil(t, wB)
+	require.Equal(t, "embedded", wB["runtime"])
+	require.NotEmpty(t, wB["updated_at"])
+	require.True(t, wB["worktree"].(bool))
+	require.Equal(t, "/tmp/repo", wB["worktree_base_path"])
+	require.Equal(t, "feature/worker-b", wB["worktree_branch"])
+	require.Nil(t, wB["goal"])
+	uptimeB := int64(wB["uptime_seconds"].(float64))
+	require.GreaterOrEqual(t, uptimeB, int64(60), "worker B uptime must be >= 60s")
+
+	// Worker C hydration (stopped worker uptime == 0)
+	wC := workersMap["worker-list-c"]
+	require.NotNil(t, wC)
+	require.Equal(t, "embedded", wC["runtime"])
+	require.NotEmpty(t, wC["updated_at"])
+	uptimeC := int64(wC["uptime_seconds"].(float64))
+	require.Equal(t, int64(0), uptimeC, "stopped worker uptime must be 0")
+
+	// 10. Invalid status error handling
+	_, err = listTool.Execute(ctx, "call-invalid-status", map[string]any{
+		"status": "bogus",
+	}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid status filter")
+
+	_, err = listTool.Execute(ctx, "call-non-string-status", map[string]any{
+		"status": 12345,
+	}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "status must be a string")
 }

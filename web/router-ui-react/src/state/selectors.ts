@@ -27,3 +27,19 @@ export function visibleAccepted(messages: import("../domain/history").HistoryMes
 export function canBridgeAccepted(startGeneration: number, currentGeneration: number, confirmed: boolean): boolean {
   return startGeneration === currentGeneration && !confirmed;
 }
+
+// Selection predicates for agent state:
+// Identifies terminated, failed, or stopped workers across projected lifecycle and activity states.
+export function isCompletedAgent(agent: Agent): boolean {
+  const lifecycle = agent.lifecycle_state ?? agent.managed_agent?.lifecycle_state;
+  const desired = agent.desired_state ?? agent.managed_agent?.desired_state;
+  const activity = agent.activity_state ?? agent.managed_agent?.activity_state;
+  return lifecycle === "terminated" || lifecycle === "failed" || desired === "terminated" || activity === "stopped" || activity === "failed";
+}
+
+// Identifies active running workers. Used by broadcast selection logic to default
+// recipient targets to active workers and sort them ahead of stopped/completed agents.
+export function isAgentActive(agent: Agent): boolean {
+  return !isCompletedAgent(agent);
+}
+

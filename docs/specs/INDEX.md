@@ -54,6 +54,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-MAILBOX-TMUX-001` | tmux Claude worker mailbox | `Mailbox` | [`tmux-claude-mailbox.spec.md`](./tmux-claude-mailbox.spec.md) | `tests/e2e/tmux-claude-mailbox.spec.ts` | `Draft` |
 | `SPEC-MAILBOX-RECEIPTS-001` | Bounded Conversation Send Receipts | `Mailbox` | [`conversation-send-receipt-retention.spec.md`](./conversation-send-receipt-retention.spec.md) | `tests/e2e/conversation-send-receipt-retention.spec.ts` | `Active` |
 | `SPEC-MAILBOX-001` | Mailbox Progress Across Session Replacement | `Mailbox` | [`mailbox-session-recovery.spec.md`](./mailbox-session-recovery.spec.md) | `tests/e2e/mailbox-session-recovery.spec.ts` (one combined ordinary/reset TC; remaining matrix planned) | `Draft` |
+| `SPEC-MAILBOX-BROADCAST-001` | Mailbox Message Broadcast | `Mailbox` | [`mailbox-broadcast.spec.md`](./mailbox-broadcast.spec.md) | `tests/e2e/mailbox-broadcast.spec.ts` | `Active` |
 | `SPEC-GOAL-001` | Bounded Automatic Goal Wakeups | `AgentManagement` | [`goal-wake-safety.spec.md`](./goal-wake-safety.spec.md) | `tests/e2e/goal-wake-safety.spec.ts` (one partial GWS-002/003 TC; remaining matrix planned) | `Draft` |
 | `SPEC-ROUTER-INIT-001` | Fresh-machine Router Initialization | `Settings` | [`router-initialization.spec.md`](./router-initialization.spec.md) | `tests/e2e/router-initialization.spec.ts` | `Active` |
 | `SPEC-PERMANENT-MANAGED-001` | Permanent Managed Mode | `AgentManagement` | [`permanent-managed-mode.spec.md`](./permanent-managed-mode.spec.md) | `tests/e2e/router-initialization.spec.ts` | `Active` |
@@ -102,6 +103,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-WORKFLOW-COLLECTIONS-001` | Multiple Workflow Collections with Per-Collection Git Sync, Move, and Copy | `Workflows` | [`workflow-collections.spec.md`](./workflow-collections.spec.md) | `tests/e2e/workflow-collections.spec.ts` | `Active` |
 | `SPEC-WORKFLOWS-CRASH-NUDGE-001` | Workflow Crash Nudge Recovery & Stopped Worker Continuations | `Workflows` | [`workflow-crash-nudge-recovery.spec.md`](./workflow-crash-nudge-recovery.spec.md) | `tests/e2e/workflow-stopped-worker-nudge.spec.ts` | `Active` |
 | `SPEC-AGENT-LAUNCH-TIMEOUT-001` | Embedded Launch Readiness and Timeout Resilience | `AgentManagement` | [`embedded-launch-readiness-and-timeout.spec.md`](./embedded-launch-readiness-and-timeout.spec.md) | `router-proxy/internal/store/managed_launch_recovery_test.go`, `router-proxy/internal/managed/embedded_failure_regression_test.go`, `tests/e2e/embedded-stale-relaunch.spec.ts` | `Accepted` |
+| `SPEC-WORKER-LIST-001` | Worker List Tool | `AgentManagement` | [`worker-list-tool.spec.md`](./worker-list-tool.spec.md) | `tests/e2e/worker-tool-actions.spec.ts` | `Active` |
 
 ---
 
