@@ -194,8 +194,18 @@ func (o *workflowNudgeObservation) observeClaude(ctx context.Context, msg *ai.As
 				o.observe(ctx, true)
 				return
 			}
+		case *ai.TextContent:
+			if item != nil && strings.TrimSpace(item.Text) != "" {
+				o.observe(ctx, true)
+				return
+			}
 		case ai.ToolCall:
 			if strings.TrimSpace(item.ID) != "" && strings.TrimSpace(item.Name) != "" {
+				o.observe(ctx, true)
+				return
+			}
+		case *ai.ToolCall:
+			if item != nil && strings.TrimSpace(item.ID) != "" && strings.TrimSpace(item.Name) != "" {
 				o.observe(ctx, true)
 				return
 			}

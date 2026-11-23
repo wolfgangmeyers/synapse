@@ -9,6 +9,8 @@
 
 An operational worker may continue its goal automatically without rapidly retrying failed turns. The first legitimate idle wake may be immediate; repeated automatic attempts are paced with a default 10-second delay and capped at 20 attempts in a consecutive automatic chain. Session-owner failure stops automatic wakeups until deliberate recovery establishes valid ownership. Failed automatic attempts cannot reset their own consecutive-chain count.
 
+When a worker turn produces an empty response or thinking-only output without tool calls or visible text, the worker has not made actionable forward progress. Such turns are accounted as empty turns under the 3-strike circuit breaker. Strikes 1 and 2 trigger actionable re-nudge attempts that are exempted from the finite consecutive continuation cap (allowing recovery even when the cap is reached), while pacing preserves the re-nudge prompt across delays. On strike 3, continuation halts to prevent runaway empty loops.
+
 This contract covers embedded standalone and implicit workflow goals. It refines the embedded idle rule in [implicit workflow goals](workflow-implicit-goals.spec.md). The selected repair applies the existing intended 10-second default delay and 20-attempt consecutive cap consistently to embedded automatic paths; it does not change stock Claude worker evaluator policy. Independent scheduled workflow launches remain governed by [structured schedules](SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md).
 
 ## 2. Core Invariants
@@ -21,6 +23,9 @@ This contract covers embedded standalone and implicit workflow goals. It refines
 6. **Goal continuity and cancellation**: Failure holds do not mark the goal done, clear it, unlock a workflow goal or advance workflow state. DONE, goal off and workflow exit/deactivation cancel continuation. Snooze, cap and ownership holds remain authoritative over stale wakes.
 7. **Observable recovery state**: Existing conversation/status surfaces expose failure and delayed/stopped automation. No new UI layout or public schema is prescribed.
 8. **Bounded bookkeeping**: Reuse bounded existing per-agent/goal state where semantics fit; no growing attempt history or retry backlog. Persistence is required only where existing semantics naturally support it, not as a new cross-restart guarantee. Clean up any new bounded state with its owning goal/agent; existing timeline retention is unchanged.
+9. **Empty-turn re-nudge cap exemption**: When an agent emits an empty response or thinking-only turn without taking action (strikes 1 and 2 of the 3-strike circuit breaker, `0 < consecutiveEmptyTurns < 3`), the resulting re-nudge continuation attempt is exempted from the consecutive continuation cap (default 20). If the agent reaches strike 3 (`consecutiveEmptyTurns >= 3`), continuation is paused by the circuit breaker.
+10. **Thinking-only turns accounted as empty turns**: Turns generating internal thinking content without tool calls and without visible assistant text do not constitute actionable progress. They do not set `hasText` during turn settlement across both value and pointer assistant messages, and are treated as empty turns subject to the 3-strike circuit breaker rather than silently consuming continuation quota.
+11. **Pacing prompt preservation**: When an empty-turn re-nudge continuation is delayed due to pacing (`clock.Now().Before(lane.goalNextAttempt)`), the specific actionable re-nudge prompt (`overridePrompt`) is preserved across the scheduling delay and dispatched when the timer fires.
 
 The 10-second value is the default pacing policy, not a claim about existing constants. Existing supported delay overrides remain positive and obey snooze and ownership safety; no new configuration API is required. The cap is 20 consecutive automatic attempts, not 20 retries plus an initial attempt. This incident repair does not mandate a new schema, lifetime budget, user-message reset prohibition or reinterpretation of existing evaluator policy.
 
@@ -70,6 +75,24 @@ Every case has **Mode: real-capable**. External LLM/evaluator services use deter
 - **When**: Separate cases snooze beyond retry eligibility, turn off an unlocked goal, or exit/deactivate the workflow through permitted controls.
 - **Then**: Snooze blocks execution until expiry and still respects cap/delay/ownership holds; goal off and workflow exit cancel continuation entirely. Manual workflow-locked goal changes remain rejected.
 
+### Scenario: [SCN-GWS-008] Empty-turn recovery re-nudges bypass consecutive continuation cap on strikes 1 and 2
+- **User Goal**: Allow an agent that reached the consecutive continuation cap to receive an actionable re-nudge when it emits an empty response.
+- **Given**: An agent has reached the consecutive continuation cap (`consecutiveContinuations >= 20`) with valid ownership and emits an empty response (or thinking-only turn without text or tool calls), recording strike 1 or strike 2 of the circuit breaker.
+- **When**: The router initiates an empty-turn recovery re-nudge with an actionable prompt.
+- **Then**: The re-nudge continuation attempt bypasses the consecutive continuation cap and dispatches the recovery turn. If the agent emits a third consecutive empty response (strike 3), the circuit breaker trips and pauses continuation.
+
+### Scenario: [SCN-GWS-009] Thinking-only turns are treated as empty turns under circuit breaker accounting
+- **User Goal**: Prevent agents emitting only silent thoughts from consuming continuation quota indefinitely without forward progress.
+- **Given**: An active goal is running and the model emits an assistant message containing only thinking tokens (no tool calls and no visible assistant text).
+- **When**: The router evaluates the settled turn.
+- **Then**: The turn is evaluated as an empty response (`toolCalls == 0 && !hasText`), incrementing the consecutive empty turns counter and triggering an actionable re-nudge (or halting at strike 3).
+
+### Scenario: [SCN-GWS-010] Paced empty-turn re-nudge retains actionable prompt across delay
+- **User Goal**: Ensure the actionable prompt crafted for empty-turn recovery is preserved when the recovery attempt is delayed by pacing.
+- **Given**: An empty turn triggers a re-nudge continuation with a specific actionable prompt (`overridePrompt`), but the agent lane is within its pacing delay interval.
+- **When**: The continuation is scheduled for the pacing deadline and subsequently wakes when the deadline arrives.
+- **Then**: The continuation dispatches with the original actionable override prompt rather than reverting to a generic wakeup prompt.
+
 ## 4. Automated E2E Verification Matrix
 
 Actual executable: `tests/e2e/goal-wake-safety.spec.ts` contains one TC, `SCN-GWS-002/003: failed automatic turns are paced and exhaust twenty attempts` (**Mode: real-capable**; executed with local Codex mock). It exercises real browser/WS/REST/router-proxy/SQLite, default boundary pacing and twenty provider-error attempts. This is partial SCN-GWS-002/003 proof, not all pre-model failures. Supporting Go guards: `TestGoalWakeSafetyFailedIdleAttemptsArePaced`, `TestGoalWakeSafetyFailedRecoveryEvictsOriginOwner`, `TestGoalWakeSafetyGoalOffCancelsFailedRetry`. They do not replace actor-visible acceptance. The seven titles below remain planned; no exact-title executable mapping is claimed. GWS-001/004/005/006, full GWS-007 and remaining GWS-002/003 branches are not run at browser acceptance level.
@@ -85,5 +108,8 @@ Execution evidence and proof gaps: [delivery report](reports/report-20261105-165
 | `SCN-GWS-005` | Automatic signals preserve chain safety | `tests/e2e/goal-wake-safety.spec.ts` | `suppressed idle and timer checks do not renew automatic chain` |
 | `SCN-GWS-006` | User recovery | `tests/e2e/goal-wake-safety.spec.ts` | `user recovery resumes only with valid ownership` |
 | `SCN-GWS-007` | Snooze/cancellation | `tests/e2e/goal-wake-safety.spec.ts` | `snooze goal off and workflow exit override retry` |
+| `SCN-GWS-008` | Empty-turn recovery bypasses continuation cap | `router-proxy/internal/managed/embedded_goal_continuation_test.go` | `TestEmptyTurnRecoveryBypassesConsecutiveContinuationCap` |
+| `SCN-GWS-009` | Thinking-only turn empty turn accounting | `router-proxy/internal/managed/embedded_session_test.go` | `TestThinkingOnlyTurnTreatedAsEmptyTurn` |
+| `SCN-GWS-010` | Pacing preserves override prompt | `router-proxy/internal/managed/embedded_goal_continuation_test.go` | `TestEmptyTurnRecoveryPreservesPromptAcrossPacing` |
 
 Existing `tests/e2e/workflow-implicit-goals.spec.ts` is the regression target for workflow goal/lock continuity; `tests/e2e/background-workflows.spec.ts` protects independent schedule cadence. Their passing executable results are recorded separately in the delivery report and do not discharge this matrix.

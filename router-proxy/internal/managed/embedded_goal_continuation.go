@@ -34,12 +34,21 @@ func (m *Manager) validatePublishedGoalOwner(ctx context.Context, origin embedde
 
 // All automatic paths share lane-serialized attempt accounting. Checks that
 // merely suppress work never consume an attempt.
+// Empty-turn circuit-breaker re-nudges (strikes 1 and 2) are exempted from
+// the consecutive continuation cap so the agent can either recover or reach
+// strike 3 for an intentional circuit-breaker pause.
 func (m *Manager) goalAttemptAllowed(lane *managedAgentLane) bool {
-	limit := m.maxConsecutiveGoalContinuations
-	if limit <= 0 {
-		limit = defaultMaxConsecutiveGoalContinuations
+	if lane.goalOwnerInvalid || m.clock.Now().Before(lane.goalNextAttempt) {
+		return false
 	}
-	return !lane.goalOwnerInvalid && lane.consecutiveContinuations.Load() < int64(limit) && !m.clock.Now().Before(lane.goalNextAttempt)
+	emptyTurns := lane.consecutiveEmptyTurns.Load()
+	if emptyTurns > 0 && emptyTurns < 3 {
+		return true
+	}
+	if emptyTurns >= 3 {
+		return false
+	}
+	return lane.consecutiveContinuations.Load() < m.goalContinuationLimit()
 }
 
 func (m *Manager) settleGoalAttempt(lane *managedAgentLane) {
@@ -146,8 +155,14 @@ func (m *Manager) dispatchEmbeddedGoalContinuation(binding store.EmbeddedBinding
 	m.scheduleEmbeddedGoalContinuation(binding, key, m.clock.Now().Add(delay))
 }
 
+// scheduleEmbeddedGoalContinuation schedules an automatic goal continuation wake-up at the specified due time.
 func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time) {
-	m.scheduleEmbeddedGoalWake(binding, key, due, func() { m.startEmbeddedGoalContinuation(binding, key) })
+	m.scheduleEmbeddedGoalContinuationWithPrompt(binding, key, due, "")
+}
+
+// scheduleEmbeddedGoalContinuationWithPrompt schedules a goal continuation wake-up with an optional custom prompt override at the specified due time.
+func (m *Manager) scheduleEmbeddedGoalContinuationWithPrompt(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time, prompt string) {
+	m.scheduleEmbeddedGoalWake(binding, key, due, func() { m.startEmbeddedGoalContinuationWithPrompt(binding, key, prompt) })
 }
 
 func (m *Manager) scheduleEmbeddedGoalWake(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time, wake func()) {
@@ -224,7 +239,7 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	defer lane.serial.Unlock()
 	if !m.goalAttemptAllowed(lane) {
 		if !lane.goalOwnerInvalid && m.clock.Now().Before(lane.goalNextAttempt) {
-			m.scheduleEmbeddedGoalContinuation(binding, key, lane.goalNextAttempt)
+			m.scheduleEmbeddedGoalContinuationWithPrompt(binding, key, lane.goalNextAttempt, overridePrompt)
 		}
 		return
 	}
@@ -241,14 +256,6 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	}
 	if curAgent, err := m.store.ManagedAgent(m.runCtx, binding.AgentID); err == nil && curAgent != nil && curAgent.Blocked {
 		log.Printf("[embedded:%s] Suppressing goal continuation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
-		return
-	}
-	maxContinuations := m.maxConsecutiveGoalContinuations
-	if maxContinuations <= 0 {
-		maxContinuations = defaultMaxConsecutiveGoalContinuations
-	}
-	if lane.consecutiveContinuations.Load() >= int64(maxContinuations) {
-		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations.Load())
 		return
 	}
 	lane.selection.Lock()

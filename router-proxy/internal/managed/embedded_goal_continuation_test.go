@@ -926,3 +926,140 @@ func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
 			agent.LifecycleState == "failed" && !agent.AcceptingPrompts
 	}, 3*time.Second, 10*time.Millisecond)
 }
+
+func createTestReservedContinuation(t *testing.T, ctx context.Context, f *failureFixture, owner embeddedOwner, turnKey string) store.EmbeddedGoalEvaluationKey {
+	userBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "step " + turnKey}}})
+	require.NoError(t, err)
+	user, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "user", userBody)
+	require.NoError(t, err)
+	require.NoError(t, f.db.EnterEmbeddedNonMailProviderTurn(ctx, owner.binding, user.Sequence, user.Digest))
+	_, _, err = f.db.CommitEmbeddedGoalAppliedReceipt(ctx, owner.binding, store.EmbeddedGoalAppliedReceiptRequest{
+		TurnKey: turnKey, TurnEntrySeq: user.Sequence, TurnEntryDigest: user.Digest, GoalRevision: 1,
+	})
+	require.NoError(t, err)
+	asstBody, err := json.Marshal(ai.AssistantMessage{Content: ai.ContentList{ai.TextContent{Text: "asst " + turnKey}}, StopReason: ai.StopStop})
+	require.NoError(t, err)
+	final, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "assistant", asstBody)
+	require.NoError(t, err)
+	key := store.EmbeddedGoalEvaluationKey{UserSeq: user.Sequence, UserDigest: user.Digest, GoalRevision: 1, FinalSeq: final.Sequence, FinalDigest: final.Digest}
+	_, claimed, err := f.db.ClaimEmbeddedGoalEvaluation(ctx, owner.binding, key)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	token, err := f.db.EnterEmbeddedGoalEvaluationExecution(ctx, owner.binding, key)
+	require.NoError(t, err)
+	_, changed, err := f.db.CompleteEmbeddedGoalEvaluation(ctx, owner.binding, key, store.EmbeddedGoalEvaluationNotDone, "not done "+turnKey)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NoError(t, f.db.ClearEmbeddedExecution(ctx, owner.binding, token))
+	return key
+}
+
+func TestEmptyTurnRecoveryBypassesConsecutiveContinuationCap(t *testing.T) {
+	f := newFailureFixture(t)
+	lane := f.m.laneFor("test-agent")
+
+	// Strike 1 at cap (consecutiveContinuations = 20, emptyTurns = 1) -> allowed
+	lane.goalOwnerInvalid = false
+	lane.goalNextAttempt = f.clock.Now()
+	lane.consecutiveContinuations.Store(20)
+	lane.consecutiveEmptyTurns.Store(1)
+	require.True(t, f.m.goalAttemptAllowed(lane), "strike 1 at cap must be allowed")
+
+	// Strike 2 at cap (consecutiveContinuations = 20, emptyTurns = 2) -> allowed
+	lane.consecutiveContinuations.Store(20)
+	lane.consecutiveEmptyTurns.Store(2)
+	require.True(t, f.m.goalAttemptAllowed(lane), "strike 2 at cap must be allowed")
+
+	// Strike 3 (consecutiveContinuations = 20, emptyTurns = 3) -> blocked
+	lane.consecutiveContinuations.Store(20)
+	lane.consecutiveEmptyTurns.Store(3)
+	require.False(t, f.m.goalAttemptAllowed(lane), "strike 3 at cap must be blocked")
+
+	// Strike 3 below cap (consecutiveContinuations = 5, emptyTurns = 3) -> blocked
+	lane.consecutiveContinuations.Store(5)
+	lane.consecutiveEmptyTurns.Store(3)
+	require.False(t, f.m.goalAttemptAllowed(lane), "strike 3 below cap must be blocked")
+
+	// Strike 0 at cap (consecutiveContinuations = 20, emptyTurns = 0) -> blocked
+	lane.consecutiveContinuations.Store(20)
+	lane.consecutiveEmptyTurns.Store(0)
+	require.False(t, f.m.goalAttemptAllowed(lane), "strike 0 at cap must be blocked")
+
+	// Strike 0 below cap (consecutiveContinuations = 5, emptyTurns = 0) -> allowed
+	lane.consecutiveContinuations.Store(5)
+	lane.consecutiveEmptyTurns.Store(0)
+	require.True(t, f.m.goalAttemptAllowed(lane), "strike 0 below cap must be allowed")
+
+	// Owner invalid -> blocked
+	lane.consecutiveContinuations.Store(5)
+	lane.consecutiveEmptyTurns.Store(0)
+	lane.goalOwnerInvalid = true
+	require.False(t, f.m.goalAttemptAllowed(lane), "owner invalid must be blocked")
+	lane.goalOwnerInvalid = false
+
+	// Pacing delay active -> blocked
+	lane.goalNextAttempt = f.clock.Now().Add(10 * time.Second)
+	require.False(t, f.m.goalAttemptAllowed(lane), "pacing delay active must be blocked")
+}
+
+func TestEmptyTurnRecoveryPreservesPromptAcrossPacing(t *testing.T) {
+	ctx := context.Background()
+	f := newFailureFixture(t)
+
+	var receivedPrompts []string
+	var promptsMu sync.Mutex
+	f.reg.SetResponses([]providers.FauxResponseStep{
+		f.response("startup"),
+		func(tc ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			for i := len(tc.Messages) - 1; i >= 0; i-- {
+				if u, ok := tc.Messages[i].(ai.UserMessage); ok {
+					for _, c := range u.Content {
+						if text, ok := c.(ai.TextContent); ok {
+							promptsMu.Lock()
+							receivedPrompts = append(receivedPrompts, text.Text)
+							promptsMu.Unlock()
+						}
+					}
+					break
+				}
+			}
+			f.calls.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "pacing handled"}}, ai.StopStop)
+		},
+	})
+
+	owner := f.launch(t, "start")
+	f.m.startWG.Wait()
+
+	_, err := f.raw.Exec(`UPDATE managed_agent_policies SET goal_enabled=1,goal_text='test goal',desired_revision=1,applied_revision=1,projection_state='applied' WHERE agent_id=?`, owner.binding.AgentID)
+	require.NoError(t, err)
+
+	lane := f.m.laneFor(owner.binding.AgentID)
+	lane.consecutiveContinuations.Store(20)
+	lane.consecutiveEmptyTurns.Store(1)
+	lane.goalNextAttempt = f.clock.Now().Add(10 * time.Second)
+
+	key := createTestReservedContinuation(t, ctx, f, owner, "paced-key")
+	expectedPrompt := "You emitted an empty response without taking action. You must take concrete action now."
+
+	f.m.startEmbeddedGoalContinuationWithPrompt(owner.binding, key, expectedPrompt)
+	f.laneBarrier(t, owner.binding.AgentID)
+
+	// Before advancing clock, no continuation turn should have run (only startup turn = 1 call)
+	require.EqualValues(t, 1, f.calls.Load(), "pacing must delay continuation attempt")
+
+	// Advance clock by 10s to fire scheduled continuation
+	require.NoError(t, f.clock.Advance(10*time.Second))
+
+	// Continuation turn should run now
+	require.Eventually(t, func() bool {
+		return f.calls.Load() == 2
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// Verify that the prompt received by the provider was the preserved override prompt!
+	promptsMu.Lock()
+	defer promptsMu.Unlock()
+	require.NotEmpty(t, receivedPrompts)
+	require.Equal(t, expectedPrompt, receivedPrompts[0], "scheduled empty-turn re-nudge must preserve overridePrompt across pacing delay")
+}
+

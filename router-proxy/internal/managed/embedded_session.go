@@ -1999,14 +1999,10 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 							hasText = true
 						}
 					}
-				case ai.ThinkingContent:
-					if strings.TrimSpace(c.Thinking) != "" {
-						hasText = true
-					}
-				case *ai.ThinkingContent:
-					if c != nil && strings.TrimSpace(c.Thinking) != "" {
-						hasText = true
-					}
+				case ai.ThinkingContent, *ai.ThinkingContent:
+					// ai.ThinkingContent does not set hasText = true because thinking tokens
+					// represent internal chain of thought, not visible text or actionable progress;
+					// thinking-only turns are evaluated as empty turns under the circuit breaker.
 				}
 			}
 		case *ai.AssistantMessage:
@@ -2014,10 +2010,16 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				for _, part := range m.Content {
 					switch c := part.(type) {
 					case ai.ToolCall:
+						if c.Name == "goal_snooze" {
+							calledGoalSnooze = true
+						}
 						if c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 							toolCalls++
 						}
 					case *ai.ToolCall:
+						if c != nil && c.Name == "goal_snooze" {
+							calledGoalSnooze = true
+						}
 						if c != nil && c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 							toolCalls++
 						}
@@ -2033,14 +2035,10 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 								hasText = true
 							}
 						}
-					case ai.ThinkingContent:
-						if strings.TrimSpace(c.Thinking) != "" {
-							hasText = true
-						}
-					case *ai.ThinkingContent:
-						if c != nil && strings.TrimSpace(c.Thinking) != "" {
-							hasText = true
-						}
+					case ai.ThinkingContent, *ai.ThinkingContent:
+						// ai.ThinkingContent does not set hasText = true because thinking tokens
+						// represent internal chain of thought, not visible text or actionable progress;
+						// thinking-only turns are evaluated as empty turns under the circuit breaker.
 					}
 				}
 			}

@@ -178,3 +178,140 @@ func TestEmbeddedProductionSessionColdReopen(t *testing.T) {
 	require.Zero(t, processes.Load())
 	require.Zero(t, rpcs.Load())
 }
+
+func TestThinkingOnlyTurnTreatedAsEmptyTurn(t *testing.T) {
+	ctx := context.Background()
+	f := newFailureFixture(t)
+	owner := f.launch(t, "")
+	f.m.startWG.Wait()
+
+	_, err := f.raw.Exec(`UPDATE managed_agent_policies SET goal_enabled=1,goal_text='test goal',desired_revision=1,applied_revision=1,projection_state='applied' WHERE agent_id=?`, owner.binding.AgentID)
+	require.NoError(t, err)
+
+	// Case 1: Assistant message with only ai.ThinkingContent
+	userBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "work on goal"}}})
+	require.NoError(t, err)
+	user, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "user", userBody)
+	require.NoError(t, err)
+	require.NoError(t, f.db.EnterEmbeddedNonMailProviderTurn(ctx, owner.binding, user.Sequence, user.Digest))
+	receipt, _, err := f.db.CommitEmbeddedGoalAppliedReceipt(ctx, owner.binding, store.EmbeddedGoalAppliedReceiptRequest{TurnKey: "thinking-empty-1", TurnEntrySeq: user.Sequence, TurnEntryDigest: user.Digest, GoalRevision: 1})
+	require.NoError(t, err)
+
+	asstBody, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{ai.ThinkingContent{Thinking: "I am only thinking, emitting no action or text."}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	final, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "assistant", asstBody)
+	require.NoError(t, err)
+
+	lane := f.m.laneFor(owner.binding.AgentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	lane.consecutiveEmptyTurns.Store(0)
+
+	p := &embeddedPersistence{
+		turnSeq:    user.Sequence,
+		turnDigest: user.Digest,
+		seq:        final.Sequence,
+		digest:     final.Digest,
+	}
+
+	err = f.m.evaluateEmbeddedTurn(ctx, owner.binding, p, &receipt, nil, nil)
+	require.NoError(t, err)
+
+	// Thinking-only turn must be treated as an empty turn: consecutiveEmptyTurns incremented to 1
+	require.EqualValues(t, 1, lane.consecutiveEmptyTurns.Load(), "thinking-only turn must increment consecutiveEmptyTurns")
+
+	// Case 2: Pointer variant *ai.ThinkingContent
+	userPtrBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "pointer thinking turn"}}})
+	require.NoError(t, err)
+	userPtr, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "user", userPtrBody)
+	require.NoError(t, err)
+	require.NoError(t, f.db.EnterEmbeddedNonMailProviderTurn(ctx, owner.binding, userPtr.Sequence, userPtr.Digest))
+	receiptPtr, _, err := f.db.CommitEmbeddedGoalAppliedReceipt(ctx, owner.binding, store.EmbeddedGoalAppliedReceiptRequest{TurnKey: "thinking-ptr-turn", TurnEntrySeq: userPtr.Sequence, TurnEntryDigest: userPtr.Digest, GoalRevision: 1})
+	require.NoError(t, err)
+
+	asstPtrBody, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{&ai.ThinkingContent{Thinking: "I am only thinking via pointer."}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	finalPtr, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "assistant", asstPtrBody)
+	require.NoError(t, err)
+
+	lane.consecutiveEmptyTurns.Store(0)
+	pPtr := &embeddedPersistence{
+		turnSeq:    userPtr.Sequence,
+		turnDigest: userPtr.Digest,
+		seq:        finalPtr.Sequence,
+		digest:     finalPtr.Digest,
+	}
+	err = f.m.evaluateEmbeddedTurn(ctx, owner.binding, pPtr, &receiptPtr, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, lane.consecutiveEmptyTurns.Load(), "pointer *ai.ThinkingContent must increment consecutiveEmptyTurns")
+
+	// Case 3: Turn with actual text resets consecutiveEmptyTurns to 0
+	user2Body, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "next step"}}})
+	require.NoError(t, err)
+	user2, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "user", user2Body)
+	require.NoError(t, err)
+	require.NoError(t, f.db.EnterEmbeddedNonMailProviderTurn(ctx, owner.binding, user2.Sequence, user2.Digest))
+	receipt2, _, err := f.db.CommitEmbeddedGoalAppliedReceipt(ctx, owner.binding, store.EmbeddedGoalAppliedReceiptRequest{TurnKey: "text-turn-2", TurnEntrySeq: user2.Sequence, TurnEntryDigest: user2.Digest, GoalRevision: 1})
+	require.NoError(t, err)
+
+	asst2Body, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{ai.ThinkingContent{Thinking: "pondering"}, ai.TextContent{Text: "actual response"}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	final2, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "assistant", asst2Body)
+	require.NoError(t, err)
+
+	p2 := &embeddedPersistence{
+		turnSeq:    user2.Sequence,
+		turnDigest: user2.Digest,
+		seq:        final2.Sequence,
+		digest:     final2.Digest,
+	}
+
+	err = f.m.evaluateEmbeddedTurn(ctx, owner.binding, p2, &receipt2, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, lane.consecutiveEmptyTurns.Load(), "turn with real text must reset consecutiveEmptyTurns to 0")
+
+	// Case 4: Strike 3 (consecutiveEmptyTurns = 2 + thinking-only turn) trips circuit breaker, increments to 3, and returns without launching continuation
+	user3Body, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "strike 3 attempt"}}})
+	require.NoError(t, err)
+	user3, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "user", user3Body)
+	require.NoError(t, err)
+	require.NoError(t, f.db.EnterEmbeddedNonMailProviderTurn(ctx, owner.binding, user3.Sequence, user3.Digest))
+	receipt3, _, err := f.db.CommitEmbeddedGoalAppliedReceipt(ctx, owner.binding, store.EmbeddedGoalAppliedReceiptRequest{TurnKey: "strike-3-turn", TurnEntrySeq: user3.Sequence, TurnEntryDigest: user3.Digest, GoalRevision: 1})
+	require.NoError(t, err)
+
+	asst3Body, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{&ai.ThinkingContent{Thinking: "thinking on strike 3"}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	final3, err := f.db.AppendEmbeddedEntry(ctx, owner.binding, "assistant", asst3Body)
+	require.NoError(t, err)
+
+	lane.consecutiveEmptyTurns.Store(2)
+	p3 := &embeddedPersistence{
+		turnSeq:    user3.Sequence,
+		turnDigest: user3.Digest,
+		seq:        final3.Sequence,
+		digest:     final3.Digest,
+	}
+
+	f.m.retireEmbeddedGoalTimer(owner.binding.AgentID)
+	err = f.m.evaluateEmbeddedTurn(ctx, owner.binding, p3, &receipt3, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, lane.consecutiveEmptyTurns.Load(), "strike 3 must increment consecutiveEmptyTurns to 3")
+
+	f.m.mu.Lock()
+	timer := f.m.embeddedGoalTimers[owner.binding.AgentID]
+	f.m.mu.Unlock()
+	require.Nil(t, timer, "strike 3 circuit breaker must return without launching or scheduling continuation")
+}
+
