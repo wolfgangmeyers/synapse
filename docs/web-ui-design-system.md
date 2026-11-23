@@ -141,6 +141,13 @@ All icon buttons in the conversation header toolbar must use the standardized `H
 
 ---
 
+### Conversation Links Widget (`ConversationLinks.tsx`)
+- A link-icon `HeaderActionButton` (blue when links exist, count in the label) opens a "Links" dialog listing hyperlinks shared by the user or the agent. Markdown links show their label; plain URLs show a truncated `host/path` preview; duplicates collapse to the most recent mention.
+- Follows the list vs. form rule below: the list view has a "+ Add link" button, and a separate form view (URL, optional label, Cancel/Save) replaces it. Individual links have a remove button; "Clear all" empties the list.
+- State is session-only and in memory (no agent-facing tools): at most 200 manual links per agent and the 20 most recently used agents are retained.
+
+---
+
 ## 4. Timeline & Activity Cards
 
 The conversation stream (`Conversation.tsx`, `MessageList.tsx`, `CompleteTimelineEntry.tsx`) balances narrative human-agent dialogue with machine tool execution.

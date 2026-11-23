@@ -7754,6 +7754,22 @@ select.form-control option,
 .workflow-journal-timeline summary { cursor: pointer; color: #9ed5ff; }
 @media (max-width: 650px) { .workflow-journal-layout { grid-template-columns: 1fr; } .workflow-journal-dialog { width: 96vw; } }
 
+/* Conversation Links widget */
+.links-dialog { width: min(560px, calc(100vw - 32px)); }
+.links-toolbar { justify-content: flex-end; margin: 12px 0; }
+.links-add-form { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.links-add-form label { display: flex; flex-direction: column; gap: 4px; color: #94a3b8; font-size: 13px; }
+.links-add-form input { padding: 8px 10px; }
+.links-error { color: #f87171; font-size: 13px; margin: 0 0 8px; }
+.links-empty { color: #94a3b8; font-size: 13px; }
+.links-list { list-style: none; margin: 0; padding: 0; max-height: 50dvh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.links-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.links-item a { flex: 1; min-width: 0; display: flex; flex-direction: column; color: #93c5fd; text-decoration: none; }
+.links-item a:hover .links-item-label { text-decoration: underline; }
+.links-item-label, .links-item-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.links-item-url { color: #94a3b8; font-size: 12px; }
+.links-actions { justify-content: flex-end; margin-top: 12px; }
+
 /* Broadcast Message Dialog */
 .broadcast-dialog {
   width: min(640px, calc(100vw - 32px));

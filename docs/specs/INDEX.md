@@ -195,4 +195,5 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 | `SPEC-AGENT-TERMINATION-DEADLOCK-001` | Agent Termination Deadlock Resilience | `AgentManagement` | [`agent-termination-deadlock-resilience.spec.md`](./agent-termination-deadlock-resilience.spec.md) | `tests/e2e/agent-termination-deadlock.spec.ts` | `Draft` |
 
 | `SPEC-EMBEDDED-ORDINARY-RESTART-001` | Embedded Ordinary Restart | `AgentManagement` | [`embedded-ordinary-restart.spec.md`](./embedded-ordinary-restart.spec.md) | `tests/e2e/embedded-active-restart.spec.ts`, `tests/e2e/individual-restart.spec.ts` | `Active` |
+| `SPEC-CONV-LINKS-001` | Conversation Links Widget | `Conversation` | [`conversation-links.spec.md`](./conversation-links.spec.md) | `tests/e2e/conversation-links.spec.ts` | `Active` |
 - [Embedded restart concurrent replay](embedded-restart-replay-race.spec.md) — regression spec; unit coverage, E2E not added for this scoped fix.
