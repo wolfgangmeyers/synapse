@@ -901,6 +901,8 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     });
   };
 
+  const handleWorktreeCheck = useCallback((path: string, options?: { includeStatus?: boolean }) => session.transport.http.worktreeCheck(path, options), [session.transport.http]);
+
   const isConnected = session.state.connection === "connected";
 
   if (currentRoute === "workflows") {
@@ -979,7 +981,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
     {terminateTargetAgent ? <TerminateConfirmationDialog open={dialog === "terminate-confirmation"} agent={terminateTargetAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onConfirm={(agentId, options) => manageAction(agentId, "terminate", options)} onWorktreeCheck={(path: string) => session.transport.http.worktreeCheck(path)} /> : null}
     <BroadcastMessageDialog open={dialog === "broadcast-message"} client={session.transport.http} currentAgentId={resolvedAgentId} agents={visibleAgents} onClose={() => setDialog(undefined)} />
-    <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} onWorktreeCheck={useCallback((path: string, options?: { includeStatus?: boolean }) => session.transport.http.worktreeCheck(path, options), [session.transport.http])} />
+    <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} onWorktreeCheck={handleWorktreeCheck} />
     {journalAgentId && <WorkflowJournalModal agentId={journalAgentId} client={session.transport.http} onClose={() => setJournalAgentId(null)} />}
     {progressModalAgentId && <ProgressHistoryModal agentId={progressModalAgentId} client={session.transport.http} onClose={() => setProgressModalAgentId(null)} />}
   </>;
