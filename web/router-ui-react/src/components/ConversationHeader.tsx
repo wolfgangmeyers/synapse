@@ -31,6 +31,7 @@ export interface ConversationHeaderProps {
   activeReminderCount?: number | undefined;
   arrival?: Arrival | undefined;
   modelControls?: ReactNode;
+  linksControl?: ReactNode;
   promptControls?: ReactNode;
   conversationView?: ConversationView | undefined;
   onConversationViewChange?: ((view: ConversationView) => void) | undefined;
@@ -149,7 +150,7 @@ async function urgencyDeadline<T>(request: Promise<T>): Promise<T> {
   }
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow, onOpenWorkflowJournal }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, linksControl, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow, onOpenWorkflowJournal }: ConversationHeaderProps): ReactElement {
 
   const isClaude = isClaudeCodeAgent(agent);
   const isManaged = isManagedAgent(agent);
@@ -827,6 +828,8 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                     activeTone="red"
                   />
                 ) : null}
+
+                {agent ? linksControl : null}
 
                 {agent ? (
                   <div style={{ position: "relative" }}>
