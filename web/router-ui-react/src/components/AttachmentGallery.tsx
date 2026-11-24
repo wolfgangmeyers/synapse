@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement } from "react";
+import { createPortal } from "react-dom";
 import type { MessageAttachment } from "../domain/history";
 import { cachedImage } from "../persistence/history-repository";
 
@@ -54,6 +55,71 @@ export function AttachmentGallery({ attachments = [], routerUrl }: AttachmentGal
     const cached = typeof attachment.cacheKey === "string" ? cachedUrls[attachment.cacheKey] : undefined;
     return { attachment, url: cached ?? urlFor(attachment, routerUrl) };
   }).filter((item): item is { attachment: MessageAttachment; url: string } => item.url.startsWith("data:") || /^https?:\/\//.test(item.url) || item.url.startsWith("blob:") || item.url.startsWith("/v1/attachments/"));
+
+  // Escape key handler and body scroll lock while modal is open.
+  // Preserves original body overflow and restores it cleanly on dismissal or unmount.
+  useEffect(() => {
+    if (!selected) return;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setSelected(undefined);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [selected]);
+
   if (usable.length === 0) return null;
-  return <><div className="bubble-images" aria-label="Message images">{usable.slice(0, 3).map(({ attachment, url }, index) => <button type="button" key={`${url}-${index}`} className="attachment-image-button attachment-thumb-btn" onClick={() => setSelected(url)} aria-label={`Open ${attachment.name ?? `image ${index + 1}`}`}><img src={url} alt={attachment.name ?? `Attachment ${index + 1}`} /></button>)}</div>{selected ? <div className="image-lightbox" role="dialog" aria-label="Image preview" onClick={() => setSelected(undefined)}><img src={selected} alt="Full-size attachment" /><button type="button" className="image-lightbox-close" onClick={() => setSelected(undefined)} aria-label="Close image preview">×</button></div> : null}</>;
+  return (
+    <>
+      <div className="bubble-images" aria-label="Message images">
+        {usable.slice(0, 3).map(({ attachment, url }, index) => (
+          <button
+            type="button"
+            key={`${url}-${index}`}
+            className="attachment-image-button attachment-thumb-btn"
+            onClick={() => setSelected(url)}
+            aria-label={`Open ${attachment.name ?? `image ${index + 1}`}`}
+          >
+            <img src={url} alt={attachment.name ?? `Attachment ${index + 1}`} />
+          </button>
+        ))}
+      </div>
+      {selected
+        ? createPortal(
+            // Portaled to document.body to avoid message bubble stacking context clipping
+            // and guarantee fixed viewport overlay positioning above all application layers.
+            <div
+              className="image-lightbox"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Image preview"
+              onClick={() => setSelected(undefined)}
+            >
+              <button
+                type="button"
+                autoFocus
+                className="icon-btn-round image-lightbox-close"
+                onClick={() => setSelected(undefined)}
+                aria-label="Close image preview"
+              >
+                <i className="fa-solid fa-xmark" aria-hidden="true" />
+              </button>
+              {/* stopPropagation prevents clicks on the preview image itself from dismissing the backdrop */}
+              <img
+                src={selected}
+                alt="Full-size attachment"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  );
 }

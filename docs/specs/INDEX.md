@@ -13,7 +13,7 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-CONV-001` | Feed Rendering & Real-Time Event Streaming | `Conversation` | [`conversation-timeline.md`](./conversation-timeline.md) | `tests/e2e/conversation-feed.spec.ts`, `tests/e2e/conversation-architecture-simplification.spec.ts` (partial coverage) | `Active` |
-| `SPEC-CONV-002` | Attachments & Thumbnail Gallery | `Conversation` | [`conv-attachments.spec.md`](./conv-attachments.spec.md) | `tests/e2e/conversation-attachments.spec.ts` (planned) | Spec missing |
+| `SPEC-CONV-002` | Attachments & Thumbnail Gallery | `Conversation` | [`conv-attachments.spec.md`](./conv-attachments.spec.md) | `tests/e2e/conversation-attachments.spec.ts` | `Active` |
 | `SPEC-CONV-003` | Scroll Anchoring & Upward Pagination | `Conversation` | [`conv-scroll-and-pagination.spec.md`](./conv-scroll-and-pagination.spec.md) | `tests/e2e/conversation-scroll-and-pagination.spec.ts`, `tests/e2e/conversation-scroll-regressions.spec.ts` | `Active` |
 | `SPEC-CONV-004` | Composer Input Isolation & Drafts | `Composer` | [`conv-composer-isolation.spec.md`](./conv-composer-isolation.spec.md) | `tests/e2e/conversation-composer-isolation.spec.ts` (planned) | Spec missing |
 | `SPEC-CONV-005` | Mailbox Envelope Cards | `Mailbox` | [`conv-envelope-cards.spec.md`](./conv-envelope-cards.spec.md) | `tests/e2e/conversation-envelope-cards.spec.ts` (planned) | Spec missing |
