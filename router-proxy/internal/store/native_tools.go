@@ -18,7 +18,7 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "bash", Category: "System & Shell", Description: "Run a bash command in the current working directory", DefaultEnabled: true},
 	{ToolName: "mecha_tool_timeout", Category: "System & Shell", Description: "Temporarily extend tool execution timeout", DefaultEnabled: true},
 	{ToolName: "mecha_restart_router", Category: "System & Shell", Description: "Request a controlled restart of the mailbox router", DefaultEnabled: true},
-	{ToolName: "mecha_request_inline_tool_allowance", Category: "System & Shell", Description: "Request a temporary exception for genuinely necessary inline use of a named tool", DefaultEnabled: true},
+	{ToolName: "mecha_request_inline_tool_allowance", Category: "System & Shell", Description: "Request an inline tool allowance for a named tool (bash, edit, or write).", DefaultEnabled: true},
 
 	// Subagent Lifecycle
 	{ToolName: "subagent", Category: "Subagent Lifecycle", Description: "Launch a specialized agent for complex tasks", DefaultEnabled: true},

@@ -37,14 +37,12 @@ func TestEmbeddedInlineAllowanceLane(t *testing.T) {
 	require.Equal(t, 1, res.Remaining)
 	require.Equal(t, 0, res.AvailableWholeCredits) // 0 left in pool
 
-	// 3. Requesting when pool is empty (0 available) must fail with exact abuse message
+	// 3. Requesting when pool is empty (0 available) must fail with message
 	_, err = lane.grantInlineAllowance("write", 1, baseTime)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Insufficient inline tool credits: requested 1 credit(s), but only 0 whole credit(s) are available")
 	require.Contains(t, err.Error(), "The pool is exhausted.")
 	require.Contains(t, err.Error(), "Credits replenish at 1 credit per minute up to a maximum of 3 credits.")
-	require.Contains(t, err.Error(), "ATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool.")
-	require.Contains(t, err.Error(), "Read that again: YOU SHOULD BE USING SUBAGENTS INSTEAD.")
 
 	// 4. Advance time by 60 seconds (1 minute = 1 replenished credit)
 	tPlus60s := baseTime.Add(60 * time.Second)
@@ -139,6 +137,7 @@ func TestEmbeddedRequestInlineToolAllowanceTool(t *testing.T) {
 		Cwd:              t.TempDir(),
 		SelectedModel:    store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
 		Runtime:          "embedded",
+		AllowInlineTools: true,
 		DesiredState:     "running",
 		LifecycleState:   "running",
 		ActivityState:    "idle",
@@ -166,7 +165,7 @@ func TestEmbeddedRequestInlineToolAllowanceTool(t *testing.T) {
 	tool := mgr.embeddedRequestInlineToolAllowanceTool(owner)
 	require.Equal(t, InlineToolAllowanceToolName, tool.Name)
 	require.Equal(t, InlineToolAllowanceToolDesc, tool.Description)
-	require.Contains(t, tool.PromptGuidelines, "Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.")
+	require.Empty(t, tool.PromptGuidelines)
 
 	// Test validation: missing params
 	res, err := tool.Execute(ctx, "call-1", map[string]any{}, nil)
@@ -177,11 +176,21 @@ func TestEmbeddedRequestInlineToolAllowanceTool(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "usageCount must be an integer from 1 through 3")
 
-	// Test successful grant
+	// AllowInlineTools is true by default: calling mecha_request_inline_tool_allowance returns unrestricted status
+	res, err = tool.Execute(ctx, "call-unrestricted", map[string]any{"toolName": "bash", "usageCount": 2}, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	require.Equal(t, "Inline tools are unrestricted for this agent; calls to bash are permitted freely without requiring an allowance.", res.Content[0].(ai.TextContent).Text)
+
+	// Set AllowInlineTools: false to test restricted credit granting
+	err = s.SetManagedAgentAllowInlineTools(ctx, agentID, false)
+	require.NoError(t, err)
+
+	// Test successful grant for restricted agent
 	res, err = tool.Execute(ctx, "call-3", map[string]any{"toolName": "bash", "usageCount": 2}, nil)
 	require.NoError(t, err)
 	require.Len(t, res.Content, 1)
-	require.Equal(t, "Granted 2 temporary inline use(s) for bash. This allowance is an exception to the rule; subagents remain mandatory by default.", res.Content[0].(ai.TextContent).Text)
+	require.Equal(t, "Granted 2 temporary inline use(s) for bash.", res.Content[0].(ai.TextContent).Text)
 
 	// Check lane credits
 	lane := mgr.laneFor(agentID)
@@ -241,6 +250,7 @@ func TestInlineToolExecutionGate(t *testing.T) {
 		DesiredState:     "running",
 		LifecycleState:   "running",
 		ActivityState:    "idle",
+		AllowInlineTools: false,
 		ManifestRevision: 1,
 		ManifestHash:     "manifest-sha",
 		CreatedAt:        "2026-09-01T12:00:00Z",

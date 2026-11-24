@@ -36,7 +36,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "get_subagent_result", Name: "get_subagent_result", Category: "subagents", Description: "Snapshot subagent outputs"},
 	{ID: "steer_subagent", Name: "steer_subagent", Category: "subagents", Description: "Send steering messages to subagents"},
 	{ID: "list_subagents", Name: "list_subagents", Category: "subagents", Description: "List background subagents"},
-	{ID: "mecha_request_inline_tool_allowance", Name: "mecha_request_inline_tool_allowance", Category: "system", Description: "Request a temporary exception for genuinely necessary inline use of a named tool"},
+	{ID: "mecha_request_inline_tool_allowance", Name: "mecha_request_inline_tool_allowance", Category: "system", Description: "Request an inline tool allowance for a named tool (bash, edit, or write)."},
 	{ID: "mecha_tool_timeout", Name: "mecha_tool_timeout", Category: "system", Description: "Temporarily extend tool execution timeout"},
 	{ID: "mecha_restart_router", Name: "mecha_restart_router", Category: "system", Description: "Request a controlled restart of the mailbox router"},
 	{ID: "mecha_send_image", Name: "mecha_send_image", Category: "lifecycle", Description: "Send an image to the user or another recipient"},

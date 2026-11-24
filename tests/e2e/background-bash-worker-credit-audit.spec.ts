@@ -68,7 +68,7 @@ for (const exhaustFirst of [false, true]) {
       await expect.poll(() => f.rows("SELECT activity_state FROM managed_agents WHERE agent_id=?", name)[0]?.activity_state, { timeout: 30_000 }).toBe("idle");
     }
     try {
-      await f.api("/v1/managed-agents", { name, cwd: join(f.router.root, "work"), runtime: "embedded", model });
+      await f.api("/v1/managed-agents", { name, cwd: join(f.router.root, "work"), runtime: "embedded", model, allow_inline_tools: false });
       await f.open(page);
       await expect(page.locator(`[data-agent-id="${name}"]`)).toBeVisible();
       await page.locator(`[data-agent-id="${name}"]`).click();

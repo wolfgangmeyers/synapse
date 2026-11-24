@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { test, expect } from "@playwright/test";
 import { claudeWorkersHarness } from "./claude-workers-harness";
 
@@ -27,6 +28,12 @@ test("root background tools bypass exhausted inline allowance while foreground b
     await page.locator(`[data-agent-id="${name}"]`).click();
     await f.final(page, name, "Root ready", undefined, false);
     expect(f.rows("SELECT role FROM embedded_sessions WHERE agent_id=? AND current=1", name)).toEqual([{ role: "root" }]);
+    const db = new DatabaseSync(f.router.databasePath);
+    try {
+      db.prepare("UPDATE managed_agents SET allow_inline_tools = 0 WHERE agent_id = ?").run(name);
+    } finally {
+      db.close();
+    }
     expect(f.tableRows("managed_agents", name)[0].allow_inline_tools).toBe(0);
     await f.configure({ turns_by_input: [{ contains: "Launch restricted", steps: [
       ...[1, 2, 3].map(i => call(`foreground-credit-${i}`, "bash", { command: "printf foreground-credit" })),
@@ -78,7 +85,7 @@ test("worker background tools work with inline tools disabled", async ({ page })
   };
   try {
     await f.open(page);
-    name = await f.launch(page);
+    name = await f.launch(page, { allow_inline_tools: false });
     await f.idle(name);
     expect(f.rows("SELECT role FROM embedded_sessions WHERE agent_id=? AND current=1", name)).toEqual([{ role: "worker" }]);
     expect(f.tableRows("managed_agents", name)[0].allow_inline_tools).toBe(0);

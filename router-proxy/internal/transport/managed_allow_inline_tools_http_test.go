@@ -41,6 +41,8 @@ func TestManagedAgentAllowInlineToolsHTTP(t *testing.T) {
 	defer rawDB.Close()
 
 	agentID := "agent-" + uuid.NewString()
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO agents(agent_id, first_seen_at) VALUES(?, '2026-01-01T00:00:00Z')`, agentID)
+	require.NoError(t, err)
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,'/tmp','google','gemini-3.8-flash','running','running','idle','embedded','session-1',1,'gen-1',1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, agentID, "inline-test-agent")
 	require.NoError(t, err)
 
@@ -140,6 +142,8 @@ func TestManagedAgentAllowInlineToolsHTTP(t *testing.T) {
 
 	// 8. Desired policy sync when desired policy has inline.enabled=true but allow_inline_tools=false in SQLite
 	helperID := "agent-" + uuid.NewString()
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO agents(agent_id, first_seen_at) VALUES(?, '2026-01-01T00:00:00Z')`, helperID)
+	require.NoError(t, err)
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,allow_inline_tools,created_at,updated_at) VALUES(?,?,'/tmp','google','gemini-3.8-flash','running','running','idle','embedded','session-1',1,'gen-1',1,'hash',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, helperID, "context-helper-style")
 	require.NoError(t, err)
 

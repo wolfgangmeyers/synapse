@@ -368,7 +368,7 @@
     {
       "capability_id": "mecha_request_inline_tool_allowance",
       "label": "Request inline tool allowance",
-      "description": "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default.",
+      "description": "Request a temporary exception for genuinely necessary inline use of a named tool.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -392,7 +392,6 @@
       "operation_id": "policy.inline_allowance",
       "prompt_snippet": "Request a temporary exception to the inline tool guard",
       "prompt_guidelines": [
-        "Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.",
         "Call pi__mecha_request_inline_tool_allowance through the Cursor pi bridge."
       ],
       "name": "mecha_request_inline_tool_allowance",

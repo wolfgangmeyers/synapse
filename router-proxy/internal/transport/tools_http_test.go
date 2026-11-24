@@ -366,7 +366,7 @@ func TestToolsCatalog(t *testing.T) {
 			require.Equal(t, "System & Shell", tool.Category)
 			require.False(t, tool.IsAdmin)
 			require.True(t, tool.DefaultEnabled)
-			require.Equal(t, "Request a temporary exception for genuinely necessary inline use of a named tool", tool.Description)
+			require.Equal(t, "Request an inline tool allowance for a named tool (bash, edit, or write).", tool.Description)
 		}
 		if tool.Category == "Worker Administration" || tool.IsAdmin {
 			foundAdmin = true

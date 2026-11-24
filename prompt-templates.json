@@ -88,15 +88,15 @@
     },
     {
       "name": "Subagent guidance",
-      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. \n\nAlso consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.\n\nDo not abuse the inline tool allowance, or it will be disabled.",
+      "body": "Important: Subagent Guidance\n\nConsider using subagents when appropriate for parallel execution, large refactors, or heavy exploration. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing complex steps, delegating to a subagent keeps your context from bloating and helps reduce costs and compactions. For simple edits, single commands, and quick tasks, you can freely perform them inline yourself.\n\nAlso consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.",
       "id": "ab33b08c-2a0d-405b-87fa-b2f033f88775",
-      "updated_at": "2026-08-30T18:32:59.420Z"
+      "updated_at": "2026-11-23T22:20:00.000Z"
     },
     {
       "name": "Subagent Guidance",
-      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled.\n\nAlso please set a 15 minute recurring reminder with the subagent guidance. Don't delete any existing reminders, just start this one up. Make sure to set the reminder on your own window, not the supervisor window.",
+      "body": "Important: Subagent Guidance\n\nConsider using subagents when appropriate for parallel execution, large refactors, or heavy exploration. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing complex steps, delegating to a subagent keeps your context from bloating and helps reduce costs and compactions. For simple edits, single commands, and quick tasks, you can freely perform them inline yourself.\n\nAlso consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.\n\nAlso please set a 15 minute recurring reminder with the subagent guidance. Don't delete any existing reminders, just start this one up. Make sure to set the reminder on your own window, not the supervisor window.",
       "id": "858a0a28-4053-4550-b880-2c1f3b09e4de",
-      "updated_at": "2026-09-02T23:50:01.949Z"
+      "updated_at": "2026-11-23T22:20:00.000Z"
     },
     {
       "name": "Supervisor Anxiety",

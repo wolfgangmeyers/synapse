@@ -36,7 +36,7 @@ test("managed worker launches, lists, gets and kills a real background shell", a
     const agent = await f.launch(page);
     // A parentless managed HTTP agent is a worker, not the router root.
     expect(f.rows("SELECT role FROM embedded_sessions WHERE agent_id=? AND current=1", agent)).toEqual([{ role: "worker" }]);
-    expect(f.tableRows("managed_agents", agent)[0].allow_inline_tools).toBe(0);
+    expect(f.tableRows("managed_agents", agent)[0].allow_inline_tools).toBe(1);
     await f.userTurn(page, "Launch a background shell");
     await expect.poll(async () => (await f.records()).some(row => row.kind === "catalog"),
       { message: "Claude must discover the managed MCP tool catalog" }).toBe(true);
@@ -95,7 +95,7 @@ test("managed worker launches, lists, gets and kills a real background shell", a
     const list = checkedResult(f, agent, "list_background_bash_jobs");
     expect(JSON.stringify(list)).toContain(killId);
     expect(checkedResult(f, agent, "kill_background_bash_job")).toMatchObject({ job_id: killId, status: "killed" });
-    expect(f.tableRows("managed_agents", agent)[0].allow_inline_tools).toBe(0);
+    expect(f.tableRows("managed_agents", agent)[0].allow_inline_tools).toBe(1);
     expect(f.violations).toEqual([]);
   } finally {
     await writeFile(release, "release").catch(() => {});

@@ -99,6 +99,7 @@ func (m *Manager) embeddedWorkerSpawnTool(owner embeddedOwner) agent.AgentTool {
 				Model:              selectedModel,
 				InitialInstruction: strings.TrimSpace(instruction),
 				Runtime:            "embedded",
+				AllowInlineTools:   true,
 				RequestID:          requestID,
 				CanonicalBodyHash:  hashString(string(body)),
 			}, owner)
