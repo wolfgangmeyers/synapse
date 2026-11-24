@@ -95,22 +95,18 @@ func (m *Manager) ManagedInlineToolsEnabled(ctx context.Context, agentID string)
 // IsInlineToolsAllowed returns true if the agent is permitted to execute inline tools
 // (bash, edit, write) without restrictions or allowance credits.
 func (m *Manager) IsInlineToolsAllowed(ctx context.Context, agentID string) bool {
-	if m == nil || agentID == "" {
-		return false
-	}
-	if m.store == nil {
+	if m == nil || agentID == "" || m.store == nil {
 		return false
 	}
 	targetAgent, err := m.store.ManagedAgent(ctx, agentID)
-	if err == nil && targetAgent != nil {
-		if targetAgent.ParentAgentID != "" || targetAgent.AllowInlineTools {
-			return true
-		}
+	if err != nil || targetAgent == nil {
+		return false
+	}
+	if targetAgent.ParentAgentID != "" || targetAgent.AllowInlineTools {
+		return true
 	}
 	if enabled, err := m.ManagedInlineToolsEnabled(ctx, agentID); err == nil && enabled {
-		if targetAgent != nil && !targetAgent.AllowInlineTools {
-			_ = m.store.SetManagedAgentAllowInlineTools(context.Background(), agentID, true)
-		}
+		_ = m.store.SetManagedAgentAllowInlineTools(context.Background(), agentID, true)
 		return true
 	}
 	return false

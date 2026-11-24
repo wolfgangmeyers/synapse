@@ -104,6 +104,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-WORKFLOWS-CRASH-NUDGE-001` | Workflow Crash Nudge Recovery & Stopped Worker Continuations | `Workflows` | [`workflow-crash-nudge-recovery.spec.md`](./workflow-crash-nudge-recovery.spec.md) | `tests/e2e/workflow-stopped-worker-nudge.spec.ts` | `Active` |
 | `SPEC-AGENT-LAUNCH-TIMEOUT-001` | Embedded Launch Readiness and Timeout Resilience | `AgentManagement` | [`embedded-launch-readiness-and-timeout.spec.md`](./embedded-launch-readiness-and-timeout.spec.md) | `router-proxy/internal/store/managed_launch_recovery_test.go`, `router-proxy/internal/managed/embedded_failure_regression_test.go`, `tests/e2e/embedded-stale-relaunch.spec.ts` | `Accepted` |
 | `SPEC-WORKER-LIST-001` | Worker List Tool | `AgentManagement` | [`worker-list-tool.spec.md`](./worker-list-tool.spec.md) | `tests/e2e/worker-tool-actions.spec.ts` | `Active` |
+| `SPEC-SUBAGENT-RESTRICTION-REMOVAL-001` | Subagent Usage Restriction Removal | `AgentManagement` | [`remove-subagent-usage-restriction.spec.md`](./remove-subagent-usage-restriction.spec.md) | `router-proxy/internal/store/managed_allow_inline_tools_test.go`, `router-proxy/internal/transport/managed_allow_inline_tools_http_test.go`, `router-proxy/internal/managed/embedded_inline_allowance_test.go` | `Active` |
 
 ---
 

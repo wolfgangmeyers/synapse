@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
 import { test, expect } from "@playwright/test";
 import { claudeWorkersHarness } from "./claude-workers-harness";
@@ -28,6 +29,12 @@ test("root background calls preserve all foreground inline credits", async ({ pa
     await page.locator(`[data-agent-id="${name}"]`).click();
     await f.final(page, name, "Root ready", undefined, false);
     expect(f.rows("SELECT role FROM embedded_sessions WHERE agent_id=? AND current=1", name)).toEqual([{ role: "root" }]);
+    const db = new DatabaseSync(f.router.databasePath);
+    try {
+      db.prepare("UPDATE managed_agents SET allow_inline_tools = 0 WHERE agent_id = ?").run(name);
+    } finally {
+      db.close();
+    }
     expect(f.tableRows("managed_agents", name)[0].allow_inline_tools).toBe(0);
     await f.configure({ turns_by_input: [{ contains: "Launch restricted", steps: [
       call("background-launch", "launch_background_bash", { command: "sleep 180" }),

@@ -581,7 +581,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		_ = json.Unmarshal(raw, &adminVal)
 	}
 	presetVal, _ := managedString(payload, "tool_preset", false)
-	var allowInlineTools bool
+	allowInlineTools := true
 	if raw, ok := payload["allow_inline_tools"]; ok {
 		if json.Unmarshal(raw, &allowInlineTools) != nil {
 			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "allow_inline_tools must be a boolean"})

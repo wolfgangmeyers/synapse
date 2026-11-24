@@ -15,9 +15,9 @@ import (
 const (
 	InlineToolPoolCapacity            = 3
 	InlineToolReplenishmentIntervalMS = 60_000
-	InlineToolBlockReason             = "Inline tool budget exhausted: you have used all available inline tool credits. Inline tools are intended only for quick, occasional actions; repeated inline tool use is disallowed. You must delegate this work to subagents instead. (Credits replenish at 1 credit per minute up to a maximum of 3, or inline tools can be toggled on.)"
+	InlineToolBlockReason             = "Inline tool budget exhausted: you have used all available inline tool credits. (Credits replenish at 1 credit per minute up to a maximum of 3, or inline tools can be toggled on.)"
 	InlineToolAllowanceToolName       = "mecha_request_inline_tool_allowance"
-	InlineToolAllowanceToolDesc       = "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default."
+	InlineToolAllowanceToolDesc       = "Request an inline tool allowance for a named tool (bash, edit, or write)."
 )
 
 type InlineAllowanceDetails struct {
@@ -85,7 +85,7 @@ func (l *managedAgentLane) grantInlineAllowance(toolName string, usageCount int,
 		if availableWholeCredits == 0 && l.inlinePoolRemainingMs == 0 {
 			exhaustedText = " The pool is exhausted."
 		}
-		errMsg := fmt.Sprintf("Insufficient inline tool credits: requested %d credit(s), but only %d whole credit(s) are available (pool currently holds %v credit(s)).%s No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 3 credits.\nATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool. You need to be using subagents instead.\n\nRead that again: YOU SHOULD BE USING SUBAGENTS INSTEAD. Continue to ignore this mandatory policy and the inline tool allowance will be disabled.", usageCount, availableWholeCredits, remainingPool, exhaustedText)
+		errMsg := fmt.Sprintf("Insufficient inline tool credits: requested %d credit(s), but only %d whole credit(s) are available (pool currently holds %v credit(s)).%s No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 3 credits.", usageCount, availableWholeCredits, remainingPool, exhaustedText)
 		return InlineAllowanceDetails{
 			ToolName:              toolName,
 			UsageCount:            usageCount,
@@ -156,12 +156,10 @@ func embeddedRequestInlineToolAllowanceSchema() *ai.Schema {
 
 func (m *Manager) embeddedRequestInlineToolAllowanceTool(owner embeddedOwner) agent.AgentTool {
 	return agent.AgentTool{
-		Name:        InlineToolAllowanceToolName,
-		Description: InlineToolAllowanceToolDesc,
-		Parameters:  embeddedRequestInlineToolAllowanceSchema(),
-		PromptGuidelines: []string{
-			"Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.",
-		},
+		Name:             InlineToolAllowanceToolName,
+		Description:      InlineToolAllowanceToolDesc,
+		Parameters:       embeddedRequestInlineToolAllowanceSchema(),
+		PromptGuidelines: nil,
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if owner.binding.AgentID != "" && owner.identity != "" && m != nil && m.store != nil {
 				_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
@@ -248,7 +246,7 @@ func (m *Manager) embeddedRequestInlineToolAllowanceTool(owner embeddedOwner) ag
 				}, err
 			}
 
-			text := fmt.Sprintf("Granted %d temporary inline use(s) for %s. This allowance is an exception to the rule; subagents remain mandatory by default.", grant.GrantedCount, grant.ToolName)
+			text := fmt.Sprintf("Granted %d temporary inline use(s) for %s.", grant.GrantedCount, grant.ToolName)
 			return agent.AgentToolResult{
 				Content: ai.ContentList{
 					ai.TextContent{Text: text},
