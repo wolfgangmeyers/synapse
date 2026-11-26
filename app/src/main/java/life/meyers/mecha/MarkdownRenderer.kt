@@ -376,6 +376,3 @@ private fun buildMarkdownAnnotatedString(inlines: List<MarkdownInline>, color: C
     appendInlines(inlines)
 }
 
-private val Ink = Color(0xFF0B0D14)
-private val TextPrimary = Color(0xFFF2F4FF)
-private val Teal = Color(0xFF78E0CD)

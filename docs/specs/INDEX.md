@@ -20,6 +20,7 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 | `SPEC-CONV-006` | Web Agent Switch History | `Conversation` | [`web-agent-switch-history.spec.md`](./web-agent-switch-history.spec.md) | `tests/e2e/web-agent-switch-history.spec.ts`, `tests/e2e/web-history-isolation-edge.spec.ts`, `tests/e2e/web-pending-send-boundary.spec.ts` (partial) | `Draft`; acceptance incomplete |
 | `SPEC-CONV-SELECTED-MANAGED-001` | Selected managed activity pagination | `Conversation` | [`managed-selected-recent-activity.spec.md`](./managed-selected-recent-activity.spec.md) | `tests/e2e/selected-managed-activity-pagination.spec.ts`, `tests/e2e/combined-history-window.spec.ts`, `tests/e2e/combined-history-live-window.spec.ts` (partial) | `Draft`; acceptance incomplete |
 | `SPEC-CONV-RESIDUAL-001` | Conversation Residual Reliability | `Conversation` | [`web-residual-reliability.spec.md`](./web-residual-reliability.spec.md) | `tests/e2e/web-residual-reliability.spec.ts` (planned) | `Draft` |
+| `SPEC-SDUI-001` | Server-Driven UI (Block Kit) Architecture & Routing | `Conversation` | [`sdui-block-kit.spec.md`](./sdui-block-kit.spec.md) | `tests/e2e/sdui-block-kit.spec.ts` | `Active` |
 
 ---
 

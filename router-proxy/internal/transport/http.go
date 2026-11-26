@@ -177,6 +177,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	if r.handleManagedHTTP(w, req) {
 		return
 	}
+	if r.handleSDUIHTTP(w, req) {
+		return
+	}
 	path := req.URL.Path
 	if strings.HasPrefix(path, "/v1/tmux/windows") {
 		if r.handleTmux(w, req) {
