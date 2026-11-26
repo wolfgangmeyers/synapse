@@ -12,7 +12,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "life.meyers.mecha"
+        applicationId = "life.meyers.mecha.sdui"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
